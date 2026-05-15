@@ -1,27 +1,106 @@
-![image](https://cloud.githubusercontent.com/assets/6544511/22624161/934dba64-eb27-11e6-8f78-46c902e96e1b.png)
-========
 
-**XXMI DLL** is a fork of [3dmigoto](https://github.com/bo3b/3Dmigoto/), a Direct3D modding tool. Developed as part of the **XXMI Project** by the [AGMG Community](https://discord.gg/agmg), it serves as a core component of the [XXMI Launcher](https://github.com/SpectrumQT/XXMI-Launcher). This fork focuses on streamlining the original, enhances compatibility and introduces performance and usability improvements.
+# 3DMigoto DX12 - 开发指南
 
-## Key differences
+## 📋 环境要求
 
-* Legacy projects have been removed from the solution.
-* All stereoscopic (3D) features have been stripped, making this fork effectively a "2Dmigoto".
-* Codebase has been updated for compatibility with **Visual Studio 2022**.
+| 依赖 | 说明 |
+|------|------|
+| **Visual Studio 2022+** | 需要安装 **C++ 桌面开发** 工作负载（MSVC、Windows SDK） |
+| **CMake 3.20+** | 构建系统生成器（推荐 v4.3+） |
+| **Ninja** | 高速构建工具（可选，推荐） |
+| **VS Code** | 推荐安装 **C++ Extension Pack** (`ms-vscode.cpptools-extension-pack`) |
 
-## New features
+---
 
-* Micro-optimizations to reduce config reload times and main loop FPS impact.
-* UTF-8 support for file paths and namespaces.
-* Configurable buffers resizing support, also known as "vertex limit raise" (backward-compatible with GIMI `.dll` implementation).
-* GPU-to-INI scope data transfer support via `store` command (backward-compatible with GIMI `.dll` implementation).
-* Periodic auto-saving of mod settings (persistent vars are saved to `d3dx_user.ini` every 1 minute by default).
-* Support for remote DLL loading (allows the loader `.exe` to reside in a separate directory).
+## 🔧 编译方法
 
-## Special Thanks
+### 方式一：PowerShell 脚本
 
-- Chiri, [Bo3b](https://github.com/bo3b), [DarkStarSword](https://github.com/DarkStarSword) — for the monumental work behind the original 3dmigoto.
-- [SilentNightSound](https://github.com/SilentNightSound) — for pioneering AGMG D3D modding and introducing foundational GIMI DLL features.
-- [SinsOfSeven](https://github.com/SinsOfSeven) — for input on architecture decisions and original source analysis.
-- [Nurarihyon](https://github.com/NurarihyonMaou), [Scyll](https://gamebanana.com/members/2644630) — for contributions and optimization insights.
-- [Leotorrez](https://github.com/leotorrez) & [Gustav0](https://github.com/Seris0/Gustav0) — for extensive testing and tireless listening to community feedback.
+```powershell
+# Debug x64（默认）
+.\scripts\build-cmake.ps1 -Configuration Debug -Platform x64
+
+# Release x64
+.\scripts\build-cmake.ps1 -Configuration Release -Platform x64
+
+# Debug Win32
+.\scripts\build-cmake.ps1 -Configuration Debug -Platform Win32
+```
+
+编译输出目录：`x64\Debug\`、`x64\Release\`、`x32\Debug\`、`x32\Release\`
+
+### 方式二：直接使用 CMake + Ninja
+
+```powershell
+# 在 VS 开发者命令提示符中执行：
+cmake -S . -B build/debug-x64 -G Ninja -DCMAKE_BUILD_TYPE=Debug
+cmake --build build/debug-x64
+```
+
+### 方式三：CMake Presets
+
+```powershell
+cmake --preset default          # Debug x64
+cmake --build --preset default
+cmake --preset release          # Release x64
+cmake --build --preset release
+```
+
+---
+
+## 🐛 调试
+
+1. 编译 Debug 版本
+2. 将生成的 `x64\Debug\d3d11.dll` 复制到游戏目录
+3. 启动游戏
+4. 在 VS Code 中按 `F5`，选择 **Attach to Game (x64)**
+5. 在弹出的进程列表中选择游戏进程
+
+---
+
+## 📁 项目结构
+
+```
+3DMigotoDX12/
+├── CMakeLists.txt              # 根 CMake 构建文件
+├── CMakePresets.json           # CMake 预设配置
+├── cmake/                      # CMake 模块
+│   ├── CompilerOptions.cmake   # 统一编译器选项
+│   └── FindNektra.cmake        # Nektra 预编译库查找
+├── src/                        # 源代码
+│   ├── common/                 # 公共共享文件 (log.h, util.*, version.h...)
+│   ├── DirectX11/              # d3d11.dll — 主模块 (API Hook)
+│   ├── DirectXGI/              # dxgi.dll — DXGI 包装器
+│   ├── D3DCompiler_46/         # d3dcompiler_47.dll — D3DCompiler 包装器
+│   ├── D3DCompiler/            # D3DCompiler 共享代码
+│   ├── BinaryDecompiler/       # 静态库 — 二进制着色器反编译
+│   ├── D3D_Shaders/            # 独立工具 — 着色器汇编/反汇编
+│   ├── HLSLDecompiler/         # HLSL 反编译器
+│   ├── Injector/               # 3DMigoto Loader.exe
+│   └── InjectorLib/            # 3dmloader.dll (x64) / .exe (Win32)
+├── 3rdparty/                   # 第三方依赖
+│   ├── crc32c-hw-1.0.5/       # CRC32C 库 (自带 CMake)
+│   ├── DirectXTK/              # DirectX Tool Kit (自带 CMake)
+│   ├── pcre2-10.30/            # PCRE2 正则库 (自带 CMake, 可选)
+│   ├── pcre2/                  # PCRE2 预编译库 (当前使用)
+│   └── Nektra/                 # Nektra Hook Library (预编译 .lib)
+├── resources/                  # 资源文件
+│   ├── fonts/                  # 字体 (.spritefont)
+│   └── shaders/                # 测试着色器
+├── config/                     # 配置文件
+│   └── d3dx.ini
+├── Dependencies/               # 运行时依赖
+│   └── d3dcompiler_47.dll
+├── scripts/                    # 构建脚本
+│   ├── build-all.ps1           # 旧 MSBuild 脚本（兼容）
+│   └── build-cmake.ps1         # 新 CMake 构建脚本（推荐）
+└── x64/ x32/                   # 编译输出目录
+
+---
+
+## ⚡ 小提示
+
+- CMake 构建产出在 `build/cmake-*/` 目录中，最终产物自动拷贝到 `x64\Debug\` 等目录
+- 如需在 VS Code 中使用 CMake 集成，安装 `ms-vscode.cmake-tools` 扩展并选择 CMake Preset
+- 旧版 MSBuild `.vcxproj` 文件仍然保留在原始位置（根目录子文件夹），可作为备份
+- 首次使用 CMake 构建前，请确保已安装 CMake 和 Ninja：`winget install Kitware.CMake Ninja-build.Ninja`

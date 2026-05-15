@@ -5,20 +5,73 @@
             "includePath": [
                 "${workspaceFolder}",
                 "${workspaceFolder}\\BinaryDecompiler",
-                "${workspaceFolder}\\BinaryDecompiler\\include"
+                "${workspaceFolder}\\BinaryDecompiler\\include",
+                "${workspaceFolder}\\BinaryDecompiler\\internal_includes",
+                "${workspaceFolder}\\HLSLDecompiler",
+                "${workspaceFolder}\\D3D_Shaders",
+                "${workspaceFolder}\\DirectX11",
+                "${workspaceFolder}\\DirectXTK\\Inc",
+                "${workspaceFolder}\\pcre2",
+                "${workspaceFolder}\\crc32c-hw-1.0.5\\include",
+                "${workspaceFolder}\\Nektra",
+                "${workspaceFolder}\\D3DCompiler",
+                "${workspaceFolder}\\D3DCompiler_46"
             ],
             "defines": [
                 "WIN32",
-                "NDEBUG",
-                "_CONSOLE",
-                "_LIB",
+                "_WINDOWS",
+                "_USRDLL",
+                "MIGOTO_DX=11",
+                "CRC32C_STATIC=1",
+                "PCRE2_STATIC",
+                "PCRE2_CODE_UNIT_WIDTH=8",
+                "_CRT_SECURE_CPP_OVERLOAD_STANDARD_NAMES=1",
+                "_CRT_SECURE_CPP_OVERLOAD_STANDARD_NAMES_COUNT=1",
                 "_UNICODE",
-                "UNICODE"
+                "UNICODE",
+                "NDEBUG"
             ],
             "compilerPath": "C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\VC\\Tools\\MSVC\\14.44.35207\\bin\\Hostx64\\x64\\cl.exe",
             "cStandard": "c17",
             "cppStandard": "c++14",
             "intelliSenseMode": "windows-msvc-x64",
+            "configurationProvider": "ms-vscpp.ms-vscpp-tools"
+        },
+        {
+            "name": "Win32",
+            "includePath": [
+                "${workspaceFolder}",
+                "${workspaceFolder}\\BinaryDecompiler",
+                "${workspaceFolder}\\BinaryDecompiler\\include",
+                "${workspaceFolder}\\BinaryDecompiler\\internal_includes",
+                "${workspaceFolder}\\HLSLDecompiler",
+                "${workspaceFolder}\\D3D_Shaders",
+                "${workspaceFolder}\\DirectX11",
+                "${workspaceFolder}\\DirectXTK\\Inc",
+                "${workspaceFolder}\\pcre2",
+                "${workspaceFolder}\\crc32c-hw-1.0.5\\include",
+                "${workspaceFolder}\\Nektra",
+                "${workspaceFolder}\\D3DCompiler",
+                "${workspaceFolder}\\D3DCompiler_46"
+            ],
+            "defines": [
+                "WIN32",
+                "_WINDOWS",
+                "_USRDLL",
+                "MIGOTO_DX=11",
+                "CRC32C_STATIC=1",
+                "PCRE2_STATIC",
+                "PCRE2_CODE_UNIT_WIDTH=8",
+                "_CRT_SECURE_CPP_OVERLOAD_STANDARD_NAMES=1",
+                "_CRT_SECURE_CPP_OVERLOAD_STANDARD_NAMES_COUNT=1",
+                "_UNICODE",
+                "UNICODE",
+                "NDEBUG"
+            ],
+            "compilerPath": "C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\VC\\Tools\\MSVC\\14.44.35207\\bin\\Hostx64\\x86\\cl.exe",
+            "cStandard": "c17",
+            "cppStandard": "c++14",
+            "intelliSenseMode": "windows-msvc-x86",
             "configurationProvider": "ms-vscpp.ms-vscpp-tools"
         }
     ],
