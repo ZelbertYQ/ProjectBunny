@@ -3,6 +3,7 @@
 
 #include <psapi.h>
 #include <inttypes.h>
+
 #include <unordered_map>
 #include <vector>
 
@@ -97,10 +98,10 @@ static void dump_stack_trace()
 		if (GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)trace[i], &module)
 		 && GetModuleFileName(module, path, MAX_PATH)
 		 && GetModuleInformation(GetCurrentProcess(), module, &mod_info, sizeof(MODULEINFO))) {
-			LogInfo("%04x: %S+0x%"PRIxPTR"\n",
+			LogInfo("%04x: %S+0x%llx\n",
 					GetCurrentThreadId(), path, trace[i] - (uintptr_t)mod_info.lpBaseOfDll);
 		} else {
-			LogInfo("%04x: 0x%"PRIxPTR"\n",
+			LogInfo("%04x: 0x%llx\n",
 					GetCurrentThreadId(), trace[i]);
 		}
 	}
@@ -123,10 +124,10 @@ static void log_held_locks(LockStack &held_locks, std::vector<LockStack> &other_
 			if (GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)info->ret, &module)
 			 && GetModuleFileName(module, path, MAX_PATH)
 			 && GetModuleInformation(GetCurrentProcess(), module, &mod_info, sizeof(MODULEINFO))) {
-				LogInfo("%04x: EnterCriticalSection(%s) %S+0x%"PRIxPTR"\n",
+				LogInfo("%04x: EnterCriticalSection(%s) %S+0x%llx\n",
 						GetCurrentThreadId(), lock_name(info->lock, buf), path, info->ret - (uintptr_t)mod_info.lpBaseOfDll);
 			} else {
-				LogInfo("%04x: EnterCriticalSection(%s) 0x%"PRIxPTR"\n",
+				LogInfo("%04x: EnterCriticalSection(%s) 0x%llx\n",
 						GetCurrentThreadId(), lock_name(info->lock, buf), info->ret);
 			}
 		}
@@ -145,10 +146,10 @@ static void log_held_locks(LockStack &held_locks, std::vector<LockStack> &other_
 				if (GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)info->ret, &module)
 				 && GetModuleFileName(module, path, MAX_PATH)
 				 && GetModuleInformation(GetCurrentProcess(), module, &mod_info, sizeof(MODULEINFO))) {
-					LogInfo("      EnterCriticalSection(%s) %S+0x%"PRIxPTR"\n",
+					LogInfo("      EnterCriticalSection(%s) %S+0x%llx\n",
 							lock_name(info->lock, buf), path, info->ret - (uintptr_t)mod_info.lpBaseOfDll);
 				} else {
-					LogInfo("      EnterCriticalSection(%s) 0x%"PRIxPTR"\n",
+					LogInfo("      EnterCriticalSection(%s) 0x%llx\n",
 							lock_name(info->lock, buf), info->ret);
 				}
 			}
