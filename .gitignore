@@ -204,3 +204,13 @@ $RECYCLE.BIN/
 #
 # There's a great collection of .gitignore templates here:
 # https://github.com/github/gitignore
+
+# CMake build output
+/build/
+/x32/
+
+# Large 3rdparty - regenerate via CMake
+/3rdparty/DirectXTK/
+
+# VS Code
+.vscode/ipch/

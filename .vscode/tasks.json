@@ -1,16 +1,13 @@
-{
+﻿{
     "version": "2.0.0",
     "tasks": [
-        // ========================================
-        // 编译全部（调用 scripts/build-all.ps1）
-        // ========================================
         {
-            "label": "Build All (Debug|x64)",
+            "label": "CMake Build (Debug|x64)",
             "type": "shell",
             "command": "powershell",
             "args": [
                 "-File",
-                "scripts\\build-all.ps1",
+                "${workspaceFolder}\\scripts\\build-cmake.ps1",
                 "-Configuration", "Debug",
                 "-Platform", "x64"
             ],
@@ -18,139 +15,61 @@
                 "kind": "build",
                 "isDefault": true
             },
-            "problemMatcher": "$msCompile",
-            "detail": "编译所有项目 (Debug x64)"
+            "problemMatcher": [ "$msCompile" ],
+            "detail": "CMake build all (Debug x64)"
         },
         {
-            "label": "Build All (Release|x64)",
+            "label": "CMake Build (Release|x64)",
             "type": "shell",
             "command": "powershell",
             "args": [
                 "-File",
-                "scripts\\build-all.ps1",
+                "${workspaceFolder}\\scripts\\build-cmake.ps1",
                 "-Configuration", "Release",
                 "-Platform", "x64"
             ],
             "group": "build",
-            "problemMatcher": "$msCompile",
-            "detail": "编译所有项目 (Release x64)"
+            "problemMatcher": [ "$msCompile" ],
+            "detail": "CMake build all (Release x64)"
         },
         {
-            "label": "Build All (Debug|Win32)",
+            "label": "CMake Build (Debug|Win32)",
             "type": "shell",
             "command": "powershell",
             "args": [
                 "-File",
-                "scripts\\build-all.ps1",
+                "${workspaceFolder}\\scripts\\build-cmake.ps1",
                 "-Configuration", "Debug",
                 "-Platform", "Win32"
             ],
             "group": "build",
-            "problemMatcher": "$msCompile",
-            "detail": "编译所有项目 (Debug Win32)"
+            "problemMatcher": [ "$msCompile" ],
+            "detail": "CMake build all (Debug Win32)"
         },
         {
-            "label": "Build All (Release|Win32)",
+            "label": "CMake Build (Release|Win32)",
             "type": "shell",
             "command": "powershell",
             "args": [
                 "-File",
-                "scripts\\build-all.ps1",
+                "${workspaceFolder}\\scripts\\build-cmake.ps1",
                 "-Configuration", "Release",
                 "-Platform", "Win32"
             ],
             "group": "build",
-            "problemMatcher": "$msCompile",
-            "detail": "编译所有项目 (Release Win32)"
-        },
-        // ========================================
-        // 编译单个项目（type:process 直接运行 MSBuild）
-        // ========================================
-        {
-            "label": "Build DirectX11 (Release|x64)",
-            "type": "process",
-            "command": "C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\MSBuild\\Current\\Bin\\amd64\\MSBuild.exe",
-            "args": [
-                "DirectX11\\DirectX11.vcxproj",
-                "/p:Configuration=Release",
-                "/p:Platform=x64",
-                "/m"
-            ],
-            "group": "build",
-            "problemMatcher": "$msCompile",
-            "detail": "编译 DirectX11 DLL (Release x64)"
+            "problemMatcher": [ "$msCompile" ],
+            "detail": "CMake build all (Release Win32)"
         },
         {
-            "label": "Build DirectX11 (Debug|x64)",
-            "type": "process",
-            "command": "C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\MSBuild\\Current\\Bin\\amd64\\MSBuild.exe",
-            "args": [
-                "DirectX11\\DirectX11.vcxproj",
-                "/p:Configuration=Debug",
-                "/p:Platform=x64",
-                "/m"
-            ],
-            "group": "build",
-            "problemMatcher": "$msCompile",
-            "detail": "编译 DirectX11 DLL (Debug x64)"
-        },
-        {
-            "label": "Build D3DCompiler_46 (Release|x64)",
-            "type": "process",
-            "command": "C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\MSBuild\\Current\\Bin\\amd64\\MSBuild.exe",
-            "args": [
-                "D3DCompiler_46\\D3DCompiler_46.vcxproj",
-                "/p:Configuration=Release",
-                "/p:Platform=x64",
-                "/p:SolutionDir=${workspaceFolder}\\",
-                "/m"
-            ],
-            "group": "build",
-            "problemMatcher": "$msCompile",
-            "detail": "编译 D3DCompiler_46 DLL (Release x64)"
-        },
-        {
-            "label": "Build Injector (Release|x64)",
-            "type": "process",
-            "command": "C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\MSBuild\\Current\\Bin\\amd64\\MSBuild.exe",
-            "args": [
-                "Injector\\Injector.vcxproj",
-                "/p:Configuration=Release",
-                "/p:Platform=x64",                "/p:SolutionDir=${workspaceFolder}\",                "/m"
-            ],
-            "group": "build",
-            "problemMatcher": "$msCompile",
-            "detail": "编译 Injector (Release x64)"
-        },
-        {
-            "label": "Build InjectorLib (Release|x64)",
-            "type": "process",
-            "command": "C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\MSBuild\\Current\\Bin\\amd64\\MSBuild.exe",
-            "args": [
-                "InjectorLib\\InjectorLib.vcxproj",
-                "/p:Configuration=Release",
-                "/p:Platform=x64",                "/p:SolutionDir=${workspaceFolder}\",                "/m"
-            ],
-            "group": "build",
-            "problemMatcher": "$msCompile",
-            "detail": "编译 InjectorLib (Release x64)"
-        },
-        // ========================================
-        // 清理
-        // ========================================
-        {
-            "label": "Clean All",
+            "label": "CMake Clean All",
             "type": "shell",
             "command": "powershell",
             "args": [
-                "-File",
-                "scripts\\build-all.ps1",
-                "-Configuration", "Release",
-                "-Platform", "x64"
+                "-Command",
+                "Remove-Item '${workspaceFolder}\\build' -Recurse -Force -ErrorAction SilentlyContinue; Write-Host 'Cleaned'"
             ],
             "group": "none",
-            "problemMatcher": "$msCompile",
-            "detail": "清理所有项目输出"
+            "detail": "Clean CMake build cache"
         }
     ]
 }
