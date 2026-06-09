@@ -24,11 +24,12 @@ struct DumpTask
 	UINT64 sourceOffset = 0;
 	UINT64 copyBytes = 0;
 	UINT64 readbackOffset = 0;
-	D3D12_RESOURCE_STATES guessedState = D3D12_RESOURCE_STATE_COMMON;
+	D3D12_RESOURCE_STATES sourceState = D3D12_RESOURCE_STATE_COMMON;
 	bool needsBarrier = false;
 	bool isTexture = false;
 	bool ready = false;
 	bool copied = false;
+	bool stateKnown = false;
 	std::wstring fileName;
 	const char *skipNote = nullptr;
 };
@@ -94,6 +95,15 @@ static bool ResourceNeedsBarrier(const DX12DescriptorSummary &descriptor)
 			descriptor.resourceHeapType == D3D12_HEAP_TYPE_READBACK))
 		return false;
 	return true;
+}
+
+static bool StateTrackingAllowsCopy(const DX12DescriptorSummary &descriptor)
+{
+	if (descriptor.hasResourceHeapType &&
+		(descriptor.resourceHeapType == D3D12_HEAP_TYPE_UPLOAD ||
+			descriptor.resourceHeapType == D3D12_HEAP_TYPE_READBACK))
+		return true;
+	return descriptor.hasCurrentState;
 }
 
 static bool IsUploadHeapResource(const DX12DescriptorSummary &descriptor)
@@ -233,14 +243,17 @@ static bool PrepareTask(ID3D12Device *device, const DX12FrameResourceBinding &bi
 	task->binding = binding;
 	task->source = binding.descriptor.resource;
 	task->desc = binding.descriptor.resourceDesc;
-	task->guessedState = GuessSourceState(binding);
-	task->needsBarrier = unsafeCopy && ResourceNeedsBarrier(binding.descriptor);
+	task->sourceState = binding.descriptor.hasCurrentState ?
+		static_cast<D3D12_RESOURCE_STATES>(binding.descriptor.currentState) :
+		GuessSourceState(binding);
+	task->stateKnown = StateTrackingAllowsCopy(binding.descriptor);
+	if (!unsafeCopy && !task->stateKnown) {
+		task->skipNote = "state_unknown";
+		return false;
+	}
+	task->needsBarrier = ResourceNeedsBarrier(binding.descriptor);
 
 	if (task->desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D) {
-		if (!unsafeCopy) {
-			task->skipNote = "safe_mode_skips_texture_without_state_tracking";
-			return false;
-		}
 		if (task->desc.SampleDesc.Count > 1) {
 			task->skipNote = "multisampled_texture_not_supported";
 			return false;
@@ -250,10 +263,6 @@ static bool PrepareTask(ID3D12Device *device, const DX12FrameResourceBinding &bi
 			&task->textureLayout, &task->textureRows, &rowSize, &task->copyBytes);
 		task->isTexture = true;
 	} else if (task->desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER) {
-		if (!unsafeCopy && !IsUploadHeapResource(binding.descriptor)) {
-			task->skipNote = "safe_mode_skips_non_upload_buffer";
-			return false;
-		}
 		task->sourceOffset = binding.descriptor.resourceOffset;
 		task->copyBytes = binding.descriptor.viewSize ? binding.descriptor.viewSize : task->desc.Width;
 		if (task->sourceOffset + task->copyBytes > task->desc.Width)
@@ -337,7 +346,7 @@ static bool ExecuteCopyBatch(
 		if (!task.ready || !task.readback)
 			continue;
 		if (task.needsBarrier)
-			WriteResourceBarrier(commandList, task.source, task.guessedState, D3D12_RESOURCE_STATE_COPY_SOURCE);
+			WriteResourceBarrier(commandList, task.source, task.sourceState, D3D12_RESOURCE_STATE_COPY_SOURCE);
 
 		if (task.isTexture) {
 			D3D12_TEXTURE_COPY_LOCATION src = {};
@@ -356,7 +365,7 @@ static bool ExecuteCopyBatch(
 		}
 
 		if (task.needsBarrier)
-			WriteResourceBarrier(commandList, task.source, D3D12_RESOURCE_STATE_COPY_SOURCE, task.guessedState);
+			WriteResourceBarrier(commandList, task.source, D3D12_RESOURCE_STATE_COPY_SOURCE, task.sourceState);
 		task.copied = true;
 	}
 
@@ -398,11 +407,11 @@ void DX12DumpCurrentFrameResources(const wchar_t *dir)
 
 	fprintf(index, "DX12 Current Frame Resource Files\n");
 	fprintf(index, "=================================\n");
-	fprintf(index, "bindings=%zu max_resource_bytes=%llu buffer_extension=.buf unsafe_resource_copy=%u\n\n",
+	fprintf(index, "bindings=%zu max_resource_bytes=%llu buffer_extension=.buf unsafe_resource_copy=%u state_tracking=1\n\n",
 		bindings.size(), static_cast<unsigned long long>(MaxResourceDumpBytes),
 		UnsafeResourceCopyEnabled() ? 1 : 0);
 	fprintf(index,
-		"status,pso,bind_space,root_param,descriptor_kind,resource,dimension,width,height,format,gpu_va,resource_offset,copy_bytes,file,note\n");
+		"status,pso,bind_space,root_param,descriptor_kind,resource,dimension,width,height,format,gpu_va,resource_offset,copy_bytes,current_state,has_current_state,file,note\n");
 
 	ID3D12CommandQueue *queue = DX12AcquireCommandQueue();
 	ID3D12Device *device = nullptr;
@@ -485,7 +494,7 @@ void DX12DumpCurrentFrameResources(const wchar_t *dir)
 		else
 			failed++;
 
-		fprintf(index, "%s,%llu,%s,%u,%s,%p,%s,%llu,%u,%u,0x%llx,%llu,%llu,%S,%s\n",
+		fprintf(index, "%s,%llu,%s,%u,%s,%p,%s,%llu,%u,%u,0x%llx,%llu,%llu,0x%x,%u,%S,%s\n",
 			ok ? "dumped" : "failed",
 			static_cast<unsigned long long>(task.binding.psoIndex),
 			task.binding.bindSpace.c_str(),
@@ -499,6 +508,8 @@ void DX12DumpCurrentFrameResources(const wchar_t *dir)
 			static_cast<unsigned long long>(task.binding.descriptor.gpuVirtualAddress),
 			static_cast<unsigned long long>(task.sourceOffset),
 			static_cast<unsigned long long>(task.copyBytes),
+			static_cast<UINT>(task.sourceState),
+			task.stateKnown ? 1 : 0,
 			ok ? task.fileName.c_str() : L"",
 			ok ? "" : "copy_failed_or_write_failed");
 	}
@@ -512,7 +523,7 @@ void DX12DumpCurrentFrameResources(const wchar_t *dir)
 		const D3D12_RESOURCE_DESC &desc = descriptor.resourceDesc;
 		const char *dimensionName = descriptor.hasResourceDesc ?
 			ResourceDimensionName(desc.Dimension) : "NONE";
-		fprintf(index, "%s,%llu,%s,%u,%s,%p,%s,%llu,%u,%u,0x%llx,%llu,%llu,,%s\n",
+		fprintf(index, "%s,%llu,%s,%u,%s,%p,%s,%llu,%u,%u,0x%llx,%llu,%llu,0x%x,%u,,%s\n",
 			duplicate ? "duplicate" : "skipped",
 			static_cast<unsigned long long>(task.binding.psoIndex),
 			task.binding.bindSpace.c_str(),
@@ -526,6 +537,8 @@ void DX12DumpCurrentFrameResources(const wchar_t *dir)
 			static_cast<unsigned long long>(descriptor.gpuVirtualAddress),
 			static_cast<unsigned long long>(descriptor.resourceOffset),
 			static_cast<unsigned long long>(descriptor.viewSize),
+			descriptor.hasCurrentState ? descriptor.currentState : 0,
+			descriptor.hasCurrentState ? 1 : 0,
 			task.skipNote ? task.skipNote : "unsupported_or_no_resource_pointer");
 	}
 

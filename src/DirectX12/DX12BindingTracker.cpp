@@ -421,10 +421,14 @@ void DX12GetCurrentFrameResourceBindings(std::vector<DX12FrameResourceBinding> *
 	AcquireSRWLockShared(&gBindingLock);
 	events = gEvents;
 	ReleaseSRWLockShared(&gBindingLock);
+	DX12Log("Binding resources stage: events snapshot=%zu\n", events.size());
 
 	std::vector<DX12DescriptorSummary> descriptors;
 	std::vector<DX12DescriptorHeapSummary> heaps;
+	DX12Log("Binding resources stage: metadata snapshot begin\n");
 	DX12GetResourceMetadataSnapshot(nullptr, &descriptors, nullptr, &heaps);
+	DX12Log("Binding resources stage: metadata snapshot ready descriptors=%zu heaps=%zu\n",
+		descriptors.size(), heaps.size());
 
 	bindings->clear();
 	std::unordered_set<std::string> seen;
@@ -444,6 +448,8 @@ void DX12GetCurrentFrameResourceBindings(std::vector<DX12FrameResourceBinding> *
 				heaps, descriptors, &seen);
 		}
 	}
+	DX12Log("Binding resources stage: collected bindings=%zu unique=%zu\n",
+		bindings->size(), seen.size());
 }
 
 static void WriteFrameResourceFile(const wchar_t *dir, const std::vector<BindingEvent> &events)
@@ -453,13 +459,17 @@ static void WriteFrameResourceFile(const wchar_t *dir, const std::vector<Binding
 
 	std::vector<DX12DescriptorSummary> descriptors;
 	std::vector<DX12DescriptorHeapSummary> heaps;
+	DX12Log("Frame resource file stage: metadata snapshot begin events=%zu\n", events.size());
 	DX12GetResourceMetadataSnapshot(nullptr, &descriptors, nullptr, &heaps);
+	DX12Log("Frame resource file stage: metadata snapshot ready descriptors=%zu heaps=%zu\n",
+		descriptors.size(), heaps.size());
 
 	wchar_t path[MAX_PATH];
 	swprintf_s(path, L"%s\\CurrentFrameResourcesDX12.txt", dir);
 	FILE *file = _wfsopen(path, L"w", _SH_DENYNO);
 	if (!file)
 		return;
+	DX12Log("Frame resource file stage: file opened %S\n", path);
 
 	fprintf(file, "DX12 Current Frame Resources\n");
 	fprintf(file, "============================\n");
@@ -469,6 +479,7 @@ static void WriteFrameResourceFile(const wchar_t *dir, const std::vector<Binding
 		"pso,bind_space,root_param,heap,heap_type,descriptor_index,gpu_handle,cpu_handle,heap_gpu_start,descriptor_kind,resource,counter_resource,has_view_desc,resource_dimension,width,height,depth_or_array,mips,format,flags,gpu_va,view_dimension\n");
 
 	std::unordered_set<std::string> seen;
+	size_t eventRows = 0;
 	for (const BindingEvent &event : events) {
 		for (UINT i = 0; i < MaxRootParameters; ++i) {
 			WriteFrameResourceBinding(file, event, "graphics_cbv_srv_uav",
@@ -484,7 +495,10 @@ static void WriteFrameResourceFile(const wchar_t *dir, const std::vector<Binding
 				event.computeTables[i], D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER,
 				heaps, descriptors, &seen);
 		}
+		eventRows++;
 	}
+	DX12Log("Frame resource file stage: events processed=%zu bindings=%zu\n",
+		eventRows, seen.size());
 
 	fclose(file);
 	DX12Log("Current-frame resources written: %S bindings=%zu heaps=%zu descriptors=%zu\n",

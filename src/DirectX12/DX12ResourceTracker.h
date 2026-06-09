@@ -27,6 +27,8 @@ struct DX12DescriptorSummary
 	UINT64 gpuVirtualAddress = 0;
 	UINT64 resourceOffset = 0;
 	UINT64 viewSize = 0;
+	UINT currentState = 0;
+	bool hasCurrentState = false;
 	bool hasDesc = false;
 	UINT viewFormat = 0;
 	UINT viewDimension = 0;
@@ -57,6 +59,7 @@ void DX12HookResourceMetadata(ID3D12Device *device);
 void DX12RecordPsoRootSignature(
 	UINT64 psoIndex, const char *kind, ID3D12PipelineState *pipelineState,
 	ID3D12RootSignature *rootSignature);
+void DX12RecordResourceBarrier(UINT numBarriers, const D3D12_RESOURCE_BARRIER *barriers);
 void DX12GetResourceMetadataSnapshot(
 	std::vector<DX12RootSignatureSummary> *rootSignatures,
 	std::vector<DX12DescriptorSummary> *descriptors,

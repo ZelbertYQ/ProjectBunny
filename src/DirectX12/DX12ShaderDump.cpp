@@ -676,16 +676,21 @@ static void WritePsoResourceSummaryFile(
 
 	std::unordered_map<std::string, ShaderAnalysisRecord> analysesByKey;
 	analysesByKey.reserve(shaders.size());
+	DX12Log("PSO summary stage: build shader analyses shaders=%zu\n", shaders.size());
 	for (const ShaderRecord &shader : shaders) {
 		ShaderAnalysisRecord analysis;
 		BuildShaderAnalysisRecord(dir, shader, &analysis);
 		analysesByKey.emplace(MakeShaderKey(shader.stage.c_str(), shader.hash), std::move(analysis));
 	}
+	DX12Log("PSO summary stage: shader analyses ready entries=%zu\n", analysesByKey.size());
 
 	std::vector<DX12RootSignatureSummary> rootSignatures;
 	std::vector<DX12DescriptorSummary> descriptors;
 	std::vector<DX12PsoRootSummary> psoRoots;
+	DX12Log("PSO summary stage: metadata snapshot begin\n");
 	DX12GetResourceMetadataSnapshot(&rootSignatures, &descriptors, &psoRoots);
+	DX12Log("PSO summary stage: metadata snapshot ready roots=%zu descriptors=%zu psoRoots=%zu\n",
+		rootSignatures.size(), descriptors.size(), psoRoots.size());
 
 	std::unordered_map<ID3D12RootSignature*, DX12RootSignatureSummary> rootsByPtr;
 	rootsByPtr.reserve(rootSignatures.size());
@@ -698,6 +703,8 @@ static void WritePsoResourceSummaryFile(
 	psoRootsByIndex.reserve(psoRoots.size());
 	for (const DX12PsoRootSummary &root : psoRoots)
 		psoRootsByIndex[root.psoIndex] = root;
+	DX12Log("PSO summary stage: lookup maps ready roots=%zu psoRoots=%zu\n",
+		rootsByPtr.size(), psoRootsByIndex.size());
 
 	UINT64 totalCBV = 0;
 	UINT64 totalSRV = 0;
@@ -728,12 +735,17 @@ static void WritePsoResourceSummaryFile(
 				totalBuffer++;
 		}
 	}
+	DX12Log("PSO summary stage: descriptor inventory counted cbv=%llu srv=%llu uav=%llu\n",
+		static_cast<unsigned long long>(totalCBV),
+		static_cast<unsigned long long>(totalSRV),
+		static_cast<unsigned long long>(totalUAV));
 
 	wchar_t path[MAX_PATH];
 	swprintf_s(path, L"%s\\PsoResourceSummaryDX12.txt", dir);
 	FILE *file = _wfsopen(path, L"w", _SH_DENYNO);
 	if (!file)
 		return;
+	DX12Log("PSO summary stage: file opened %S\n", path);
 
 	fprintf(file, "DX12 PSO Resource Summary\n");
 	fprintf(file, "=========================\n");
@@ -756,6 +768,7 @@ static void WritePsoResourceSummaryFile(
 	fprintf(file,
 		"pso,kind,pipeline_state,root_signature,root_hash,root_size,shaders,shader_tags,cbuffers,textures,samplers,uavs,samples,texture_loads,raw_buffer_loads,cbuffer_loads,store_outputs,discard,depth,candidate\n");
 
+	size_t psoRows = 0;
 	for (const PsoRecord &pso : psos) {
 		DX12PsoRootSummary psoRoot;
 		auto psoRootIt = psoRootsByIndex.find(pso.index);
@@ -862,7 +875,9 @@ static void WritePsoResourceSummaryFile(
 			hasDiscard ? 1 : 0,
 			writesDepth ? 1 : 0,
 			candidate);
+		psoRows++;
 	}
+	DX12Log("PSO summary stage: pso rows written=%zu\n", psoRows);
 
 	fprintf(file, "\nRoot Signature Usage\n");
 	fprintf(file, "root_signature,root_hash,root_size,pso_count,first_pso\n");
@@ -886,6 +901,7 @@ static void WritePsoResourceSummaryFile(
 			item.second,
 			static_cast<unsigned long long>(rootFirstPso[item.first]));
 	}
+	DX12Log("PSO summary stage: root usage rows written=%zu\n", rootUseCount.size());
 
 	fprintf(file, "\nDescriptor Inventory\n");
 	fprintf(file, "kind,count\n");

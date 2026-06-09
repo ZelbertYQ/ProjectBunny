@@ -3,6 +3,7 @@
 #include <d3d12.h>
 
 #include "DX12BindingTracker.h"
+#include "DX12ResourceTracker.h"
 #include "DX12State.h"
 
 typedef HRESULT(STDMETHODCALLTYPE *PFN_CREATE_COMMAND_LIST)(
@@ -14,6 +15,8 @@ typedef HRESULT(STDMETHODCALLTYPE *PFN_RESET_COMMAND_LIST)(
 	ID3D12GraphicsCommandList*, ID3D12CommandAllocator*, ID3D12PipelineState*);
 typedef void(STDMETHODCALLTYPE *PFN_SET_PIPELINE_STATE)(
 	ID3D12GraphicsCommandList*, ID3D12PipelineState*);
+typedef void(STDMETHODCALLTYPE *PFN_RESOURCE_BARRIER)(
+	ID3D12GraphicsCommandList*, UINT, const D3D12_RESOURCE_BARRIER*);
 typedef void(STDMETHODCALLTYPE *PFN_SET_DESCRIPTOR_HEAPS)(
 	ID3D12GraphicsCommandList*, UINT, ID3D12DescriptorHeap *const*);
 typedef void(STDMETHODCALLTYPE *PFN_SET_ROOT_DESCRIPTOR_TABLE)(
@@ -29,6 +32,7 @@ static PFN_CREATE_COMMAND_LIST gOrigCreateCommandList = nullptr;
 static PFN_CREATE_COMMAND_LIST1 gOrigCreateCommandList1 = nullptr;
 static PFN_RESET_COMMAND_LIST gOrigResetCommandList = nullptr;
 static PFN_SET_PIPELINE_STATE gOrigSetPipelineState = nullptr;
+static PFN_RESOURCE_BARRIER gOrigResourceBarrier = nullptr;
 static PFN_SET_DESCRIPTOR_HEAPS gOrigSetDescriptorHeaps = nullptr;
 static PFN_SET_ROOT_DESCRIPTOR_TABLE gOrigSetComputeRootDescriptorTable = nullptr;
 static PFN_SET_ROOT_DESCRIPTOR_TABLE gOrigSetGraphicsRootDescriptorTable = nullptr;
@@ -91,6 +95,14 @@ static void STDMETHODCALLTYPE HookedSetPipelineState(
 	DX12BindingSetPipelineState(commandList, pipelineState);
 	DX12BindingRecordStateEvent(commandList, "set_pso");
 	gOrigSetPipelineState(commandList, pipelineState);
+}
+
+static void STDMETHODCALLTYPE HookedResourceBarrier(
+	ID3D12GraphicsCommandList *commandList, UINT numBarriers,
+	const D3D12_RESOURCE_BARRIER *barriers)
+{
+	DX12RecordResourceBarrier(numBarriers, barriers);
+	gOrigResourceBarrier(commandList, numBarriers, barriers);
 }
 
 static void STDMETHODCALLTYPE HookedSetDescriptorHeaps(
@@ -161,6 +173,8 @@ void DX12HookCommandList(IUnknown *commandList)
 			vtable[10], HookedResetCommandList, "ID3D12GraphicsCommandList::Reset");
 		DX12HookFunction(reinterpret_cast<void**>(&gOrigSetPipelineState),
 			vtable[25], HookedSetPipelineState, "ID3D12GraphicsCommandList::SetPipelineState");
+		DX12HookFunction(reinterpret_cast<void**>(&gOrigResourceBarrier),
+			vtable[26], HookedResourceBarrier, "ID3D12GraphicsCommandList::ResourceBarrier");
 		DX12HookFunction(reinterpret_cast<void**>(&gOrigSetDescriptorHeaps),
 			vtable[28], HookedSetDescriptorHeaps, "ID3D12GraphicsCommandList::SetDescriptorHeaps");
 		DX12HookFunction(reinterpret_cast<void**>(&gOrigSetComputeRootDescriptorTable),
