@@ -38,6 +38,7 @@ static SRWLOCK gDumpLock = SRWLOCK_INIT;
 static std::unordered_map<std::string, ShaderRecord> gShaders;
 static std::vector<PsoRecord> gPsos;
 static std::unordered_map<ID3D12PipelineState*, DX12PsoShaderInfo> gPsoShaderInfo;
+static std::unordered_map<UINT64, DX12PsoShaderSummary> gPsoShaderSummaryByIndex;
 static UINT64 gPsoSerial = 0;
 
 typedef HRESULT(WINAPI *PFN_D3D_DISASSEMBLE)(
@@ -111,6 +112,19 @@ static std::string MakeShaderKey(const char *stage, uint64_t hash)
 	char key[64];
 	sprintf_s(key, "%s_%016llx", stage, static_cast<unsigned long long>(hash));
 	return key;
+}
+
+static void RecordPsoShaderSummaryLocked(const DX12PsoShaderInfo &info)
+{
+	DX12PsoShaderSummary summary;
+	summary.psoIndex = info.psoIndex;
+	summary.hasVS = info.hasVS;
+	summary.hasPS = info.hasPS;
+	summary.hasCS = info.hasCS;
+	summary.vs = info.vs;
+	summary.ps = info.ps;
+	summary.cs = info.cs;
+	gPsoShaderSummaryByIndex[info.psoIndex] = summary;
 }
 
 static bool GetDumpDirectory(wchar_t *path, size_t pathCount)
@@ -1124,6 +1138,7 @@ void DX12RecordGraphicsPipelineState(
 	RecordShaderLocked(desc->GS, "gs", psoIndex, pso, nullptr);
 	const size_t shadersInPso = pso.shaders.size();
 	gPsos.push_back(std::move(pso));
+	RecordPsoShaderSummaryLocked(info);
 	if (pipelineState)
 		gPsoShaderInfo[pipelineState] = info;
 	UINT64 shaderCount = gShaders.size();
@@ -1154,6 +1169,7 @@ void DX12RecordComputePipelineState(
 	DX12RecordPsoRootSignature(psoIndex, pso.kind.c_str(), pipelineState, desc->pRootSignature);
 	RecordShaderLocked(desc->CS, "cs", psoIndex, pso, &info);
 	gPsos.push_back(std::move(pso));
+	RecordPsoShaderSummaryLocked(info);
 	if (pipelineState)
 		gPsoShaderInfo[pipelineState] = info;
 	UINT64 shaderCount = gShaders.size();
@@ -1214,6 +1230,7 @@ void DX12RecordPipelineStateStream(
 	shadersInPso = pso.shaders.size();
 	DX12RecordPsoRootSignature(psoIndex, pso.kind.c_str(), pipelineState, rootSignature);
 	gPsos.push_back(std::move(pso));
+	RecordPsoShaderSummaryLocked(info);
 	if (pipelineState)
 		gPsoShaderInfo[pipelineState] = info;
 	UINT64 shaderCount = gShaders.size();
@@ -1240,6 +1257,22 @@ bool DX12GetPipelineStateShaderInfo(ID3D12PipelineState *pipelineState, DX12PsoS
 		return false;
 	}
 	*info = it->second;
+	ReleaseSRWLockShared(&gDumpLock);
+	return true;
+}
+
+bool DX12GetPsoShaderSummary(UINT64 psoIndex, DX12PsoShaderSummary *summary)
+{
+	if (!psoIndex || !summary)
+		return false;
+
+	AcquireSRWLockShared(&gDumpLock);
+	auto it = gPsoShaderSummaryByIndex.find(psoIndex);
+	if (it == gPsoShaderSummaryByIndex.end()) {
+		ReleaseSRWLockShared(&gDumpLock);
+		return false;
+	}
+	*summary = it->second;
 	ReleaseSRWLockShared(&gDumpLock);
 	return true;
 }

@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "DX12BindingTracker.h"
+#include "DX12ShaderDump.h"
 #include "DX12State.h"
 
 static constexpr UINT64 MaxResourceDumpBytes = 256ull * 1024ull * 1024ull;
@@ -323,6 +324,66 @@ static void BuildFileName(const DumpTask &task, wchar_t *fileName, size_t fileNa
 		ext);
 }
 
+static void FormatShaderHash(UINT64 hash, bool hasHash, char *text, size_t textCount)
+{
+	if (!text || textCount == 0)
+		return;
+	if (hasHash)
+		sprintf_s(text, textCount, "%016llx", static_cast<unsigned long long>(hash));
+	else
+		sprintf_s(text, textCount, "-");
+}
+
+static void WriteIndexRow(
+	FILE *index, const char *status, const DumpTask &task, const D3D12_RESOURCE_DESC &desc,
+	UINT64 sourceOffset, UINT64 copyBytes, D3D12_RESOURCE_STATES sourceState,
+	bool hasCurrentState, const wchar_t *fileName, const char *note)
+{
+	DX12PsoShaderSummary shaders;
+	const bool hasShaders = DX12GetPsoShaderSummary(task.binding.psoIndex, &shaders);
+	char vs[32], ps[32], cs[32];
+	FormatShaderHash(hasShaders ? shaders.vs : 0, hasShaders && shaders.hasVS, vs, ARRAYSIZE(vs));
+	FormatShaderHash(hasShaders ? shaders.ps : 0, hasShaders && shaders.hasPS, ps, ARRAYSIZE(ps));
+	FormatShaderHash(hasShaders ? shaders.cs : 0, hasShaders && shaders.hasCS, cs, ARRAYSIZE(cs));
+
+	const DX12DescriptorSummary &descriptor = task.binding.descriptor;
+	fprintf(index,
+		"%s,%llu,%s,%s,%s,%s,%u,%p,%u,%llu,0x%llx,0x%llx,0x%llx,"
+		"%s,%p,%s,%llu,%u,%u,0x%llx,%llu,%llu,0x%x,%u,%u,%u,%u,%llu,%u,%u,%llu,%llu,%S,%s\n",
+		status,
+		static_cast<unsigned long long>(task.binding.psoIndex),
+		vs, ps, cs,
+		task.binding.bindSpace.c_str(),
+		task.binding.rootParameterIndex,
+		task.binding.heap,
+		task.binding.heapType,
+		static_cast<unsigned long long>(task.binding.descriptorIndex),
+		static_cast<unsigned long long>(task.binding.gpuHandle),
+		static_cast<unsigned long long>(task.binding.cpuHandle),
+		static_cast<unsigned long long>(task.binding.heapGpuStart),
+		descriptor.kind.c_str(),
+		descriptor.resource,
+		ResourceDimensionName(desc.Dimension),
+		static_cast<unsigned long long>(desc.Width),
+		desc.Height,
+		static_cast<UINT>(desc.Format),
+		static_cast<unsigned long long>(descriptor.gpuVirtualAddress),
+		static_cast<unsigned long long>(sourceOffset),
+		static_cast<unsigned long long>(copyBytes),
+		static_cast<UINT>(sourceState),
+		hasCurrentState ? 1 : 0,
+		descriptor.hasDesc ? 1 : 0,
+		descriptor.viewFormat,
+		descriptor.viewDimension,
+		static_cast<unsigned long long>(descriptor.firstElement),
+		descriptor.numElements,
+		descriptor.structureByteStride,
+		static_cast<unsigned long long>(descriptor.bufferViewOffset),
+		static_cast<unsigned long long>(descriptor.bufferViewBytes),
+		fileName ? fileName : L"",
+		note ? note : "");
+}
+
 static bool ExecuteCopyBatch(
 	ID3D12Device *device, ID3D12CommandQueue *queue, std::vector<DumpTask> *tasks)
 {
@@ -411,7 +472,7 @@ void DX12DumpCurrentFrameResources(const wchar_t *dir)
 		bindings.size(), static_cast<unsigned long long>(MaxResourceDumpBytes),
 		UnsafeResourceCopyEnabled() ? 1 : 0);
 	fprintf(index,
-		"status,pso,bind_space,root_param,descriptor_kind,resource,dimension,width,height,format,gpu_va,resource_offset,copy_bytes,current_state,has_current_state,file,note\n");
+		"status,pso,vs_hash,ps_hash,cs_hash,bind_space,root_param,heap,heap_type,descriptor_index,gpu_handle,cpu_handle,heap_gpu_start,descriptor_kind,resource,dimension,width,height,format,gpu_va,resource_offset,copy_bytes,current_state,has_current_state,has_view_desc,view_format,view_dimension,first_element,num_elements,stride,buffer_view_offset,buffer_view_bytes,file,note\n");
 
 	ID3D12CommandQueue *queue = DX12AcquireCommandQueue();
 	ID3D12Device *device = nullptr;
@@ -494,22 +555,8 @@ void DX12DumpCurrentFrameResources(const wchar_t *dir)
 		else
 			failed++;
 
-		fprintf(index, "%s,%llu,%s,%u,%s,%p,%s,%llu,%u,%u,0x%llx,%llu,%llu,0x%x,%u,%S,%s\n",
-			ok ? "dumped" : "failed",
-			static_cast<unsigned long long>(task.binding.psoIndex),
-			task.binding.bindSpace.c_str(),
-			task.binding.rootParameterIndex,
-			task.binding.descriptor.kind.c_str(),
-			task.binding.descriptor.resource,
-			ResourceDimensionName(task.desc.Dimension),
-			static_cast<unsigned long long>(task.desc.Width),
-			task.desc.Height,
-			static_cast<UINT>(task.desc.Format),
-			static_cast<unsigned long long>(task.binding.descriptor.gpuVirtualAddress),
-			static_cast<unsigned long long>(task.sourceOffset),
-			static_cast<unsigned long long>(task.copyBytes),
-			static_cast<UINT>(task.sourceState),
-			task.stateKnown ? 1 : 0,
+		WriteIndexRow(index, ok ? "dumped" : "failed", task, task.desc,
+			task.sourceOffset, task.copyBytes, task.sourceState, task.stateKnown,
 			ok ? task.fileName.c_str() : L"",
 			ok ? "" : "copy_failed_or_write_failed");
 	}
@@ -521,24 +568,13 @@ void DX12DumpCurrentFrameResources(const wchar_t *dir)
 			skipped++;
 		const DX12DescriptorSummary &descriptor = task.binding.descriptor;
 		const D3D12_RESOURCE_DESC &desc = descriptor.resourceDesc;
-		const char *dimensionName = descriptor.hasResourceDesc ?
-			ResourceDimensionName(desc.Dimension) : "NONE";
-		fprintf(index, "%s,%llu,%s,%u,%s,%p,%s,%llu,%u,%u,0x%llx,%llu,%llu,0x%x,%u,,%s\n",
-			duplicate ? "duplicate" : "skipped",
-			static_cast<unsigned long long>(task.binding.psoIndex),
-			task.binding.bindSpace.c_str(),
-			task.binding.rootParameterIndex,
-			descriptor.kind.c_str(),
-			descriptor.resource,
-			dimensionName,
-			descriptor.hasResourceDesc ? static_cast<unsigned long long>(desc.Width) : 0,
-			descriptor.hasResourceDesc ? desc.Height : 0,
-			descriptor.hasResourceDesc ? static_cast<UINT>(desc.Format) : 0,
-			static_cast<unsigned long long>(descriptor.gpuVirtualAddress),
-			static_cast<unsigned long long>(descriptor.resourceOffset),
-			static_cast<unsigned long long>(descriptor.viewSize),
-			descriptor.hasCurrentState ? descriptor.currentState : 0,
-			descriptor.hasCurrentState ? 1 : 0,
+		D3D12_RESOURCE_DESC rowDesc = {};
+		if (descriptor.hasResourceDesc)
+			rowDesc = desc;
+		WriteIndexRow(index, duplicate ? "duplicate" : "skipped", task, rowDesc,
+			descriptor.resourceOffset, descriptor.viewSize,
+			static_cast<D3D12_RESOURCE_STATES>(descriptor.hasCurrentState ? descriptor.currentState : 0),
+			descriptor.hasCurrentState, L"",
 			task.skipNote ? task.skipNote : "unsupported_or_no_resource_pointer");
 	}
 

@@ -33,6 +33,11 @@ struct DX12DescriptorSummary
 	UINT viewFormat = 0;
 	UINT viewDimension = 0;
 	UINT cbvSize = 0;
+	UINT64 firstElement = 0;
+	UINT numElements = 0;
+	UINT structureByteStride = 0;
+	UINT64 bufferViewOffset = 0;
+	UINT64 bufferViewBytes = 0;
 };
 
 struct DX12DescriptorHeapSummary

@@ -385,6 +385,145 @@ static bool ResolveBufferByGpuVa(UINT64 gpuVa, UINT64 size, DescriptorRecord *re
 	return resolved;
 }
 
+static UINT DxgiFormatBytesPerElement(DXGI_FORMAT format)
+{
+	switch (format) {
+	case DXGI_FORMAT_R32G32B32A32_TYPELESS:
+	case DXGI_FORMAT_R32G32B32A32_FLOAT:
+	case DXGI_FORMAT_R32G32B32A32_UINT:
+	case DXGI_FORMAT_R32G32B32A32_SINT:
+		return 16;
+	case DXGI_FORMAT_R32G32B32_TYPELESS:
+	case DXGI_FORMAT_R32G32B32_FLOAT:
+	case DXGI_FORMAT_R32G32B32_UINT:
+	case DXGI_FORMAT_R32G32B32_SINT:
+		return 12;
+	case DXGI_FORMAT_R16G16B16A16_TYPELESS:
+	case DXGI_FORMAT_R16G16B16A16_FLOAT:
+	case DXGI_FORMAT_R16G16B16A16_UNORM:
+	case DXGI_FORMAT_R16G16B16A16_UINT:
+	case DXGI_FORMAT_R16G16B16A16_SNORM:
+	case DXGI_FORMAT_R16G16B16A16_SINT:
+	case DXGI_FORMAT_R32G32_TYPELESS:
+	case DXGI_FORMAT_R32G32_FLOAT:
+	case DXGI_FORMAT_R32G32_UINT:
+	case DXGI_FORMAT_R32G32_SINT:
+	case DXGI_FORMAT_R32G8X24_TYPELESS:
+	case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:
+	case DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS:
+	case DXGI_FORMAT_X32_TYPELESS_G8X24_UINT:
+		return 8;
+	case DXGI_FORMAT_R10G10B10A2_TYPELESS:
+	case DXGI_FORMAT_R10G10B10A2_UNORM:
+	case DXGI_FORMAT_R10G10B10A2_UINT:
+	case DXGI_FORMAT_R11G11B10_FLOAT:
+	case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+	case DXGI_FORMAT_R8G8B8A8_UNORM:
+	case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+	case DXGI_FORMAT_R8G8B8A8_UINT:
+	case DXGI_FORMAT_R8G8B8A8_SNORM:
+	case DXGI_FORMAT_R8G8B8A8_SINT:
+	case DXGI_FORMAT_R16G16_TYPELESS:
+	case DXGI_FORMAT_R16G16_FLOAT:
+	case DXGI_FORMAT_R16G16_UNORM:
+	case DXGI_FORMAT_R16G16_UINT:
+	case DXGI_FORMAT_R16G16_SNORM:
+	case DXGI_FORMAT_R16G16_SINT:
+	case DXGI_FORMAT_R32_TYPELESS:
+	case DXGI_FORMAT_D32_FLOAT:
+	case DXGI_FORMAT_R32_FLOAT:
+	case DXGI_FORMAT_R32_UINT:
+	case DXGI_FORMAT_R32_SINT:
+	case DXGI_FORMAT_R24G8_TYPELESS:
+	case DXGI_FORMAT_D24_UNORM_S8_UINT:
+	case DXGI_FORMAT_R24_UNORM_X8_TYPELESS:
+	case DXGI_FORMAT_X24_TYPELESS_G8_UINT:
+	case DXGI_FORMAT_R9G9B9E5_SHAREDEXP:
+	case DXGI_FORMAT_R8G8_B8G8_UNORM:
+	case DXGI_FORMAT_G8R8_G8B8_UNORM:
+	case DXGI_FORMAT_B8G8R8A8_UNORM:
+	case DXGI_FORMAT_B8G8R8X8_UNORM:
+	case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+	case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+	case DXGI_FORMAT_B8G8R8X8_TYPELESS:
+	case DXGI_FORMAT_B8G8R8X8_UNORM_SRGB:
+		return 4;
+	case DXGI_FORMAT_R8G8_TYPELESS:
+	case DXGI_FORMAT_R8G8_UNORM:
+	case DXGI_FORMAT_R8G8_UINT:
+	case DXGI_FORMAT_R8G8_SNORM:
+	case DXGI_FORMAT_R8G8_SINT:
+	case DXGI_FORMAT_R16_TYPELESS:
+	case DXGI_FORMAT_R16_FLOAT:
+	case DXGI_FORMAT_D16_UNORM:
+	case DXGI_FORMAT_R16_UNORM:
+	case DXGI_FORMAT_R16_UINT:
+	case DXGI_FORMAT_R16_SNORM:
+	case DXGI_FORMAT_R16_SINT:
+	case DXGI_FORMAT_B5G6R5_UNORM:
+	case DXGI_FORMAT_B5G5R5A1_UNORM:
+	case DXGI_FORMAT_B4G4R4A4_UNORM:
+		return 2;
+	case DXGI_FORMAT_R8_TYPELESS:
+	case DXGI_FORMAT_R8_UNORM:
+	case DXGI_FORMAT_R8_UINT:
+	case DXGI_FORMAT_R8_SNORM:
+	case DXGI_FORMAT_R8_SINT:
+	case DXGI_FORMAT_A8_UNORM:
+		return 1;
+	default:
+		return 0;
+	}
+}
+
+static UINT SrvBufferBytesPerElement(const D3D12_SHADER_RESOURCE_VIEW_DESC &desc)
+{
+	if (desc.Buffer.StructureByteStride)
+		return desc.Buffer.StructureByteStride;
+	if (desc.Buffer.Flags & D3D12_BUFFER_SRV_FLAG_RAW)
+		return 4;
+	return DxgiFormatBytesPerElement(desc.Format);
+}
+
+static UINT UavBufferBytesPerElement(const D3D12_UNORDERED_ACCESS_VIEW_DESC &desc)
+{
+	if (desc.Buffer.StructureByteStride)
+		return desc.Buffer.StructureByteStride;
+	if (desc.Buffer.Flags & D3D12_BUFFER_UAV_FLAG_RAW)
+		return 4;
+	return DxgiFormatBytesPerElement(desc.Format);
+}
+
+static void FillSrvBufferView(DescriptorRecord *record)
+{
+	if (!record || !record->hasDesc ||
+		record->srv.ViewDimension != D3D12_SRV_DIMENSION_BUFFER)
+		return;
+
+	const D3D12_BUFFER_SRV &buffer = record->srv.Buffer;
+	const UINT bytesPerElement = SrvBufferBytesPerElement(record->srv);
+	record->resourceOffset = buffer.FirstElement * bytesPerElement;
+	record->viewSize = static_cast<UINT64>(buffer.NumElements) * bytesPerElement;
+	if (record->viewSize == 0 && record->resourceDesc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER)
+		record->viewSize = record->resourceDesc.Width > record->resourceOffset ?
+			record->resourceDesc.Width - record->resourceOffset : 0;
+}
+
+static void FillUavBufferView(DescriptorRecord *record)
+{
+	if (!record || !record->hasDesc ||
+		record->uav.ViewDimension != D3D12_UAV_DIMENSION_BUFFER)
+		return;
+
+	const D3D12_BUFFER_UAV &buffer = record->uav.Buffer;
+	const UINT bytesPerElement = UavBufferBytesPerElement(record->uav);
+	record->resourceOffset = buffer.FirstElement * bytesPerElement;
+	record->viewSize = static_cast<UINT64>(buffer.NumElements) * bytesPerElement;
+	if (record->viewSize == 0 && record->resourceDesc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER)
+		record->viewSize = record->resourceDesc.Width > record->resourceOffset ?
+			record->resourceDesc.Width - record->resourceOffset : 0;
+}
+
 static void UpdateDescriptorResourceStateLocked(
 	ID3D12Resource *resource, D3D12_RESOURCE_STATES state, bool hasState)
 {
@@ -533,6 +672,7 @@ static void STDMETHODCALLTYPE HookedCreateShaderResourceView(
 	if (desc) {
 		record.srv = *desc;
 		record.hasDesc = true;
+		FillSrvBufferView(&record);
 	}
 	RecordDescriptor(std::move(record));
 }
@@ -550,6 +690,7 @@ static void STDMETHODCALLTYPE HookedCreateUnorderedAccessView(
 	if (desc) {
 		record.uav = *desc;
 		record.hasDesc = true;
+		FillUavBufferView(&record);
 	}
 	RecordDescriptor(std::move(record));
 }
@@ -1003,9 +1144,23 @@ static void FillDescriptorSummary(DX12DescriptorSummary *summary, const Descript
 	} else if (record.kind == "SRV" && record.hasDesc) {
 		summary->viewFormat = static_cast<UINT>(record.srv.Format);
 		summary->viewDimension = static_cast<UINT>(record.srv.ViewDimension);
+		if (record.srv.ViewDimension == D3D12_SRV_DIMENSION_BUFFER) {
+			summary->firstElement = record.srv.Buffer.FirstElement;
+			summary->numElements = record.srv.Buffer.NumElements;
+			summary->structureByteStride = record.srv.Buffer.StructureByteStride;
+			summary->bufferViewOffset = record.resourceOffset;
+			summary->bufferViewBytes = record.viewSize;
+		}
 	} else if (record.kind == "UAV" && record.hasDesc) {
 		summary->viewFormat = static_cast<UINT>(record.uav.Format);
 		summary->viewDimension = static_cast<UINT>(record.uav.ViewDimension);
+		if (record.uav.ViewDimension == D3D12_UAV_DIMENSION_BUFFER) {
+			summary->firstElement = record.uav.Buffer.FirstElement;
+			summary->numElements = record.uav.Buffer.NumElements;
+			summary->structureByteStride = record.uav.Buffer.StructureByteStride;
+			summary->bufferViewOffset = record.resourceOffset;
+			summary->bufferViewBytes = record.viewSize;
+		}
 	} else if (record.kind == "RTV" && record.hasDesc) {
 		summary->viewFormat = static_cast<UINT>(record.rtv.Format);
 		summary->viewDimension = static_cast<UINT>(record.rtv.ViewDimension);
@@ -1192,7 +1347,7 @@ void DX12DumpResourceMetadata(const wchar_t *dir)
 
 	fprintf(file, "\nDescriptors\n");
 	fprintf(file,
-		"index,kind,cpu_handle,resource,counter_resource,resource_dimension,width,height,depth_or_array,mips,format,flags,gpu_va,sample_count,resource_offset,view_size,heap_type,current_state,has_current_state,has_view_desc,view_format,view_dimension,cbv_size\n");
+		"index,kind,cpu_handle,resource,counter_resource,resource_dimension,width,height,depth_or_array,mips,format,flags,gpu_va,sample_count,resource_offset,view_size,heap_type,current_state,has_current_state,has_view_desc,view_format,view_dimension,cbv_size,first_element,num_elements,stride,buffer_view_offset,buffer_view_bytes\n");
 	for (size_t i = 0; i < descriptors.size(); ++i) {
 		const DescriptorRecord &record = descriptors[i];
 		fprintf(file, "%zu,%s,0x%llx,%p,%p",
@@ -1206,14 +1361,33 @@ void DX12DumpResourceMetadata(const wchar_t *dir)
 		UINT viewFormat = 0;
 		UINT viewDimension = 0;
 		UINT cbvSize = 0;
+		UINT64 firstElement = 0;
+		UINT numElements = 0;
+		UINT stride = 0;
+		UINT64 bufferViewOffset = 0;
+		UINT64 bufferViewBytes = 0;
 		if (record.kind == "CBV") {
 			cbvSize = record.cbv.SizeInBytes;
 		} else if (record.kind == "SRV" && record.hasDesc) {
 			viewFormat = static_cast<UINT>(record.srv.Format);
 			viewDimension = static_cast<UINT>(record.srv.ViewDimension);
+			if (record.srv.ViewDimension == D3D12_SRV_DIMENSION_BUFFER) {
+				firstElement = record.srv.Buffer.FirstElement;
+				numElements = record.srv.Buffer.NumElements;
+				stride = record.srv.Buffer.StructureByteStride;
+				bufferViewOffset = record.resourceOffset;
+				bufferViewBytes = record.viewSize;
+			}
 		} else if (record.kind == "UAV" && record.hasDesc) {
 			viewFormat = static_cast<UINT>(record.uav.Format);
 			viewDimension = static_cast<UINT>(record.uav.ViewDimension);
+			if (record.uav.ViewDimension == D3D12_UAV_DIMENSION_BUFFER) {
+				firstElement = record.uav.Buffer.FirstElement;
+				numElements = record.uav.Buffer.NumElements;
+				stride = record.uav.Buffer.StructureByteStride;
+				bufferViewOffset = record.resourceOffset;
+				bufferViewBytes = record.viewSize;
+			}
 		} else if (record.kind == "RTV" && record.hasDesc) {
 			viewFormat = static_cast<UINT>(record.rtv.Format);
 			viewDimension = static_cast<UINT>(record.rtv.ViewDimension);
@@ -1222,7 +1396,7 @@ void DX12DumpResourceMetadata(const wchar_t *dir)
 			viewDimension = static_cast<UINT>(record.dsv.ViewDimension);
 		}
 
-		fprintf(file, ",%llu,%llu,%u,0x%x,%u,%u,%u,%u,%u\n",
+		fprintf(file, ",%llu,%llu,%u,0x%x,%u,%u,%u,%u,%u,%llu,%u,%u,%llu,%llu\n",
 			static_cast<unsigned long long>(record.resourceOffset),
 			static_cast<unsigned long long>(record.viewSize),
 			record.hasResourceHeapType ? record.resourceHeapType : 0,
@@ -1231,7 +1405,12 @@ void DX12DumpResourceMetadata(const wchar_t *dir)
 			record.hasDesc ? 1 : 0,
 			viewFormat,
 			viewDimension,
-			cbvSize);
+			cbvSize,
+			static_cast<unsigned long long>(firstElement),
+			numElements,
+			stride,
+			static_cast<unsigned long long>(bufferViewOffset),
+			static_cast<unsigned long long>(bufferViewBytes));
 	}
 
 	fclose(file);

@@ -13,6 +13,17 @@ struct DX12PsoShaderInfo
 	UINT64 cs;
 };
 
+struct DX12PsoShaderSummary
+{
+	UINT64 psoIndex = 0;
+	bool hasVS = false;
+	bool hasPS = false;
+	bool hasCS = false;
+	UINT64 vs = 0;
+	UINT64 ps = 0;
+	UINT64 cs = 0;
+};
+
 void DX12RecordGraphicsPipelineState(
 	ID3D12PipelineState *pipelineState, const D3D12_GRAPHICS_PIPELINE_STATE_DESC *desc);
 void DX12RecordComputePipelineState(
@@ -20,4 +31,5 @@ void DX12RecordComputePipelineState(
 void DX12RecordPipelineStateStream(
 	ID3D12PipelineState *pipelineState, const D3D12_PIPELINE_STATE_STREAM_DESC *desc);
 bool DX12GetPipelineStateShaderInfo(ID3D12PipelineState *pipelineState, DX12PsoShaderInfo *info);
+bool DX12GetPsoShaderSummary(UINT64 psoIndex, DX12PsoShaderSummary *summary);
 void DX12DumpCachedShaders();
