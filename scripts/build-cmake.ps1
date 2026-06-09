@@ -62,6 +62,7 @@ if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Path $outDir -Forc
 
 $files = @(
     "src/DirectX11/d3d11.dll",
+    "src/DirectX12/d3d12.dll",
     "src/D3DCompiler_46/d3dcompiler_47.dll",
     "src/DirectXGI/dxgi.dll",
     "src/Injector/3DMigoto Loader.exe",
