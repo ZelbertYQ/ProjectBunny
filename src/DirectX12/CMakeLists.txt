@@ -3,9 +3,12 @@
 # ============================================================
 add_library(DirectX12 SHARED
     D3D12Wrapper.cpp
+    DX12BindingTracker.cpp
+    DX12CommandListHooks.cpp
     DX12DeviceHooks.cpp
     DX12Input.cpp
     DX12Overlay.cpp
+    DX12ResourceDump.cpp
     DX12ResourceTracker.cpp
     DX12ShaderDump.cpp
     DX12State.cpp

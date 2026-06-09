@@ -110,7 +110,7 @@ if ($Platform -eq 'x64') {
         Copy-Item $dx12Dll "$dx12TestDir\d3d12.dll" -Force
         Write-Host "  Copied DX12 test DLL: $dx12TestDir\d3d12.dll" -ForegroundColor Gray
 
-        $dx12SteamUri = "steam://run/2868840//--rendering-driver d3d12/"
+        $dx12SteamUri = "steam://run/2868840"
         Start-Process $dx12SteamUri
         Write-Host "  Launched DX12 test game via Steam: $dx12SteamUri" -ForegroundColor Gray
     } elseif (-not (Test-Path $dx12TestDir)) {

@@ -2,7 +2,7 @@
 
 #include <d3d12.h>
 
-#include "DX12ShaderHunt.h"
+#include "DX12BindingTracker.h"
 #include "DX12State.h"
 
 typedef HRESULT(STDMETHODCALLTYPE *PFN_CREATE_COMMAND_LIST)(
@@ -10,25 +10,45 @@ typedef HRESULT(STDMETHODCALLTYPE *PFN_CREATE_COMMAND_LIST)(
 	ID3D12PipelineState*, REFIID, void**);
 typedef HRESULT(STDMETHODCALLTYPE *PFN_CREATE_COMMAND_LIST1)(
 	ID3D12Device4*, UINT, D3D12_COMMAND_LIST_TYPE, D3D12_COMMAND_LIST_FLAGS, REFIID, void**);
+typedef HRESULT(STDMETHODCALLTYPE *PFN_RESET_COMMAND_LIST)(
+	ID3D12GraphicsCommandList*, ID3D12CommandAllocator*, ID3D12PipelineState*);
 typedef void(STDMETHODCALLTYPE *PFN_SET_PIPELINE_STATE)(
 	ID3D12GraphicsCommandList*, ID3D12PipelineState*);
+typedef void(STDMETHODCALLTYPE *PFN_SET_DESCRIPTOR_HEAPS)(
+	ID3D12GraphicsCommandList*, UINT, ID3D12DescriptorHeap *const*);
+typedef void(STDMETHODCALLTYPE *PFN_SET_ROOT_DESCRIPTOR_TABLE)(
+	ID3D12GraphicsCommandList*, UINT, D3D12_GPU_DESCRIPTOR_HANDLE);
 typedef void(STDMETHODCALLTYPE *PFN_DRAW_INSTANCED)(
 	ID3D12GraphicsCommandList*, UINT, UINT, UINT, UINT);
 typedef void(STDMETHODCALLTYPE *PFN_DRAW_INDEXED_INSTANCED)(
 	ID3D12GraphicsCommandList*, UINT, UINT, UINT, INT, UINT);
 typedef void(STDMETHODCALLTYPE *PFN_DISPATCH)(
 	ID3D12GraphicsCommandList*, UINT, UINT, UINT);
-typedef void(STDMETHODCALLTYPE *PFN_EXECUTE_INDIRECT)(
-	ID3D12GraphicsCommandList*, ID3D12CommandSignature*, UINT, ID3D12Resource*, UINT64,
-	ID3D12Resource*, UINT64);
 
 static PFN_CREATE_COMMAND_LIST gOrigCreateCommandList = nullptr;
 static PFN_CREATE_COMMAND_LIST1 gOrigCreateCommandList1 = nullptr;
+static PFN_RESET_COMMAND_LIST gOrigResetCommandList = nullptr;
 static PFN_SET_PIPELINE_STATE gOrigSetPipelineState = nullptr;
+static PFN_SET_DESCRIPTOR_HEAPS gOrigSetDescriptorHeaps = nullptr;
+static PFN_SET_ROOT_DESCRIPTOR_TABLE gOrigSetComputeRootDescriptorTable = nullptr;
+static PFN_SET_ROOT_DESCRIPTOR_TABLE gOrigSetGraphicsRootDescriptorTable = nullptr;
 static PFN_DRAW_INSTANCED gOrigDrawInstanced = nullptr;
 static PFN_DRAW_INDEXED_INSTANCED gOrigDrawIndexedInstanced = nullptr;
 static PFN_DISPATCH gOrigDispatch = nullptr;
-static PFN_EXECUTE_INDIRECT gOrigExecuteIndirect = nullptr;
+
+static void RegisterCommandList(IUnknown *commandList, ID3D12PipelineState *initialState)
+{
+	if (!commandList)
+		return;
+
+	ID3D12GraphicsCommandList *baseList = nullptr;
+	if (SUCCEEDED(commandList->QueryInterface(IID_PPV_ARGS(&baseList)))) {
+		DX12HookCommandList(baseList);
+		DX12BindingRegisterCommandList(baseList);
+		DX12BindingResetCommandList(baseList, initialState);
+		baseList->Release();
+	}
+}
 
 static HRESULT STDMETHODCALLTYPE HookedCreateCommandList(
 	ID3D12Device *device, UINT nodeMask, D3D12_COMMAND_LIST_TYPE type,
@@ -39,14 +59,7 @@ static HRESULT STDMETHODCALLTYPE HookedCreateCommandList(
 	if (SUCCEEDED(hr) && commandList && *commandList) {
 		DX12Log("ID3D12Device::CreateCommandList type=%d result=0x%lx commandList=%p initialPso=%p\n",
 			static_cast<int>(type), hr, *commandList, initialState);
-		DX12HookCommandList(static_cast<IUnknown*>(*commandList));
-		if (initialState) {
-			ID3D12GraphicsCommandList *baseList = nullptr;
-			if (SUCCEEDED(static_cast<IUnknown*>(*commandList)->QueryInterface(IID_PPV_ARGS(&baseList)))) {
-				DX12HuntSetPipelineState(baseList, initialState);
-				baseList->Release();
-			}
-		}
+		RegisterCommandList(static_cast<IUnknown*>(*commandList), initialState);
 	}
 	return hr;
 }
@@ -59,23 +72,59 @@ static HRESULT STDMETHODCALLTYPE HookedCreateCommandList1(
 	if (SUCCEEDED(hr) && commandList && *commandList) {
 		DX12Log("ID3D12Device4::CreateCommandList1 type=%d result=0x%lx commandList=%p\n",
 			static_cast<int>(type), hr, *commandList);
-		DX12HookCommandList(static_cast<IUnknown*>(*commandList));
+		RegisterCommandList(static_cast<IUnknown*>(*commandList), nullptr);
 	}
 	return hr;
+}
+
+static HRESULT STDMETHODCALLTYPE HookedResetCommandList(
+	ID3D12GraphicsCommandList *commandList, ID3D12CommandAllocator *allocator,
+	ID3D12PipelineState *initialState)
+{
+	DX12BindingResetCommandList(commandList, initialState);
+	return gOrigResetCommandList(commandList, allocator, initialState);
 }
 
 static void STDMETHODCALLTYPE HookedSetPipelineState(
 	ID3D12GraphicsCommandList *commandList, ID3D12PipelineState *pipelineState)
 {
-	DX12HuntSetPipelineState(commandList, pipelineState);
+	DX12BindingSetPipelineState(commandList, pipelineState);
+	DX12BindingRecordStateEvent(commandList, "set_pso");
 	gOrigSetPipelineState(commandList, pipelineState);
+}
+
+static void STDMETHODCALLTYPE HookedSetDescriptorHeaps(
+	ID3D12GraphicsCommandList *commandList, UINT count,
+	ID3D12DescriptorHeap *const *heaps)
+{
+	DX12BindingSetDescriptorHeaps(commandList, count, heaps);
+	DX12BindingRecordStateEvent(commandList, "set_heaps");
+	gOrigSetDescriptorHeaps(commandList, count, heaps);
+}
+
+static void STDMETHODCALLTYPE HookedSetComputeRootDescriptorTable(
+	ID3D12GraphicsCommandList *commandList, UINT rootParameterIndex,
+	D3D12_GPU_DESCRIPTOR_HANDLE baseDescriptor)
+{
+	DX12BindingSetComputeRootDescriptorTable(commandList, rootParameterIndex, baseDescriptor);
+	DX12BindingRecordStateEvent(commandList, "set_compute_table");
+	gOrigSetComputeRootDescriptorTable(commandList, rootParameterIndex, baseDescriptor);
+}
+
+static void STDMETHODCALLTYPE HookedSetGraphicsRootDescriptorTable(
+	ID3D12GraphicsCommandList *commandList, UINT rootParameterIndex,
+	D3D12_GPU_DESCRIPTOR_HANDLE baseDescriptor)
+{
+	DX12BindingSetGraphicsRootDescriptorTable(commandList, rootParameterIndex, baseDescriptor);
+	DX12BindingRecordStateEvent(commandList, "set_graphics_table");
+	gOrigSetGraphicsRootDescriptorTable(commandList, rootParameterIndex, baseDescriptor);
 }
 
 static void STDMETHODCALLTYPE HookedDrawInstanced(
 	ID3D12GraphicsCommandList *commandList, UINT vertexCountPerInstance, UINT instanceCount,
 	UINT startVertexLocation, UINT startInstanceLocation)
 {
-	DX12HuntRecordDraw(commandList);
+	DX12BindingRecordDraw(commandList, "draw");
 	gOrigDrawInstanced(commandList, vertexCountPerInstance, instanceCount,
 		startVertexLocation, startInstanceLocation);
 }
@@ -84,7 +133,7 @@ static void STDMETHODCALLTYPE HookedDrawIndexedInstanced(
 	ID3D12GraphicsCommandList *commandList, UINT indexCountPerInstance, UINT instanceCount,
 	UINT startIndexLocation, INT baseVertexLocation, UINT startInstanceLocation)
 {
-	DX12HuntRecordDraw(commandList);
+	DX12BindingRecordDraw(commandList, "draw_indexed");
 	gOrigDrawIndexedInstanced(commandList, indexCountPerInstance, instanceCount,
 		startIndexLocation, baseVertexLocation, startInstanceLocation);
 }
@@ -93,18 +142,8 @@ static void STDMETHODCALLTYPE HookedDispatch(
 	ID3D12GraphicsCommandList *commandList, UINT threadGroupCountX,
 	UINT threadGroupCountY, UINT threadGroupCountZ)
 {
-	DX12HuntRecordDispatch(commandList);
+	DX12BindingRecordDispatch(commandList);
 	gOrigDispatch(commandList, threadGroupCountX, threadGroupCountY, threadGroupCountZ);
-}
-
-static void STDMETHODCALLTYPE HookedExecuteIndirect(
-	ID3D12GraphicsCommandList *commandList, ID3D12CommandSignature *commandSignature,
-	UINT maxCommandCount, ID3D12Resource *argumentBuffer, UINT64 argumentBufferOffset,
-	ID3D12Resource *countBuffer, UINT64 countBufferOffset)
-{
-	DX12HuntRecordExecuteIndirect(commandList);
-	gOrigExecuteIndirect(commandList, commandSignature, maxCommandCount, argumentBuffer,
-		argumentBufferOffset, countBuffer, countBufferOffset);
 }
 
 void DX12HookCommandList(IUnknown *commandList)
@@ -118,11 +157,18 @@ void DX12HookCommandList(IUnknown *commandList)
 
 	void **vtable = *reinterpret_cast<void***>(baseList);
 	if (vtable) {
+		DX12HookFunction(reinterpret_cast<void**>(&gOrigResetCommandList),
+			vtable[10], HookedResetCommandList, "ID3D12GraphicsCommandList::Reset");
 		DX12HookFunction(reinterpret_cast<void**>(&gOrigSetPipelineState),
-			vtable[26], HookedSetPipelineState, "ID3D12GraphicsCommandList::SetPipelineState");
-		// Draw/Dispatch hooks are intentionally disabled for now. Some games are sensitive
-		// to intercepting these very hot command-list methods; SetPipelineState is enough
-		// to build the first stable PSO/shader hunting list.
+			vtable[25], HookedSetPipelineState, "ID3D12GraphicsCommandList::SetPipelineState");
+		DX12HookFunction(reinterpret_cast<void**>(&gOrigSetDescriptorHeaps),
+			vtable[28], HookedSetDescriptorHeaps, "ID3D12GraphicsCommandList::SetDescriptorHeaps");
+		DX12HookFunction(reinterpret_cast<void**>(&gOrigSetComputeRootDescriptorTable),
+			vtable[31], HookedSetComputeRootDescriptorTable,
+			"ID3D12GraphicsCommandList::SetComputeRootDescriptorTable");
+		DX12HookFunction(reinterpret_cast<void**>(&gOrigSetGraphicsRootDescriptorTable),
+			vtable[32], HookedSetGraphicsRootDescriptorTable,
+			"ID3D12GraphicsCommandList::SetGraphicsRootDescriptorTable");
 	}
 	baseList->Release();
 }

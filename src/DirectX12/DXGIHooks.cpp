@@ -2,6 +2,7 @@
 
 #include <dxgi1_4.h>
 
+#include "DX12BindingTracker.h"
 #include "DX12DeviceHooks.h"
 #include "DX12Input.h"
 #include "DX12Overlay.h"
@@ -218,6 +219,7 @@ static HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain *swapChain, UINT s
 	HRESULT hr = gOrigPresent(swapChain, syncInterval, flags);
 	DX12IncrementPresentCount();
 	DX12DrawSwapChainText(swapChain);
+	DX12BindingBeginFrame();
 	return hr;
 }
 
@@ -228,6 +230,7 @@ static HRESULT STDMETHODCALLTYPE HookedPresent1(
 	HRESULT hr = gOrigPresent1(swapChain, syncInterval, flags, presentParameters);
 	DX12IncrementPresentCount();
 	DX12DrawSwapChainText(swapChain);
+	DX12BindingBeginFrame();
 	return hr;
 }
 

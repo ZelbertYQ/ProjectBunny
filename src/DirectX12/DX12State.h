@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Windows.h>
+#include <d3d12.h>
 
 void DX12SetModule(HINSTANCE module);
 HINSTANCE DX12GetModule();
@@ -20,3 +21,6 @@ HWND DX12GetOverlayWindow();
 
 void DX12SetOverlayStatus(const wchar_t *status);
 void DX12GetOverlayStatus(wchar_t *status, size_t statusCount);
+
+void DX12SetCommandQueue(ID3D12CommandQueue *queue);
+ID3D12CommandQueue *DX12AcquireCommandQueue();

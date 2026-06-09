@@ -2,6 +2,7 @@
 
 #include <d3d12.h>
 
+#include "DX12CommandListHooks.h"
 #include "DX12ResourceTracker.h"
 #include "DX12ShaderDump.h"
 #include "DX12State.h"
@@ -93,6 +94,7 @@ void DX12HookDevice(IUnknown *device)
 		vtable[CreateComputePipelineStateIndex], HookedCreateComputePipelineState,
 		"ID3D12Device::CreateComputePipelineState");
 	DX12HookResourceMetadata(baseDevice);
+	DX12HookCommandListCreation(baseDevice);
 
 	baseDevice->Release();
 
@@ -108,9 +110,7 @@ void DX12HookDevice(IUnknown *device)
 		}
 		device2->Release();
 	}
-
-	// Command-list hooks are intentionally disabled until we isolate a stable
-	// interception point for this game. PSO creation hooks are enough for F8 dump.
+	// Command-list hooks only record binding metadata; resource readback stays disabled.
 }
 
 void DX12HookDeviceFactory(IUnknown *factory)
@@ -140,6 +140,8 @@ void DX12HookDeviceFromCommandQueue(IUnknown *commandQueue)
 	ID3D12CommandQueue *queue = nullptr;
 	if (FAILED(commandQueue->QueryInterface(IID_PPV_ARGS(&queue))))
 		return;
+
+	DX12SetCommandQueue(queue);
 
 	ID3D12Device *device = nullptr;
 	HRESULT hr = queue->GetDevice(IID_PPV_ARGS(&device));

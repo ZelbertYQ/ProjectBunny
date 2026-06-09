@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "DX12State.h"
@@ -26,6 +27,22 @@ typedef void(STDMETHODCALLTYPE *PFN_CREATE_DEPTH_STENCIL_VIEW)(
 	ID3D12Device*, ID3D12Resource*, const D3D12_DEPTH_STENCIL_VIEW_DESC*, D3D12_CPU_DESCRIPTOR_HANDLE);
 typedef void(STDMETHODCALLTYPE *PFN_CREATE_SAMPLER)(
 	ID3D12Device*, const D3D12_SAMPLER_DESC*, D3D12_CPU_DESCRIPTOR_HANDLE);
+typedef void(STDMETHODCALLTYPE *PFN_COPY_DESCRIPTORS)(
+	ID3D12Device*, UINT, const D3D12_CPU_DESCRIPTOR_HANDLE*, const UINT*,
+	UINT, const D3D12_CPU_DESCRIPTOR_HANDLE*, const UINT*, D3D12_DESCRIPTOR_HEAP_TYPE);
+typedef void(STDMETHODCALLTYPE *PFN_COPY_DESCRIPTORS_SIMPLE)(
+	ID3D12Device*, UINT, D3D12_CPU_DESCRIPTOR_HANDLE, D3D12_CPU_DESCRIPTOR_HANDLE,
+	D3D12_DESCRIPTOR_HEAP_TYPE);
+typedef HRESULT(STDMETHODCALLTYPE *PFN_CREATE_COMMITTED_RESOURCE)(
+	ID3D12Device*, const D3D12_HEAP_PROPERTIES*, D3D12_HEAP_FLAGS,
+	const D3D12_RESOURCE_DESC*, D3D12_RESOURCE_STATES, const D3D12_CLEAR_VALUE*,
+	REFIID, void**);
+typedef HRESULT(STDMETHODCALLTYPE *PFN_CREATE_PLACED_RESOURCE)(
+	ID3D12Device*, ID3D12Heap*, UINT64, const D3D12_RESOURCE_DESC*,
+	D3D12_RESOURCE_STATES, const D3D12_CLEAR_VALUE*, REFIID, void**);
+typedef HRESULT(STDMETHODCALLTYPE *PFN_CREATE_RESERVED_RESOURCE)(
+	ID3D12Device*, const D3D12_RESOURCE_DESC*, D3D12_RESOURCE_STATES,
+	const D3D12_CLEAR_VALUE*, REFIID, void**);
 
 static PFN_CREATE_DESCRIPTOR_HEAP gOrigCreateDescriptorHeap = nullptr;
 static PFN_CREATE_ROOT_SIGNATURE gOrigCreateRootSignature = nullptr;
@@ -35,6 +52,11 @@ static PFN_CREATE_UNORDERED_ACCESS_VIEW gOrigCreateUnorderedAccessView = nullptr
 static PFN_CREATE_RENDER_TARGET_VIEW gOrigCreateRenderTargetView = nullptr;
 static PFN_CREATE_DEPTH_STENCIL_VIEW gOrigCreateDepthStencilView = nullptr;
 static PFN_CREATE_SAMPLER gOrigCreateSampler = nullptr;
+static PFN_COPY_DESCRIPTORS gOrigCopyDescriptors = nullptr;
+static PFN_COPY_DESCRIPTORS_SIMPLE gOrigCopyDescriptorsSimple = nullptr;
+static PFN_CREATE_COMMITTED_RESOURCE gOrigCreateCommittedResource = nullptr;
+static PFN_CREATE_PLACED_RESOURCE gOrigCreatePlacedResource = nullptr;
+static PFN_CREATE_RESERVED_RESOURCE gOrigCreateReservedResource = nullptr;
 
 struct RootSignatureRecord
 {
@@ -61,7 +83,11 @@ struct DescriptorRecord
 	ID3D12Resource *counterResource = nullptr;
 	D3D12_RESOURCE_DESC resourceDesc = {};
 	bool hasResourceDesc = false;
+	UINT resourceHeapType = 0;
+	bool hasResourceHeapType = false;
 	UINT64 gpuVirtualAddress = 0;
+	UINT64 resourceOffset = 0;
+	UINT64 viewSize = 0;
 	D3D12_CONSTANT_BUFFER_VIEW_DESC cbv = {};
 	D3D12_SHADER_RESOURCE_VIEW_DESC srv = {};
 	D3D12_UNORDERED_ACCESS_VIEW_DESC uav = {};
@@ -69,6 +95,16 @@ struct DescriptorRecord
 	D3D12_DEPTH_STENCIL_VIEW_DESC dsv = {};
 	D3D12_SAMPLER_DESC sampler = {};
 	bool hasDesc = false;
+};
+
+struct ResourceRecord
+{
+	ID3D12Resource *resource = nullptr;
+	D3D12_RESOURCE_DESC desc = {};
+	D3D12_HEAP_TYPE heapType = D3D12_HEAP_TYPE_DEFAULT;
+	bool hasHeapType = false;
+	UINT64 gpuVirtualAddress = 0;
+	UINT64 size = 0;
 };
 
 struct PsoRootRecord
@@ -83,7 +119,11 @@ static SRWLOCK gResourceLock = SRWLOCK_INIT;
 static std::vector<RootSignatureRecord> gRootSignatures;
 static std::vector<DescriptorHeapRecord> gDescriptorHeaps;
 static std::vector<DescriptorRecord> gDescriptors;
+static std::unordered_map<SIZE_T, size_t> gDescriptorByCpuHandle;
 static std::vector<PsoRootRecord> gPsoRoots;
+static std::vector<ResourceRecord> gResources;
+static std::unordered_map<ID3D12Resource*, size_t> gResourceByPtr;
+static bool gCleanupRegistered = false;
 
 static UINT64 Fnv1a64(const void *data, size_t size)
 {
@@ -128,6 +168,57 @@ static const char *ResourceDimensionName(D3D12_RESOURCE_DIMENSION dimension)
 	}
 }
 
+static void RecordResource(
+	ID3D12Resource *resource, const D3D12_RESOURCE_DESC *desc,
+	const D3D12_HEAP_PROPERTIES *heapProperties)
+{
+	if (!resource)
+		return;
+
+	ResourceRecord record;
+	record.resource = resource;
+	record.desc = desc ? *desc : resource->GetDesc();
+	if (heapProperties) {
+		record.heapType = heapProperties->Type;
+		record.hasHeapType = true;
+	}
+
+	if (record.hasHeapType && record.heapType == D3D12_HEAP_TYPE_READBACK)
+		return;
+
+	record.resource->AddRef();
+	if (record.desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER) {
+		record.gpuVirtualAddress = resource->GetGPUVirtualAddress();
+		record.size = record.desc.Width;
+	}
+
+	AcquireSRWLockExclusive(&gResourceLock);
+	auto found = gResourceByPtr.find(resource);
+	if (found != gResourceByPtr.end()) {
+		if (gResources[found->second].resource)
+			gResources[found->second].resource->Release();
+		gResources[found->second] = record;
+	} else {
+		gResourceByPtr[resource] = gResources.size();
+		gResources.push_back(record);
+	}
+	ReleaseSRWLockExclusive(&gResourceLock);
+}
+
+static void CleanupTrackedResources()
+{
+	AcquireSRWLockExclusive(&gResourceLock);
+	for (ResourceRecord &record : gResources) {
+		if (record.resource) {
+			record.resource->Release();
+			record.resource = nullptr;
+		}
+	}
+	gResources.clear();
+	gResourceByPtr.clear();
+	ReleaseSRWLockExclusive(&gResourceLock);
+}
+
 static void FillResourceInfo(DescriptorRecord *record, ID3D12Resource *resource)
 {
 	if (!record || !resource)
@@ -138,12 +229,110 @@ static void FillResourceInfo(DescriptorRecord *record, ID3D12Resource *resource)
 	record->hasResourceDesc = true;
 	if (record->resourceDesc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER)
 		record->gpuVirtualAddress = resource->GetGPUVirtualAddress();
+
+	AcquireSRWLockShared(&gResourceLock);
+	auto found = gResourceByPtr.find(resource);
+	if (found != gResourceByPtr.end() && found->second < gResources.size()) {
+		const ResourceRecord &resourceRecord = gResources[found->second];
+		if (resourceRecord.hasHeapType) {
+			record->resourceHeapType = static_cast<UINT>(resourceRecord.heapType);
+			record->hasResourceHeapType = true;
+		}
+	}
+	ReleaseSRWLockShared(&gResourceLock);
+}
+
+static bool ResolveBufferByGpuVa(UINT64 gpuVa, UINT64 size, DescriptorRecord *record)
+{
+	if (!record || gpuVa == 0)
+		return false;
+
+	bool resolved = false;
+	AcquireSRWLockShared(&gResourceLock);
+	for (const ResourceRecord &resource : gResources) {
+		if (resource.desc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER ||
+			resource.gpuVirtualAddress == 0 || resource.size == 0)
+			continue;
+		const UINT64 begin = resource.gpuVirtualAddress;
+		const UINT64 end = begin + resource.size;
+		const UINT64 requestedEnd = gpuVa + size;
+		if (gpuVa >= begin && requestedEnd <= end) {
+			record->resource = resource.resource;
+			record->resourceDesc = resource.desc;
+			record->hasResourceDesc = true;
+			record->resourceOffset = gpuVa - begin;
+			record->viewSize = size;
+			if (resource.hasHeapType) {
+				record->resourceHeapType = static_cast<UINT>(resource.heapType);
+				record->hasResourceHeapType = true;
+			}
+			resolved = true;
+			break;
+		}
+	}
+	ReleaseSRWLockShared(&gResourceLock);
+	return resolved;
 }
 
 static void RecordDescriptor(DescriptorRecord &&record)
 {
 	AcquireSRWLockExclusive(&gResourceLock);
-	gDescriptors.push_back(std::move(record));
+	auto found = gDescriptorByCpuHandle.find(record.cpuHandle);
+	if (found != gDescriptorByCpuHandle.end()) {
+		gDescriptors[found->second] = std::move(record);
+	} else {
+		gDescriptorByCpuHandle[record.cpuHandle] = gDescriptors.size();
+		gDescriptors.push_back(std::move(record));
+	}
+	ReleaseSRWLockExclusive(&gResourceLock);
+}
+
+static bool FindLatestDescriptorLocked(SIZE_T cpuHandle, DescriptorRecord *record)
+{
+	if (!record)
+		return false;
+
+	auto found = gDescriptorByCpuHandle.find(cpuHandle);
+	if (found == gDescriptorByCpuHandle.end() || found->second >= gDescriptors.size())
+		return false;
+
+	*record = gDescriptors[found->second];
+	return true;
+}
+
+static void RecordDescriptorLocked(DescriptorRecord &&record)
+{
+	auto found = gDescriptorByCpuHandle.find(record.cpuHandle);
+	if (found != gDescriptorByCpuHandle.end()) {
+		gDescriptors[found->second] = std::move(record);
+	} else {
+		gDescriptorByCpuHandle[record.cpuHandle] = gDescriptors.size();
+		gDescriptors.push_back(std::move(record));
+	}
+}
+
+static void RecordDescriptorCopyRange(
+	ID3D12Device *device, D3D12_DESCRIPTOR_HEAP_TYPE type,
+	D3D12_CPU_DESCRIPTOR_HANDLE destStart, D3D12_CPU_DESCRIPTOR_HANDLE srcStart,
+	UINT count)
+{
+	if (!device || count == 0)
+		return;
+
+	const UINT increment = device->GetDescriptorHandleIncrementSize(type);
+	if (increment == 0)
+		return;
+
+	AcquireSRWLockExclusive(&gResourceLock);
+	for (UINT i = 0; i < count; ++i) {
+		const SIZE_T srcHandle = srcStart.ptr + static_cast<SIZE_T>(i) * increment;
+		const SIZE_T destHandle = destStart.ptr + static_cast<SIZE_T>(i) * increment;
+		DescriptorRecord copied;
+		if (FindLatestDescriptorLocked(srcHandle, &copied)) {
+			copied.cpuHandle = destHandle;
+			RecordDescriptorLocked(std::move(copied));
+		}
+	}
 	ReleaseSRWLockExclusive(&gResourceLock);
 }
 
@@ -201,6 +390,8 @@ static void STDMETHODCALLTYPE HookedCreateConstantBufferView(
 		record.cbv = *desc;
 		record.hasDesc = true;
 		record.gpuVirtualAddress = desc->BufferLocation;
+		record.viewSize = desc->SizeInBytes;
+		ResolveBufferByGpuVa(desc->BufferLocation, desc->SizeInBytes, &record);
 		RecordDescriptor(std::move(record));
 	}
 }
@@ -285,10 +476,123 @@ static void STDMETHODCALLTYPE HookedCreateSampler(
 	}
 }
 
+static void STDMETHODCALLTYPE HookedCopyDescriptors(
+	ID3D12Device *device, UINT numDestDescriptorRanges,
+	const D3D12_CPU_DESCRIPTOR_HANDLE *destDescriptorRangeStarts,
+	const UINT *destDescriptorRangeSizes, UINT numSrcDescriptorRanges,
+	const D3D12_CPU_DESCRIPTOR_HANDLE *srcDescriptorRangeStarts,
+	const UINT *srcDescriptorRangeSizes, D3D12_DESCRIPTOR_HEAP_TYPE descriptorHeapsType)
+{
+	gOrigCopyDescriptors(device, numDestDescriptorRanges, destDescriptorRangeStarts,
+		destDescriptorRangeSizes, numSrcDescriptorRanges, srcDescriptorRangeStarts,
+		srcDescriptorRangeSizes, descriptorHeapsType);
+
+	if (!destDescriptorRangeStarts || !srcDescriptorRangeStarts)
+		return;
+
+	UINT destRange = 0;
+	UINT srcRange = 0;
+	UINT destOffset = 0;
+	UINT srcOffset = 0;
+	while (destRange < numDestDescriptorRanges && srcRange < numSrcDescriptorRanges) {
+		const UINT destRangeSize = destDescriptorRangeSizes ? destDescriptorRangeSizes[destRange] : 1;
+		const UINT srcRangeSize = srcDescriptorRangeSizes ? srcDescriptorRangeSizes[srcRange] : 1;
+		if (destOffset >= destRangeSize) {
+			destRange++;
+			destOffset = 0;
+			continue;
+		}
+		if (srcOffset >= srcRangeSize) {
+			srcRange++;
+			srcOffset = 0;
+			continue;
+		}
+
+		const UINT count = min(destRangeSize - destOffset, srcRangeSize - srcOffset);
+		const UINT increment = device ? device->GetDescriptorHandleIncrementSize(descriptorHeapsType) : 0;
+		if (increment) {
+			D3D12_CPU_DESCRIPTOR_HANDLE dest = destDescriptorRangeStarts[destRange];
+			D3D12_CPU_DESCRIPTOR_HANDLE src = srcDescriptorRangeStarts[srcRange];
+			dest.ptr += static_cast<SIZE_T>(destOffset) * increment;
+			src.ptr += static_cast<SIZE_T>(srcOffset) * increment;
+			RecordDescriptorCopyRange(device, descriptorHeapsType, dest, src, count);
+		}
+		destOffset += count;
+		srcOffset += count;
+	}
+}
+
+static void STDMETHODCALLTYPE HookedCopyDescriptorsSimple(
+	ID3D12Device *device, UINT numDescriptors, D3D12_CPU_DESCRIPTOR_HANDLE destDescriptorRangeStart,
+	D3D12_CPU_DESCRIPTOR_HANDLE srcDescriptorRangeStart, D3D12_DESCRIPTOR_HEAP_TYPE descriptorHeapsType)
+{
+	gOrigCopyDescriptorsSimple(device, numDescriptors, destDescriptorRangeStart,
+		srcDescriptorRangeStart, descriptorHeapsType);
+	RecordDescriptorCopyRange(device, descriptorHeapsType, destDescriptorRangeStart,
+		srcDescriptorRangeStart, numDescriptors);
+}
+
+static HRESULT STDMETHODCALLTYPE HookedCreateCommittedResource(
+	ID3D12Device *device, const D3D12_HEAP_PROPERTIES *heapProperties,
+	D3D12_HEAP_FLAGS heapFlags, const D3D12_RESOURCE_DESC *desc,
+	D3D12_RESOURCE_STATES initialState, const D3D12_CLEAR_VALUE *optimizedClearValue,
+	REFIID riid, void **resource)
+{
+	HRESULT hr = gOrigCreateCommittedResource(device, heapProperties, heapFlags, desc,
+		initialState, optimizedClearValue, riid, resource);
+	if (SUCCEEDED(hr) && resource && *resource) {
+		ID3D12Resource *d3dResource = nullptr;
+		if (SUCCEEDED(static_cast<IUnknown*>(*resource)->QueryInterface(IID_PPV_ARGS(&d3dResource)))) {
+			RecordResource(d3dResource, desc, heapProperties);
+			d3dResource->Release();
+		}
+	}
+	return hr;
+}
+
+static HRESULT STDMETHODCALLTYPE HookedCreatePlacedResource(
+	ID3D12Device *device, ID3D12Heap *heap, UINT64 heapOffset,
+	const D3D12_RESOURCE_DESC *desc, D3D12_RESOURCE_STATES initialState,
+	const D3D12_CLEAR_VALUE *optimizedClearValue, REFIID riid, void **resource)
+{
+	HRESULT hr = gOrigCreatePlacedResource(device, heap, heapOffset, desc,
+		initialState, optimizedClearValue, riid, resource);
+	if (SUCCEEDED(hr) && resource && *resource) {
+		ID3D12Resource *d3dResource = nullptr;
+		if (SUCCEEDED(static_cast<IUnknown*>(*resource)->QueryInterface(IID_PPV_ARGS(&d3dResource)))) {
+			RecordResource(d3dResource, desc, nullptr);
+			d3dResource->Release();
+		}
+	}
+	return hr;
+}
+
+static HRESULT STDMETHODCALLTYPE HookedCreateReservedResource(
+	ID3D12Device *device, const D3D12_RESOURCE_DESC *desc,
+	D3D12_RESOURCE_STATES initialState, const D3D12_CLEAR_VALUE *optimizedClearValue,
+	REFIID riid, void **resource)
+{
+	HRESULT hr = gOrigCreateReservedResource(device, desc, initialState,
+		optimizedClearValue, riid, resource);
+	if (SUCCEEDED(hr) && resource && *resource) {
+		ID3D12Resource *d3dResource = nullptr;
+		if (SUCCEEDED(static_cast<IUnknown*>(*resource)->QueryInterface(IID_PPV_ARGS(&d3dResource)))) {
+			RecordResource(d3dResource, desc, nullptr);
+			d3dResource->Release();
+		}
+	}
+	return hr;
+}
+
 void DX12HookResourceMetadata(ID3D12Device *device)
 {
 	if (!device)
 		return;
+
+	if (!gCleanupRegistered) {
+		atexit(CleanupTrackedResources);
+		gCleanupRegistered = true;
+	}
 
 	void **vtable = *reinterpret_cast<void***>(device);
 	if (!vtable)
@@ -310,6 +614,16 @@ void DX12HookResourceMetadata(ID3D12Device *device)
 		vtable[21], HookedCreateDepthStencilView, "ID3D12Device::CreateDepthStencilView");
 	DX12HookFunction(reinterpret_cast<void**>(&gOrigCreateSampler),
 		vtable[22], HookedCreateSampler, "ID3D12Device::CreateSampler");
+	DX12HookFunction(reinterpret_cast<void**>(&gOrigCopyDescriptors),
+		vtable[23], HookedCopyDescriptors, "ID3D12Device::CopyDescriptors");
+	DX12HookFunction(reinterpret_cast<void**>(&gOrigCopyDescriptorsSimple),
+		vtable[24], HookedCopyDescriptorsSimple, "ID3D12Device::CopyDescriptorsSimple");
+	DX12HookFunction(reinterpret_cast<void**>(&gOrigCreateCommittedResource),
+		vtable[27], HookedCreateCommittedResource, "ID3D12Device::CreateCommittedResource");
+	DX12HookFunction(reinterpret_cast<void**>(&gOrigCreatePlacedResource),
+		vtable[29], HookedCreatePlacedResource, "ID3D12Device::CreatePlacedResource");
+	DX12HookFunction(reinterpret_cast<void**>(&gOrigCreateReservedResource),
+		vtable[30], HookedCreateReservedResource, "ID3D12Device::CreateReservedResource");
 }
 
 void DX12RecordPsoRootSignature(
@@ -325,6 +639,113 @@ void DX12RecordPsoRootSignature(
 	AcquireSRWLockExclusive(&gResourceLock);
 	gPsoRoots.push_back(record);
 	ReleaseSRWLockExclusive(&gResourceLock);
+}
+
+static void FillDescriptorSummary(DX12DescriptorSummary *summary, const DescriptorRecord &record)
+{
+	if (!summary)
+		return;
+
+	summary->kind = record.kind;
+	summary->cpuHandle = record.cpuHandle;
+	summary->resource = record.resource;
+	summary->counterResource = record.counterResource;
+	summary->resourceDesc = record.resourceDesc;
+	summary->hasResourceDesc = record.hasResourceDesc;
+	summary->resourceHeapType = record.resourceHeapType;
+	summary->hasResourceHeapType = record.hasResourceHeapType;
+	summary->gpuVirtualAddress = record.gpuVirtualAddress;
+	summary->resourceOffset = record.resourceOffset;
+	summary->viewSize = record.viewSize;
+	summary->hasDesc = record.hasDesc;
+
+	if (record.kind == "CBV") {
+		summary->cbvSize = record.cbv.SizeInBytes;
+	} else if (record.kind == "SRV" && record.hasDesc) {
+		summary->viewFormat = static_cast<UINT>(record.srv.Format);
+		summary->viewDimension = static_cast<UINT>(record.srv.ViewDimension);
+	} else if (record.kind == "UAV" && record.hasDesc) {
+		summary->viewFormat = static_cast<UINT>(record.uav.Format);
+		summary->viewDimension = static_cast<UINT>(record.uav.ViewDimension);
+	} else if (record.kind == "RTV" && record.hasDesc) {
+		summary->viewFormat = static_cast<UINT>(record.rtv.Format);
+		summary->viewDimension = static_cast<UINT>(record.rtv.ViewDimension);
+	} else if (record.kind == "DSV" && record.hasDesc) {
+		summary->viewFormat = static_cast<UINT>(record.dsv.Format);
+		summary->viewDimension = static_cast<UINT>(record.dsv.ViewDimension);
+	}
+}
+
+void DX12GetResourceMetadataSnapshot(
+	std::vector<DX12RootSignatureSummary> *rootSignatures,
+	std::vector<DX12DescriptorSummary> *descriptors,
+	std::vector<DX12PsoRootSummary> *psoRoots)
+{
+	DX12GetResourceMetadataSnapshot(rootSignatures, descriptors, psoRoots, nullptr);
+}
+
+void DX12GetResourceMetadataSnapshot(
+	std::vector<DX12RootSignatureSummary> *rootSignatures,
+	std::vector<DX12DescriptorSummary> *descriptors,
+	std::vector<DX12PsoRootSummary> *psoRoots,
+	std::vector<DX12DescriptorHeapSummary> *descriptorHeaps)
+{
+	AcquireSRWLockShared(&gResourceLock);
+
+	if (rootSignatures) {
+		rootSignatures->clear();
+		rootSignatures->reserve(gRootSignatures.size());
+		for (const RootSignatureRecord &record : gRootSignatures) {
+			DX12RootSignatureSummary summary;
+			summary.rootSignature = record.rootSignature;
+			summary.hash = record.hash;
+			summary.size = record.size;
+			summary.nodeMask = record.nodeMask;
+			rootSignatures->push_back(summary);
+		}
+	}
+
+	if (descriptors) {
+		descriptors->clear();
+		descriptors->reserve(gDescriptors.size());
+		for (const DescriptorRecord &record : gDescriptors) {
+			DX12DescriptorSummary summary;
+			FillDescriptorSummary(&summary, record);
+			descriptors->push_back(summary);
+		}
+	}
+
+	if (psoRoots) {
+		psoRoots->clear();
+		psoRoots->reserve(gPsoRoots.size());
+		for (const PsoRootRecord &record : gPsoRoots) {
+			DX12PsoRootSummary summary;
+			summary.psoIndex = record.psoIndex;
+			summary.kind = record.kind;
+			summary.pipelineState = record.pipelineState;
+			summary.rootSignature = record.rootSignature;
+			psoRoots->push_back(summary);
+		}
+	}
+
+	if (descriptorHeaps) {
+		descriptorHeaps->clear();
+		descriptorHeaps->reserve(gDescriptorHeaps.size());
+		for (const DescriptorHeapRecord &record : gDescriptorHeaps) {
+			DX12DescriptorHeapSummary summary;
+			summary.heap = record.heap;
+			summary.type = static_cast<UINT>(record.desc.Type);
+			summary.numDescriptors = record.desc.NumDescriptors;
+			summary.flags = static_cast<UINT>(record.desc.Flags);
+			summary.nodeMask = record.desc.NodeMask;
+			summary.cpuStart = record.cpuStart;
+			summary.gpuStart = record.gpuStart;
+			summary.increment = record.increment;
+			descriptorHeaps->push_back(summary);
+		}
+	}
+
+	ReleaseSRWLockShared(&gResourceLock);
 }
 
 static void WriteResourceDesc(FILE *file, const DescriptorRecord &record)
@@ -413,7 +834,7 @@ void DX12DumpResourceMetadata(const wchar_t *dir)
 
 	fprintf(file, "\nDescriptors\n");
 	fprintf(file,
-		"index,kind,cpu_handle,resource,counter_resource,resource_dimension,width,height,depth_or_array,mips,format,flags,gpu_va,sample_count,has_view_desc,view_format,view_dimension,cbv_size\n");
+		"index,kind,cpu_handle,resource,counter_resource,resource_dimension,width,height,depth_or_array,mips,format,flags,gpu_va,sample_count,resource_offset,view_size,heap_type,has_view_desc,view_format,view_dimension,cbv_size\n");
 	for (size_t i = 0; i < descriptors.size(); ++i) {
 		const DescriptorRecord &record = descriptors[i];
 		fprintf(file, "%zu,%s,0x%llx,%p,%p",
@@ -443,7 +864,10 @@ void DX12DumpResourceMetadata(const wchar_t *dir)
 			viewDimension = static_cast<UINT>(record.dsv.ViewDimension);
 		}
 
-		fprintf(file, ",%u,%u,%u,%u\n",
+		fprintf(file, ",%llu,%llu,%u,%u,%u,%u,%u\n",
+			static_cast<unsigned long long>(record.resourceOffset),
+			static_cast<unsigned long long>(record.viewSize),
+			record.hasResourceHeapType ? record.resourceHeapType : 0,
 			record.hasDesc ? 1 : 0,
 			viewFormat,
 			viewDimension,

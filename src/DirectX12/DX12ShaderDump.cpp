@@ -10,8 +10,11 @@
 #include <algorithm>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
+#include "DX12BindingTracker.h"
+#include "DX12ResourceDump.h"
 #include "DX12ResourceTracker.h"
 #include "DX12State.h"
 
@@ -664,6 +667,283 @@ static void WriteShaderAnalysisFile(
 	DX12Log("Shader analysis written: %S entries=%zu\n", path, analyses.size());
 }
 
+static void WritePsoResourceSummaryFile(
+	const wchar_t *dir, const std::vector<ShaderRecord> &shaders,
+	const std::vector<PsoRecord> &psos)
+{
+	if (!dir)
+		return;
+
+	std::unordered_map<std::string, ShaderAnalysisRecord> analysesByKey;
+	analysesByKey.reserve(shaders.size());
+	for (const ShaderRecord &shader : shaders) {
+		ShaderAnalysisRecord analysis;
+		BuildShaderAnalysisRecord(dir, shader, &analysis);
+		analysesByKey.emplace(MakeShaderKey(shader.stage.c_str(), shader.hash), std::move(analysis));
+	}
+
+	std::vector<DX12RootSignatureSummary> rootSignatures;
+	std::vector<DX12DescriptorSummary> descriptors;
+	std::vector<DX12PsoRootSummary> psoRoots;
+	DX12GetResourceMetadataSnapshot(&rootSignatures, &descriptors, &psoRoots);
+
+	std::unordered_map<ID3D12RootSignature*, DX12RootSignatureSummary> rootsByPtr;
+	rootsByPtr.reserve(rootSignatures.size());
+	for (const DX12RootSignatureSummary &root : rootSignatures) {
+		if (root.rootSignature && rootsByPtr.find(root.rootSignature) == rootsByPtr.end())
+			rootsByPtr.emplace(root.rootSignature, root);
+	}
+
+	std::unordered_map<UINT64, DX12PsoRootSummary> psoRootsByIndex;
+	psoRootsByIndex.reserve(psoRoots.size());
+	for (const DX12PsoRootSummary &root : psoRoots)
+		psoRootsByIndex[root.psoIndex] = root;
+
+	UINT64 totalCBV = 0;
+	UINT64 totalSRV = 0;
+	UINT64 totalUAV = 0;
+	UINT64 totalRTV = 0;
+	UINT64 totalDSV = 0;
+	UINT64 totalSampler = 0;
+	UINT64 totalTexture2D = 0;
+	UINT64 totalBuffer = 0;
+	for (const DX12DescriptorSummary &descriptor : descriptors) {
+		if (descriptor.kind == "CBV")
+			totalCBV++;
+		else if (descriptor.kind == "SRV")
+			totalSRV++;
+		else if (descriptor.kind == "UAV")
+			totalUAV++;
+		else if (descriptor.kind == "RTV")
+			totalRTV++;
+		else if (descriptor.kind == "DSV")
+			totalDSV++;
+		else if (descriptor.kind == "Sampler")
+			totalSampler++;
+
+		if (descriptor.hasResourceDesc) {
+			if (descriptor.resourceDesc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D)
+				totalTexture2D++;
+			else if (descriptor.resourceDesc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER)
+				totalBuffer++;
+		}
+	}
+
+	wchar_t path[MAX_PATH];
+	swprintf_s(path, L"%s\\PsoResourceSummaryDX12.txt", dir);
+	FILE *file = _wfsopen(path, L"w", _SH_DENYNO);
+	if (!file)
+		return;
+
+	fprintf(file, "DX12 PSO Resource Summary\n");
+	fprintf(file, "=========================\n");
+	fprintf(file,
+		"psos=%zu shaders=%zu root_signatures=%zu descriptors=%zu cbv=%llu srv=%llu uav=%llu rtv=%llu dsv=%llu sampler=%llu texture2d=%llu buffer=%llu\n\n",
+		psos.size(),
+		shaders.size(),
+		rootSignatures.size(),
+		descriptors.size(),
+		static_cast<unsigned long long>(totalCBV),
+		static_cast<unsigned long long>(totalSRV),
+		static_cast<unsigned long long>(totalUAV),
+		static_cast<unsigned long long>(totalRTV),
+		static_cast<unsigned long long>(totalDSV),
+		static_cast<unsigned long long>(totalSampler),
+		static_cast<unsigned long long>(totalTexture2D),
+		static_cast<unsigned long long>(totalBuffer));
+
+	fprintf(file, "PSO Summary\n");
+	fprintf(file,
+		"pso,kind,pipeline_state,root_signature,root_hash,root_size,shaders,shader_tags,cbuffers,textures,samplers,uavs,samples,texture_loads,raw_buffer_loads,cbuffer_loads,store_outputs,discard,depth,candidate\n");
+
+	for (const PsoRecord &pso : psos) {
+		DX12PsoRootSummary psoRoot;
+		auto psoRootIt = psoRootsByIndex.find(pso.index);
+		if (psoRootIt != psoRootsByIndex.end())
+			psoRoot = psoRootIt->second;
+
+		DX12RootSignatureSummary root;
+		auto rootIt = rootsByPtr.find(psoRoot.rootSignature);
+		if (rootIt != rootsByPtr.end())
+			root = rootIt->second;
+
+		UINT cbuffers = 0;
+		UINT textures = 0;
+		UINT samplers = 0;
+		UINT uavs = 0;
+		UINT samples = 0;
+		UINT textureLoads = 0;
+		UINT rawBufferLoads = 0;
+		UINT cbufferLoads = 0;
+		UINT storeOutputs = 0;
+		bool hasDiscard = false;
+		bool writesDepth = false;
+		bool hasVS = false;
+		bool hasPS = false;
+		bool hasCS = false;
+		bool hasUiTag = false;
+		bool hasLarge = false;
+		std::string shaderList;
+		std::string tagList;
+		std::unordered_set<std::string> uniqueTags;
+
+		for (size_t i = 0; i < pso.shaders.size(); ++i) {
+			if (i)
+				shaderList += ";";
+			shaderList += pso.shaders[i];
+
+			auto analysisIt = analysesByKey.find(pso.shaders[i]);
+			if (analysisIt == analysesByKey.end())
+				continue;
+			const ShaderAnalysisRecord &analysis = analysisIt->second;
+			cbuffers += analysis.cbuffers;
+			textures += analysis.textures;
+			samplers += analysis.samplers;
+			uavs += analysis.uavs;
+			samples += analysis.samples;
+			textureLoads += analysis.textureLoads;
+			rawBufferLoads += analysis.rawBufferLoads;
+			cbufferLoads += analysis.cbufferLoads;
+			storeOutputs += analysis.storeOutputs;
+			hasDiscard = hasDiscard || analysis.hasDiscard;
+			writesDepth = writesDepth || analysis.writesDepth;
+			hasVS = hasVS || analysis.shader.stage == "vs";
+			hasPS = hasPS || analysis.shader.stage == "ps";
+			hasCS = hasCS || analysis.shader.stage == "cs";
+			hasUiTag = hasUiTag || analysis.tags.find("ui-canvas-candidate") != std::string::npos;
+			hasLarge = hasLarge || analysis.tags.find("large") != std::string::npos;
+
+			size_t tagStart = 0;
+			while (tagStart < analysis.tags.size()) {
+				size_t tagEnd = analysis.tags.find('|', tagStart);
+				if (tagEnd == std::string::npos)
+					tagEnd = analysis.tags.size();
+				std::string tag = analysis.tags.substr(tagStart, tagEnd - tagStart);
+				if (!tag.empty() && uniqueTags.insert(tag).second) {
+					if (!tagList.empty())
+						tagList += "|";
+					tagList += tag;
+				}
+				tagStart = tagEnd + 1;
+			}
+		}
+
+		const char *candidate = "other";
+		if (hasCS)
+			candidate = "compute";
+		else if (hasUiTag)
+			candidate = "ui-candidate";
+		else if (hasPS && (samples || textureLoads))
+			candidate = hasDiscard ? "alpha/material-candidate" : "material/postprocess-candidate";
+		else if (hasVS && hasPS)
+			candidate = "draw-candidate";
+		else if (hasLarge)
+			candidate = "large-shader-candidate";
+
+		fprintf(file,
+			"%llu,%s,%p,%p,%016llx,%zu,%s,%s,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%s\n",
+			static_cast<unsigned long long>(pso.index),
+			pso.kind.c_str(),
+			psoRoot.pipelineState,
+			psoRoot.rootSignature,
+			static_cast<unsigned long long>(root.hash),
+			root.size,
+			shaderList.c_str(),
+			tagList.c_str(),
+			cbuffers,
+			textures,
+			samplers,
+			uavs,
+			samples,
+			textureLoads,
+			rawBufferLoads,
+			cbufferLoads,
+			storeOutputs,
+			hasDiscard ? 1 : 0,
+			writesDepth ? 1 : 0,
+			candidate);
+	}
+
+	fprintf(file, "\nRoot Signature Usage\n");
+	fprintf(file, "root_signature,root_hash,root_size,pso_count,first_pso\n");
+	std::unordered_map<ID3D12RootSignature*, UINT> rootUseCount;
+	std::unordered_map<ID3D12RootSignature*, UINT64> rootFirstPso;
+	for (const DX12PsoRootSummary &psoRoot : psoRoots) {
+		rootUseCount[psoRoot.rootSignature]++;
+		auto firstIt = rootFirstPso.find(psoRoot.rootSignature);
+		if (firstIt == rootFirstPso.end() || psoRoot.psoIndex < firstIt->second)
+			rootFirstPso[psoRoot.rootSignature] = psoRoot.psoIndex;
+	}
+	for (const auto &item : rootUseCount) {
+		DX12RootSignatureSummary root;
+		auto rootIt = rootsByPtr.find(item.first);
+		if (rootIt != rootsByPtr.end())
+			root = rootIt->second;
+		fprintf(file, "%p,%016llx,%zu,%u,%llu\n",
+			item.first,
+			static_cast<unsigned long long>(root.hash),
+			root.size,
+			item.second,
+			static_cast<unsigned long long>(rootFirstPso[item.first]));
+	}
+
+	fprintf(file, "\nDescriptor Inventory\n");
+	fprintf(file, "kind,count\n");
+	fprintf(file, "CBV,%llu\n", static_cast<unsigned long long>(totalCBV));
+	fprintf(file, "SRV,%llu\n", static_cast<unsigned long long>(totalSRV));
+	fprintf(file, "UAV,%llu\n", static_cast<unsigned long long>(totalUAV));
+	fprintf(file, "RTV,%llu\n", static_cast<unsigned long long>(totalRTV));
+	fprintf(file, "DSV,%llu\n", static_cast<unsigned long long>(totalDSV));
+	fprintf(file, "Sampler,%llu\n", static_cast<unsigned long long>(totalSampler));
+
+	fclose(file);
+	DX12Log("PSO resource summary written: %S psos=%zu roots=%zu descriptors=%zu\n",
+		path, psos.size(), rootSignatures.size(), descriptors.size());
+}
+
+static bool TryWritePsoResourceSummaryFile(
+	const wchar_t *dir, const std::vector<ShaderRecord> &shaders,
+	const std::vector<PsoRecord> &psos)
+{
+	bool ok = true;
+	__try {
+		WritePsoResourceSummaryFile(dir, shaders, psos);
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER) {
+		ok = false;
+		DX12Log("PSO resource summary skipped after exception=0x%lx\n",
+			GetExceptionCode());
+	}
+	return ok;
+}
+
+static bool TryDumpBindingTrace(const wchar_t *dir)
+{
+	bool ok = true;
+	__try {
+		DX12DumpBindingTrace(dir);
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER) {
+		ok = false;
+		DX12Log("Binding trace skipped after exception=0x%lx\n", GetExceptionCode());
+	}
+	return ok;
+}
+
+static bool TryDumpCurrentFrameResources(const wchar_t *dir)
+{
+	bool ok = true;
+	__try {
+		DX12DumpCurrentFrameResources(dir);
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER) {
+		ok = false;
+		DX12Log("Current-frame resource files skipped after exception=0x%lx\n",
+			GetExceptionCode());
+	}
+	return ok;
+}
+
 static size_t AlignUp(size_t value, size_t alignment)
 {
 	return (value + alignment - 1) & ~(alignment - 1);
@@ -1011,13 +1291,24 @@ void DX12DumpCachedShaders()
 		fclose(psoLog);
 	}
 
+	DX12Log("F8 stage: shader analysis begin\n");
 	WriteShaderAnalysisFile(dir, shaders, psos);
+	DX12Log("F8 stage: resource metadata begin\n");
 	DX12DumpResourceMetadata(dir);
+	DX12Log("F8 stage: pso resource summary begin\n");
+	bool psoSummaryOk = TryWritePsoResourceSummaryFile(dir, shaders, psos);
+	DX12Log("F8 stage: binding trace begin\n");
+	bool bindingTraceOk = TryDumpBindingTrace(dir);
+	DX12Log("F8 stage: resource files begin\n");
+	bool resourceFilesOk = TryDumpCurrentFrameResources(dir);
 
 	wchar_t status[128];
-	swprintf_s(status, L"F8 dumped %u shaders / %u asm / %zu PSOs | analysis ready",
+	swprintf_s(status, L"F8 dumped %u shaders / %u asm / %zu PSOs | summary ready",
 		writtenShaders, writtenDisassembly, psos.size());
 	DX12SetOverlayStatus(status);
-	DX12Log("F8 shader dump complete: dir=%S shaders=%u/%zu asm=%u/%zu psos=%zu analysis=1\n",
-		dir, writtenShaders, shaders.size(), writtenDisassembly, shaders.size(), psos.size());
+	DX12Log("F8 shader dump complete: dir=%S shaders=%u/%zu asm=%u/%zu psos=%zu analysis=1 resourceSummary=%u bindingTrace=%u resourceFiles=%u\n",
+		dir, writtenShaders, shaders.size(), writtenDisassembly, shaders.size(), psos.size(),
+		psoSummaryOk ? 1 : 0,
+		bindingTraceOk ? 1 : 0,
+		resourceFilesOk ? 1 : 0);
 }
