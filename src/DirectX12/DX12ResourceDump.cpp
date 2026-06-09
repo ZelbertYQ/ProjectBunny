@@ -14,9 +14,17 @@
 
 static constexpr UINT64 MaxResourceDumpBytes = 256ull * 1024ull * 1024ull;
 
+enum class DumpTaskSource
+{
+	Descriptor,
+	InputAssembler,
+};
+
 struct DumpTask
 {
+	DumpTaskSource sourceKind = DumpTaskSource::Descriptor;
 	DX12FrameResourceBinding binding;
+	DX12FrameIaBufferBinding iaBuffer;
 	ID3D12Resource *source = nullptr;
 	ID3D12Resource *readback = nullptr;
 	D3D12_RESOURCE_DESC desc = {};
@@ -89,11 +97,27 @@ static D3D12_RESOURCE_STATES GuessSourceState(const DX12FrameResourceBinding &bi
 	return D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
 }
 
+static D3D12_RESOURCE_STATES GuessIaBufferSourceState(const DX12FrameIaBufferBinding &buffer)
+{
+	if (buffer.role == "IB")
+		return D3D12_RESOURCE_STATE_INDEX_BUFFER;
+	return D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
+}
+
 static bool ResourceNeedsBarrier(const DX12DescriptorSummary &descriptor)
 {
 	if (descriptor.hasResourceHeapType &&
 		(descriptor.resourceHeapType == D3D12_HEAP_TYPE_UPLOAD ||
 			descriptor.resourceHeapType == D3D12_HEAP_TYPE_READBACK))
+		return false;
+	return true;
+}
+
+static bool ResourceNeedsBarrier(const DX12BufferResourceSummary &resource)
+{
+	if (resource.hasResourceHeapType &&
+		(resource.resourceHeapType == D3D12_HEAP_TYPE_UPLOAD ||
+			resource.resourceHeapType == D3D12_HEAP_TYPE_READBACK))
 		return false;
 	return true;
 }
@@ -107,10 +131,13 @@ static bool StateTrackingAllowsCopy(const DX12DescriptorSummary &descriptor)
 	return descriptor.hasCurrentState;
 }
 
-static bool IsUploadHeapResource(const DX12DescriptorSummary &descriptor)
+static bool StateTrackingAllowsCopy(const DX12BufferResourceSummary &resource)
 {
-	return descriptor.hasResourceHeapType &&
-		descriptor.resourceHeapType == D3D12_HEAP_TYPE_UPLOAD;
+	if (resource.hasResourceHeapType &&
+		(resource.resourceHeapType == D3D12_HEAP_TYPE_UPLOAD ||
+			resource.resourceHeapType == D3D12_HEAP_TYPE_READBACK))
+		return true;
+	return resource.hasCurrentState;
 }
 
 static void WriteResourceBarrier(
@@ -235,12 +262,46 @@ static bool ShouldDumpBinding(const DX12FrameResourceBinding &binding)
 		dimension == D3D12_RESOURCE_DIMENSION_BUFFER;
 }
 
+static bool CreateReadbackForTask(ID3D12Device *device, DumpTask *task)
+{
+	if (!device || !task)
+		return false;
+
+	if (task->copyBytes == 0 || task->copyBytes > MaxResourceDumpBytes) {
+		task->skipNote = "copy_size_zero_or_too_large";
+		return false;
+	}
+
+	D3D12_HEAP_PROPERTIES heapProps = {};
+	heapProps.Type = D3D12_HEAP_TYPE_READBACK;
+	D3D12_RESOURCE_DESC readbackDesc = {};
+	readbackDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+	readbackDesc.Width = task->copyBytes;
+	readbackDesc.Height = 1;
+	readbackDesc.DepthOrArraySize = 1;
+	readbackDesc.MipLevels = 1;
+	readbackDesc.SampleDesc.Count = 1;
+	readbackDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+	HRESULT hr = device->CreateCommittedResource(
+		&heapProps, D3D12_HEAP_FLAG_NONE, &readbackDesc,
+		D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&task->readback));
+	if (FAILED(hr) || !task->readback) {
+		task->skipNote = "readback_create_failed";
+		return false;
+	}
+
+	task->ready = true;
+	return true;
+}
+
 static bool PrepareTask(ID3D12Device *device, const DX12FrameResourceBinding &binding, DumpTask *task)
 {
 	if (!device || !task || !ShouldDumpBinding(binding))
 		return false;
 
 	const bool unsafeCopy = UnsafeResourceCopyEnabled();
+	task->sourceKind = DumpTaskSource::Descriptor;
 	task->binding = binding;
 	task->source = binding.descriptor.resource;
 	task->desc = binding.descriptor.resourceDesc;
@@ -274,32 +335,40 @@ static bool PrepareTask(ID3D12Device *device, const DX12FrameResourceBinding &bi
 		return false;
 	}
 
-	if (task->copyBytes == 0 || task->copyBytes > MaxResourceDumpBytes) {
-		task->skipNote = "copy_size_zero_or_too_large";
+	return CreateReadbackForTask(device, task);
+}
+
+static bool PrepareIaBufferTask(ID3D12Device *device, const DX12FrameIaBufferBinding &buffer, DumpTask *task)
+{
+	if (!device || !task || !buffer.resolved || !buffer.resource.resource ||
+		!buffer.resource.hasResourceDesc)
+		return false;
+
+	const bool unsafeCopy = UnsafeResourceCopyEnabled();
+	task->sourceKind = DumpTaskSource::InputAssembler;
+	task->iaBuffer = buffer;
+	task->source = buffer.resource.resource;
+	task->desc = buffer.resource.resourceDesc;
+	if (task->desc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER) {
+		task->skipNote = "unsupported_dimension";
 		return false;
 	}
-
-	D3D12_HEAP_PROPERTIES heapProps = {};
-	heapProps.Type = D3D12_HEAP_TYPE_READBACK;
-	D3D12_RESOURCE_DESC readbackDesc = {};
-	readbackDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-	readbackDesc.Width = task->copyBytes;
-	readbackDesc.Height = 1;
-	readbackDesc.DepthOrArraySize = 1;
-	readbackDesc.MipLevels = 1;
-	readbackDesc.SampleDesc.Count = 1;
-	readbackDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-
-	HRESULT hr = device->CreateCommittedResource(
-		&heapProps, D3D12_HEAP_FLAG_NONE, &readbackDesc,
-		D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&task->readback));
-	if (FAILED(hr) || !task->readback) {
-		task->skipNote = "readback_create_failed";
+	task->sourceOffset = buffer.resource.resourceOffset;
+	task->copyBytes = buffer.size;
+	if (task->sourceOffset + task->copyBytes > task->desc.Width)
+		task->copyBytes = task->desc.Width > task->sourceOffset ? task->desc.Width - task->sourceOffset : 0;
+	task->sourceState = buffer.resource.hasCurrentState ?
+		static_cast<D3D12_RESOURCE_STATES>(buffer.resource.currentState) :
+		GuessIaBufferSourceState(buffer);
+	task->stateKnown = StateTrackingAllowsCopy(buffer.resource);
+	if (!unsafeCopy && !task->stateKnown) {
+		task->skipNote = "state_unknown";
 		return false;
 	}
+	task->needsBarrier = ResourceNeedsBarrier(buffer.resource);
+	task->isTexture = false;
 
-	task->ready = true;
-	return true;
+	return CreateReadbackForTask(device, task);
 }
 
 static void ReleaseTasks(std::vector<DumpTask> *tasks)
@@ -339,6 +408,43 @@ static void WriteIndexRow(
 	UINT64 sourceOffset, UINT64 copyBytes, D3D12_RESOURCE_STATES sourceState,
 	bool hasCurrentState, const wchar_t *fileName, const char *note)
 {
+	if (task.sourceKind == DumpTaskSource::InputAssembler) {
+		const DX12FrameIaBufferBinding &buffer = task.iaBuffer;
+		const DX12BufferResourceSummary &resource = buffer.resource;
+		fprintf(index,
+			"%s,0,-,-,-,input_assembler,%u,%p,%u,%u,0x%llx,0x0,0x%llx,"
+			"%s,%p,%s,%llu,%u,%u,0x%llx,%llu,%llu,0x%x,%u,%u,%u,%u,%u,%u,%u,%llu,%llu,%S,%s\n",
+			status,
+			buffer.slot,
+			static_cast<void*>(nullptr),
+			0,
+			0,
+			static_cast<unsigned long long>(buffer.gpuVa),
+			static_cast<unsigned long long>(resource.gpuVirtualAddress),
+			buffer.role.c_str(),
+			resource.resource,
+			ResourceDimensionName(desc.Dimension),
+			static_cast<unsigned long long>(desc.Width),
+			desc.Height,
+			static_cast<UINT>(desc.Format),
+			static_cast<unsigned long long>(buffer.gpuVa),
+			static_cast<unsigned long long>(sourceOffset),
+			static_cast<unsigned long long>(copyBytes),
+			static_cast<UINT>(sourceState),
+			hasCurrentState ? 1 : 0,
+			0,
+			buffer.format,
+			0,
+			0,
+			0,
+			buffer.stride,
+			static_cast<unsigned long long>(sourceOffset),
+			static_cast<unsigned long long>(copyBytes),
+			fileName ? fileName : L"",
+			note ? note : "");
+		return;
+	}
+
 	DX12PsoShaderSummary shaders;
 	const bool hasShaders = DX12GetPsoShaderSummary(task.binding.psoIndex, &shaders);
 	char vs[32], ps[32], cs[32];
@@ -455,6 +561,8 @@ void DX12DumpCurrentFrameResources(const wchar_t *dir)
 
 	std::vector<DX12FrameResourceBinding> bindings;
 	DX12GetCurrentFrameResourceBindings(&bindings);
+	std::vector<DX12FrameIaBufferBinding> iaBuffers;
+	DX12GetCurrentFrameIaBuffers(&iaBuffers);
 
 	wchar_t resourceDir[MAX_PATH];
 	swprintf_s(resourceDir, L"%s\\CurrentFrameResourceFiles", dir);
@@ -468,8 +576,8 @@ void DX12DumpCurrentFrameResources(const wchar_t *dir)
 
 	fprintf(index, "DX12 Current Frame Resource Files\n");
 	fprintf(index, "=================================\n");
-	fprintf(index, "bindings=%zu max_resource_bytes=%llu buffer_extension=.buf unsafe_resource_copy=%u state_tracking=1\n\n",
-		bindings.size(), static_cast<unsigned long long>(MaxResourceDumpBytes),
+	fprintf(index, "bindings=%zu ia_buffers=%zu max_resource_bytes=%llu buffer_extension=.buf unsafe_resource_copy=%u state_tracking=1\n\n",
+		bindings.size(), iaBuffers.size(), static_cast<unsigned long long>(MaxResourceDumpBytes),
 		UnsafeResourceCopyEnabled() ? 1 : 0);
 	fprintf(index,
 		"status,pso,vs_hash,ps_hash,cs_hash,bind_space,root_param,heap,heap_type,descriptor_index,gpu_handle,cpu_handle,heap_gpu_start,descriptor_kind,resource,dimension,width,height,format,gpu_va,resource_offset,copy_bytes,current_state,has_current_state,has_view_desc,view_format,view_dimension,first_element,num_elements,stride,buffer_view_offset,buffer_view_bytes,file,note\n");
@@ -526,6 +634,34 @@ void DX12DumpCurrentFrameResources(const wchar_t *dir)
 		}
 	}
 
+	for (const DX12FrameIaBufferBinding &buffer : iaBuffers) {
+		char key[128];
+		sprintf_s(key, "ia|%s", buffer.bufferId.c_str());
+		if (!dumpedKeys.insert(key).second) {
+			DumpTask duplicate;
+			duplicate.sourceKind = DumpTaskSource::InputAssembler;
+			duplicate.iaBuffer = buffer;
+			duplicate.skipNote = "already_dumped";
+			skippedTasks.push_back(std::move(duplicate));
+			duplicates++;
+			continue;
+		}
+
+		DumpTask task;
+		if (PrepareIaBufferTask(device, buffer, &task)) {
+			wchar_t fileName[MAX_PATH];
+			DX12BuildIaBufferFileName(buffer, fileName, ARRAYSIZE(fileName));
+			task.fileName = fileName;
+			tasks.push_back(std::move(task));
+		} else {
+			task.sourceKind = DumpTaskSource::InputAssembler;
+			task.iaBuffer = buffer;
+			if (task.skipNote == nullptr)
+				task.skipNote = buffer.resolved ? "unsupported_or_no_resource_pointer" : "unresolved_gpu_va";
+			skippedTasks.push_back(std::move(task));
+		}
+	}
+
 	const bool batchOk = ExecuteCopyBatch(device, queue, &tasks);
 
 	UINT dumpedTextures = 0;
@@ -566,6 +702,19 @@ void DX12DumpCurrentFrameResources(const wchar_t *dir)
 		const bool duplicate = task.skipNote && !strcmp(task.skipNote, "already_dumped");
 		if (!duplicate)
 			skipped++;
+		if (task.sourceKind == DumpTaskSource::InputAssembler) {
+			D3D12_RESOURCE_DESC rowDesc = {};
+			if (task.iaBuffer.resource.hasResourceDesc)
+				rowDesc = task.iaBuffer.resource.resourceDesc;
+			WriteIndexRow(index, duplicate ? "duplicate" : "skipped", task, rowDesc,
+				task.iaBuffer.resource.resourceOffset,
+				task.iaBuffer.size,
+				static_cast<D3D12_RESOURCE_STATES>(task.iaBuffer.resource.hasCurrentState ?
+					task.iaBuffer.resource.currentState : 0),
+				task.iaBuffer.resource.hasCurrentState, L"",
+				task.skipNote ? task.skipNote : "unsupported_or_no_resource_pointer");
+			continue;
+		}
 		const DX12DescriptorSummary &descriptor = task.binding.descriptor;
 		const D3D12_RESOURCE_DESC &desc = descriptor.resourceDesc;
 		D3D12_RESOURCE_DESC rowDesc = {};
@@ -583,6 +732,7 @@ void DX12DumpCurrentFrameResources(const wchar_t *dir)
 	queue->Release();
 	fclose(index);
 
-	DX12Log("Current-frame resource files written: %S textures=%u buffers=%u skipped=%u duplicates=%u failed=%u bindings=%zu\n",
-		indexPath, dumpedTextures, dumpedBuffers, skipped, duplicates, failed, bindings.size());
+	DX12Log("Current-frame resource files written: %S textures=%u buffers=%u skipped=%u duplicates=%u failed=%u bindings=%zu ia_buffers=%zu\n",
+		indexPath, dumpedTextures, dumpedBuffers, skipped, duplicates, failed,
+		bindings.size(), iaBuffers.size());
 }

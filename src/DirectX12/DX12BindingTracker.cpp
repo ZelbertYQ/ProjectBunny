@@ -73,6 +73,8 @@ static SRWLOCK gBindingLock = SRWLOCK_INIT;
 static std::unordered_map<ID3D12GraphicsCommandList*, CommandListBindingState> gCommandLists;
 static std::vector<BindingEvent> gEvents;
 static UINT64 gEventSerial = 0;
+static UINT64 gGlobalDrawSerial = 0;
+static UINT64 gGlobalDispatchSerial = 0;
 static UINT64 gDroppedEvents = 0;
 
 static void StoreEventLocked(
@@ -87,8 +89,10 @@ static void StoreEventLocked(
 	BindingEvent event;
 	event.serial = ++gEventSerial;
 	event.kind = kind ? kind : "";
-	event.drawId = state.drawSerial;
-	event.dispatchId = state.dispatchSerial;
+	const bool isDrawKind = kind && (!strcmp(kind, "draw") || !strcmp(kind, "draw_indexed"));
+	const bool isDispatchKind = kind && !strcmp(kind, "dispatch");
+	event.drawId = isDrawKind ? state.drawSerial : 0;
+	event.dispatchId = isDispatchKind ? state.dispatchSerial : 0;
 	event.commandList = commandList;
 	event.pipelineState = state.pipelineState;
 	event.cbvSrvUavHeap = state.cbvSrvUavHeap;
@@ -264,7 +268,7 @@ void DX12BindingRecordDrawInstanced(
 
 	AcquireSRWLockExclusive(&gBindingLock);
 	CommandListBindingState &state = gCommandLists[commandList];
-	state.drawSerial++;
+	state.drawSerial = ++gGlobalDrawSerial;
 	const size_t before = gEvents.size();
 	StoreEventLocked("draw", commandList, state);
 	if (gEvents.size() > before) {
@@ -287,7 +291,7 @@ void DX12BindingRecordDrawIndexedInstanced(
 
 	AcquireSRWLockExclusive(&gBindingLock);
 	CommandListBindingState &state = gCommandLists[commandList];
-	state.drawSerial++;
+	state.drawSerial = ++gGlobalDrawSerial;
 	const size_t before = gEvents.size();
 	StoreEventLocked("draw_indexed", commandList, state);
 	if (gEvents.size() > before) {
@@ -310,7 +314,7 @@ void DX12BindingRecordDispatch(
 
 	AcquireSRWLockExclusive(&gBindingLock);
 	CommandListBindingState &state = gCommandLists[commandList];
-	state.dispatchSerial++;
+	state.dispatchSerial = ++gGlobalDispatchSerial;
 	const size_t before = gEvents.size();
 	StoreEventLocked("dispatch", commandList, state);
 	if (gEvents.size() > before) {
@@ -327,6 +331,8 @@ void DX12BindingBeginFrame()
 	AcquireSRWLockExclusive(&gBindingLock);
 	gEvents.clear();
 	gEventSerial = 0;
+	gGlobalDrawSerial = 0;
+	gGlobalDispatchSerial = 0;
 	gDroppedEvents = 0;
 	ReleaseSRWLockExclusive(&gBindingLock);
 }
@@ -592,6 +598,79 @@ static std::string IndexBufferIdForEvent(
 	return row ? row->id : "";
 }
 
+static void CollectFlatBuffersForEvents(
+	const std::vector<BindingEvent> &events, std::vector<FlatBufferRow> *buffers)
+{
+	if (!buffers)
+		return;
+
+	buffers->clear();
+	std::unordered_map<std::string, size_t> bufferByKey;
+	UINT nextVbId = 0;
+	UINT nextIbId = 0;
+	for (const BindingEvent &event : events) {
+		if (!IsDrawEvent(event) && !IsDispatchEvent(event))
+			continue;
+		BufferIdsForEvent(event, buffers, &bufferByKey, &nextVbId, &nextIbId);
+		IndexBufferIdForEvent(event, buffers, &bufferByKey, &nextVbId, &nextIbId);
+	}
+}
+
+static DX12FrameIaBufferBinding FrameIaBufferFromFlatRow(const FlatBufferRow &row)
+{
+	DX12FrameIaBufferBinding buffer;
+	buffer.bufferId = row.id;
+	buffer.role = row.role;
+	buffer.gpuVa = row.gpuVa;
+	buffer.size = row.size;
+	buffer.stride = row.stride;
+	buffer.slot = row.slot;
+	buffer.format = row.format;
+	buffer.resolved = row.resolved;
+	buffer.resource = row.resource;
+	return buffer;
+}
+
+void DX12BuildIaBufferFileName(
+	const DX12FrameIaBufferBinding &buffer, wchar_t *fileName, size_t fileNameCount)
+{
+	if (!fileName || fileNameCount == 0)
+		return;
+
+	fileName[0] = L'\0';
+	const char *role = buffer.role.empty() ? "BUF" : buffer.role.c_str();
+	swprintf_s(fileName, fileNameCount,
+		L"ia_%S_slot%u_va%016llx_size%llu_stride%u_fmt%u.buf",
+		role,
+		buffer.slot,
+		static_cast<unsigned long long>(buffer.gpuVa),
+		static_cast<unsigned long long>(buffer.size),
+		buffer.stride,
+		buffer.format);
+}
+
+void DX12GetCurrentFrameIaBuffers(std::vector<DX12FrameIaBufferBinding> *buffers)
+{
+	if (!buffers)
+		return;
+
+	std::vector<BindingEvent> events;
+	AcquireSRWLockShared(&gBindingLock);
+	events = gEvents;
+	ReleaseSRWLockShared(&gBindingLock);
+
+	std::vector<FlatBufferRow> rows;
+	CollectFlatBuffersForEvents(events, &rows);
+
+	buffers->clear();
+	buffers->reserve(rows.size());
+	for (const FlatBufferRow &row : rows)
+		buffers->push_back(FrameIaBufferFromFlatRow(row));
+
+	DX12Log("IA buffer stage: events=%zu buffers=%zu\n",
+		events.size(), buffers->size());
+}
+
 static void WriteOptionalHash(FILE *file, bool hasHash, UINT64 hash)
 {
 	if (hasHash)
@@ -682,11 +761,15 @@ static void WriteFlatFrameAnalysisFiles(
 			"resolved,current_state,has_current_state,heap_type,resource_size\n");
 		for (const FlatBufferRow &row : buffers) {
 			UINT64 resourceSize = row.resource.hasResourceDesc ? row.resource.resourceDesc.Width : 0;
+			DX12FrameIaBufferBinding iaBuffer = FrameIaBufferFromFlatRow(row);
+			wchar_t fileName[MAX_PATH];
+			DX12BuildIaBufferFileName(iaBuffer, fileName, ARRAYSIZE(fileName));
 			fprintf(bufferFile,
-				"%s,%s,%p,,0x%llx,0x%llx,%llu,%llu,%u,%u,%u,%u,0x%x,%u,%u,%llu\n",
+				"%s,%s,%p,CurrentFrameResourceFiles\\%S,0x%llx,0x%llx,%llu,%llu,%u,%u,%u,%u,0x%x,%u,%u,%llu\n",
 				row.id.c_str(),
 				row.role.c_str(),
 				row.resolved ? row.resource.resource : nullptr,
+				fileName,
 				static_cast<unsigned long long>(row.gpuVa),
 				static_cast<unsigned long long>(row.resolved ? row.resource.gpuVirtualAddress : 0),
 				static_cast<unsigned long long>(row.resolved ? row.resource.resourceOffset : 0),

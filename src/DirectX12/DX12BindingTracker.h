@@ -23,6 +23,19 @@ struct DX12FrameResourceBinding
 	bool hasDescriptor = false;
 };
 
+struct DX12FrameIaBufferBinding
+{
+	std::string bufferId;
+	std::string role;
+	UINT64 gpuVa = 0;
+	UINT64 size = 0;
+	UINT stride = 0;
+	UINT slot = 0;
+	UINT format = 0;
+	bool resolved = false;
+	DX12BufferResourceSummary resource;
+};
+
 void DX12BindingRegisterCommandList(ID3D12GraphicsCommandList *commandList);
 void DX12BindingResetCommandList(
 	ID3D12GraphicsCommandList *commandList, ID3D12PipelineState *initialState);
@@ -57,4 +70,7 @@ void DX12BindingRecordDispatch(
 	UINT threadGroupCountY, UINT threadGroupCountZ);
 void DX12BindingBeginFrame();
 void DX12GetCurrentFrameResourceBindings(std::vector<DX12FrameResourceBinding> *bindings);
+void DX12GetCurrentFrameIaBuffers(std::vector<DX12FrameIaBufferBinding> *buffers);
+void DX12BuildIaBufferFileName(
+	const DX12FrameIaBufferBinding &buffer, wchar_t *fileName, size_t fileNameCount);
 void DX12DumpBindingTrace(const wchar_t *dir);
