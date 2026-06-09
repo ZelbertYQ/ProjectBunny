@@ -82,8 +82,30 @@ if ($Platform -eq 'x64') {
     $dx12TestDir = "D:\Softs\Steam\steamapps\common\Slay the Spire 2"
     $dx12Dll = "$outDir\d3d12.dll"
     if ((Test-Path $dx12Dll) -and (Test-Path $dx12TestDir)) {
+        $dx12Processes = Get-Process -Name "SlayTheSpire2" -ErrorAction SilentlyContinue
+        if ($dx12Processes) {
+            Write-Host "  Stopping running DX12 test game before DLL copy..." -ForegroundColor Gray
+            $dx12Processes | Stop-Process -Force
+            Start-Sleep -Seconds 1
+        }
+
         Copy-Item $dx12Dll "$dx12TestDir\d3d12.dll" -Force
         Write-Host "  Copied DX12 test DLL: $dx12TestDir\d3d12.dll" -ForegroundColor Gray
+
+        $dx12Log = "$dx12TestDir\d3d12_log.txt"
+        if (Test-Path $dx12Log) {
+            try {
+                Remove-Item $dx12Log -Force -ErrorAction Stop
+                Write-Host "  Removed old DX12 log: $dx12Log" -ForegroundColor Gray
+            } catch {
+                Write-Host "  Could not remove old DX12 log: $dx12Log" -ForegroundColor Yellow
+                Write-Host "  $($_.Exception.Message)" -ForegroundColor Yellow
+            }
+        }
+
+        $dx12SteamUri = "steam://run/2868840//--rendering-driver d3d12/"
+        Start-Process $dx12SteamUri
+        Write-Host "  Launched DX12 test game via Steam: $dx12SteamUri" -ForegroundColor Gray
     } elseif (-not (Test-Path $dx12TestDir)) {
         Write-Host "  Skipped DX12 test DLL copy: directory not found: $dx12TestDir" -ForegroundColor Yellow
     }

@@ -10,7 +10,7 @@ static HINSTANCE gModule = nullptr;
 static FILE *gLog = nullptr;
 static volatile LONG gPresentCount = 0;
 static HWND gOverlayWindow = nullptr;
-static wchar_t gOverlayStatus[256] = L"3DMigoto DX12 hook alive";
+static wchar_t gOverlayStatus[512] = L"3DMigoto DX12 hook alive";
 static SRWLOCK gStateLock = SRWLOCK_INIT;
 static CNktHookLib gHookMgr;
 static std::unordered_set<void*> gHookedFunctions;

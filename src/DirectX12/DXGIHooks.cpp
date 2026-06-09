@@ -2,6 +2,7 @@
 
 #include <dxgi1_4.h>
 
+#include "DX12DeviceHooks.h"
 #include "DX12Input.h"
 #include "DX12Overlay.h"
 #include "DX12State.h"
@@ -68,6 +69,12 @@ static void HookSwapChain(IDXGISwapChain *swapChain)
 			vtable1[22], HookedPresent1, "IDXGISwapChain1::Present1");
 		swapChain1->Release();
 	}
+}
+
+static void HookDeviceFromDXGIArgument(IUnknown *device)
+{
+	DX12HookDevice(device);
+	DX12HookDeviceFromCommandQueue(device);
 }
 
 static void HookFactory(IUnknown *factory)
@@ -157,6 +164,7 @@ static HRESULT WINAPI HookedCreateDXGIFactory2(UINT flags, REFIID riid, void **f
 static HRESULT STDMETHODCALLTYPE HookedCreateSwapChain(
 	IDXGIFactory *factory, IUnknown *device, DXGI_SWAP_CHAIN_DESC *desc, IDXGISwapChain **swapChain)
 {
+	HookDeviceFromDXGIArgument(device);
 	HRESULT hr = gOrigCreateSwapChain(factory, device, desc, swapChain);
 	DX12Log("CreateSwapChain device=%p result=0x%lx swapchain=%p\n",
 		device, hr, swapChain ? *swapChain : nullptr);
@@ -169,6 +177,7 @@ static HRESULT STDMETHODCALLTYPE HookedCreateSwapChainForHwnd(
 	IDXGIFactory2 *factory, IUnknown *device, HWND window, const DXGI_SWAP_CHAIN_DESC1 *desc,
 	const DXGI_SWAP_CHAIN_FULLSCREEN_DESC *fullscreenDesc, IDXGIOutput *output, IDXGISwapChain1 **swapChain)
 {
+	HookDeviceFromDXGIArgument(device);
 	HRESULT hr = gOrigCreateSwapChainForHwnd(factory, device, window, desc, fullscreenDesc, output, swapChain);
 	DX12Log("CreateSwapChainForHwnd device=%p hwnd=%p result=0x%lx swapchain=%p\n",
 		device, window, hr, swapChain ? *swapChain : nullptr);
@@ -181,6 +190,7 @@ static HRESULT STDMETHODCALLTYPE HookedCreateSwapChainForCoreWindow(
 	IDXGIFactory2 *factory, IUnknown *device, IUnknown *window, const DXGI_SWAP_CHAIN_DESC1 *desc,
 	IDXGIOutput *output, IDXGISwapChain1 **swapChain)
 {
+	HookDeviceFromDXGIArgument(device);
 	HRESULT hr = gOrigCreateSwapChainForCoreWindow(factory, device, window, desc, output, swapChain);
 	DX12Log("CreateSwapChainForCoreWindow device=%p result=0x%lx swapchain=%p\n",
 		device, hr, swapChain ? *swapChain : nullptr);
@@ -193,6 +203,7 @@ static HRESULT STDMETHODCALLTYPE HookedCreateSwapChainForComposition(
 	IDXGIFactory2 *factory, IUnknown *device, const DXGI_SWAP_CHAIN_DESC1 *desc,
 	IDXGIOutput *output, IDXGISwapChain1 **swapChain)
 {
+	HookDeviceFromDXGIArgument(device);
 	HRESULT hr = gOrigCreateSwapChainForComposition(factory, device, desc, output, swapChain);
 	DX12Log("CreateSwapChainForComposition device=%p result=0x%lx swapchain=%p\n",
 		device, hr, swapChain ? *swapChain : nullptr);

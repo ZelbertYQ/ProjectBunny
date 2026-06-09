@@ -30,8 +30,8 @@ struct PsoRecord
 static SRWLOCK gDumpLock = SRWLOCK_INIT;
 static std::unordered_map<std::string, ShaderRecord> gShaders;
 static std::vector<PsoRecord> gPsos;
-static UINT64 gGraphicsPsoCount = 0;
-static UINT64 gComputePsoCount = 0;
+static std::unordered_map<ID3D12PipelineState*, DX12PsoShaderInfo> gPsoShaderInfo;
+static UINT64 gPsoSerial = 0;
 
 static uint64_t Fnv1a64(const void *data, size_t size)
 {
@@ -62,7 +62,7 @@ static bool GetDumpDirectory(wchar_t *path, size_t pathCount)
 
 static void RecordShaderLocked(
 	const D3D12_SHADER_BYTECODE &bytecode, const char *stage,
-	UINT64 psoIndex, PsoRecord &pso)
+	UINT64 psoIndex, PsoRecord &pso, DX12PsoShaderInfo *info)
 {
 	if (!bytecode.pShaderBytecode || bytecode.BytecodeLength == 0)
 		return;
@@ -70,6 +70,18 @@ static void RecordShaderLocked(
 	uint64_t hash = Fnv1a64(bytecode.pShaderBytecode, bytecode.BytecodeLength);
 	std::string key = MakeShaderKey(stage, hash);
 	pso.shaders.push_back(key);
+	if (info) {
+		if (!strcmp(stage, "vs")) {
+			info->hasVS = true;
+			info->vs = hash;
+		} else if (!strcmp(stage, "ps")) {
+			info->hasPS = true;
+			info->ps = hash;
+		} else if (!strcmp(stage, "cs")) {
+			info->hasCS = true;
+			info->cs = hash;
+		}
+	}
 
 	auto it = gShaders.find(key);
 	if (it == gShaders.end()) {
@@ -100,23 +112,114 @@ static bool WriteShaderFile(const wchar_t *dir, const ShaderRecord &record)
 	return true;
 }
 
-void DX12RecordGraphicsPipelineState(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *desc)
+static size_t AlignUp(size_t value, size_t alignment)
+{
+	return (value + alignment - 1) & ~(alignment - 1);
+}
+
+static size_t PipelineStateStreamPayloadSize(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE type)
+{
+	switch (type) {
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE:
+		return sizeof(ID3D12RootSignature*);
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VS:
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS:
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DS:
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_HS:
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_GS:
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CS:
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_AS:
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS:
+		return sizeof(D3D12_SHADER_BYTECODE);
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_STREAM_OUTPUT:
+		return sizeof(D3D12_STREAM_OUTPUT_DESC);
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_BLEND:
+		return sizeof(D3D12_BLEND_DESC);
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_MASK:
+		return sizeof(UINT);
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER:
+		return sizeof(D3D12_RASTERIZER_DESC);
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL:
+		return sizeof(D3D12_DEPTH_STENCIL_DESC);
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_INPUT_LAYOUT:
+		return sizeof(D3D12_INPUT_LAYOUT_DESC);
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_IB_STRIP_CUT_VALUE:
+		return sizeof(D3D12_INDEX_BUFFER_STRIP_CUT_VALUE);
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PRIMITIVE_TOPOLOGY:
+		return sizeof(D3D12_PRIMITIVE_TOPOLOGY_TYPE);
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RENDER_TARGET_FORMATS:
+		return sizeof(D3D12_RT_FORMAT_ARRAY);
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL_FORMAT:
+		return sizeof(DXGI_FORMAT);
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_DESC:
+		return sizeof(DXGI_SAMPLE_DESC);
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_NODE_MASK:
+		return sizeof(UINT);
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CACHED_PSO:
+		return sizeof(D3D12_CACHED_PIPELINE_STATE);
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_FLAGS:
+		return sizeof(D3D12_PIPELINE_STATE_FLAGS);
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL1:
+		return sizeof(D3D12_DEPTH_STENCIL_DESC1);
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VIEW_INSTANCING:
+		return sizeof(D3D12_VIEW_INSTANCING_DESC);
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL2:
+		return sizeof(D3D12_DEPTH_STENCIL_DESC2);
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER1:
+		return sizeof(D3D12_RASTERIZER_DESC1);
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER2:
+		return sizeof(D3D12_RASTERIZER_DESC2);
+	default:
+		return 0;
+	}
+}
+
+static const char *PipelineStateStreamShaderStage(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE type)
+{
+	switch (type) {
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VS:
+		return "vs";
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS:
+		return "ps";
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DS:
+		return "ds";
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_HS:
+		return "hs";
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_GS:
+		return "gs";
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CS:
+		return "cs";
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_AS:
+		return "as";
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS:
+		return "ms";
+	default:
+		return nullptr;
+	}
+}
+
+void DX12RecordGraphicsPipelineState(
+	ID3D12PipelineState *pipelineState, const D3D12_GRAPHICS_PIPELINE_STATE_DESC *desc)
 {
 	if (!desc)
 		return;
 
 	AcquireSRWLockExclusive(&gDumpLock);
-	UINT64 psoIndex = ++gGraphicsPsoCount + gComputePsoCount;
+	UINT64 psoIndex = ++gPsoSerial;
 	PsoRecord pso;
+	DX12PsoShaderInfo info = {};
+	info.psoIndex = psoIndex;
 	pso.kind = "graphics";
 	pso.index = psoIndex;
-	RecordShaderLocked(desc->VS, "vs", psoIndex, pso);
-	RecordShaderLocked(desc->PS, "ps", psoIndex, pso);
-	RecordShaderLocked(desc->DS, "ds", psoIndex, pso);
-	RecordShaderLocked(desc->HS, "hs", psoIndex, pso);
-	RecordShaderLocked(desc->GS, "gs", psoIndex, pso);
+	RecordShaderLocked(desc->VS, "vs", psoIndex, pso, &info);
+	RecordShaderLocked(desc->PS, "ps", psoIndex, pso, &info);
+	RecordShaderLocked(desc->DS, "ds", psoIndex, pso, nullptr);
+	RecordShaderLocked(desc->HS, "hs", psoIndex, pso, nullptr);
+	RecordShaderLocked(desc->GS, "gs", psoIndex, pso, nullptr);
 	const size_t shadersInPso = pso.shaders.size();
 	gPsos.push_back(std::move(pso));
+	if (pipelineState)
+		gPsoShaderInfo[pipelineState] = info;
 	UINT64 shaderCount = gShaders.size();
 	UINT64 psoCount = gPsos.size();
 	ReleaseSRWLockExclusive(&gDumpLock);
@@ -129,18 +232,23 @@ void DX12RecordGraphicsPipelineState(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *d
 	DX12SetOverlayStatus(L"3DMigoto DX12 hook alive | cached shaders ready");
 }
 
-void DX12RecordComputePipelineState(const D3D12_COMPUTE_PIPELINE_STATE_DESC *desc)
+void DX12RecordComputePipelineState(
+	ID3D12PipelineState *pipelineState, const D3D12_COMPUTE_PIPELINE_STATE_DESC *desc)
 {
 	if (!desc)
 		return;
 
 	AcquireSRWLockExclusive(&gDumpLock);
-	UINT64 psoIndex = gGraphicsPsoCount + ++gComputePsoCount;
+	UINT64 psoIndex = ++gPsoSerial;
 	PsoRecord pso;
+	DX12PsoShaderInfo info = {};
+	info.psoIndex = psoIndex;
 	pso.kind = "compute";
 	pso.index = psoIndex;
-	RecordShaderLocked(desc->CS, "cs", psoIndex, pso);
+	RecordShaderLocked(desc->CS, "cs", psoIndex, pso, &info);
 	gPsos.push_back(std::move(pso));
+	if (pipelineState)
+		gPsoShaderInfo[pipelineState] = info;
 	UINT64 shaderCount = gShaders.size();
 	UINT64 psoCount = gPsos.size();
 	ReleaseSRWLockExclusive(&gDumpLock);
@@ -150,6 +258,78 @@ void DX12RecordComputePipelineState(const D3D12_COMPUTE_PIPELINE_STATE_DESC *des
 		static_cast<unsigned long long>(shaderCount),
 		static_cast<unsigned long long>(psoCount));
 	DX12SetOverlayStatus(L"3DMigoto DX12 hook alive | cached shaders ready");
+}
+
+void DX12RecordPipelineStateStream(
+	ID3D12PipelineState *pipelineState, const D3D12_PIPELINE_STATE_STREAM_DESC *desc)
+{
+	if (!desc || !desc->pPipelineStateSubobjectStream || desc->SizeInBytes == 0)
+		return;
+
+	const uint8_t *stream = static_cast<const uint8_t*>(desc->pPipelineStateSubobjectStream);
+	size_t offset = 0;
+	size_t shadersInPso = 0;
+
+	AcquireSRWLockExclusive(&gDumpLock);
+	UINT64 psoIndex = ++gPsoSerial;
+	PsoRecord pso;
+	DX12PsoShaderInfo info = {};
+	info.psoIndex = psoIndex;
+	pso.kind = "stream";
+	pso.index = psoIndex;
+
+	while (offset + sizeof(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE) <= desc->SizeInBytes) {
+		D3D12_PIPELINE_STATE_SUBOBJECT_TYPE type =
+			*reinterpret_cast<const D3D12_PIPELINE_STATE_SUBOBJECT_TYPE*>(stream + offset);
+		size_t payloadOffset = AlignUp(offset + sizeof(type), alignof(void*));
+		size_t payloadSize = PipelineStateStreamPayloadSize(type);
+		if (payloadSize == 0 || payloadOffset + payloadSize > desc->SizeInBytes) {
+			DX12Log("Stopped parsing pipeline state stream pso=%llu type=%d offset=%zu size=%zu\n",
+				static_cast<unsigned long long>(psoIndex), static_cast<int>(type),
+				offset, desc->SizeInBytes);
+			break;
+		}
+
+		const char *stage = PipelineStateStreamShaderStage(type);
+		if (stage) {
+			const D3D12_SHADER_BYTECODE *bytecode =
+				reinterpret_cast<const D3D12_SHADER_BYTECODE*>(stream + payloadOffset);
+			RecordShaderLocked(*bytecode, stage, psoIndex, pso, &info);
+		}
+
+		offset = AlignUp(payloadOffset + payloadSize, alignof(void*));
+	}
+
+	shadersInPso = pso.shaders.size();
+	gPsos.push_back(std::move(pso));
+	if (pipelineState)
+		gPsoShaderInfo[pipelineState] = info;
+	UINT64 shaderCount = gShaders.size();
+	UINT64 psoCount = gPsos.size();
+	ReleaseSRWLockExclusive(&gDumpLock);
+
+	DX12Log("Recorded stream PSO #%llu shaders=%llu cachedShaders=%llu cachedPSOs=%llu\n",
+		static_cast<unsigned long long>(psoIndex),
+		static_cast<unsigned long long>(shadersInPso),
+		static_cast<unsigned long long>(shaderCount),
+		static_cast<unsigned long long>(psoCount));
+	DX12SetOverlayStatus(L"3DMigoto DX12 hook alive | cached shaders ready");
+}
+
+bool DX12GetPipelineStateShaderInfo(ID3D12PipelineState *pipelineState, DX12PsoShaderInfo *info)
+{
+	if (!pipelineState || !info)
+		return false;
+
+	AcquireSRWLockShared(&gDumpLock);
+	auto it = gPsoShaderInfo.find(pipelineState);
+	if (it == gPsoShaderInfo.end()) {
+		ReleaseSRWLockShared(&gDumpLock);
+		return false;
+	}
+	*info = it->second;
+	ReleaseSRWLockShared(&gDumpLock);
+	return true;
 }
 
 void DX12DumpCachedShaders()

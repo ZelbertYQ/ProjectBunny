@@ -2,6 +2,55 @@
 
 #include "DX12State.h"
 
+static int DrawOverlayTextBlock(HDC dc, const wchar_t *text, int x, int y)
+{
+	int lineHeight = 0;
+	TEXTMETRICW metrics = {};
+	if (GetTextMetricsW(dc, &metrics))
+		lineHeight = metrics.tmHeight + 3;
+	if (!lineHeight)
+		lineHeight = 18;
+
+	int maxWidth = 0;
+	int lines = 0;
+	const wchar_t *lineStart = text;
+	for (const wchar_t *p = text; ; ++p) {
+		if (*p == L'\n' || *p == L'\0') {
+			int len = static_cast<int>(p - lineStart);
+			SIZE size = {};
+			GetTextExtentPoint32W(dc, lineStart, len, &size);
+			if (size.cx > maxWidth)
+				maxWidth = size.cx;
+			lines++;
+			if (*p == L'\0')
+				break;
+			lineStart = p + 1;
+		}
+	}
+
+	RECT background = {
+		x - 4,
+		y - 4,
+		x + maxWidth + 8,
+		y + lines * lineHeight + 4
+	};
+	FillRect(dc, &background, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+
+	int drawY = y;
+	lineStart = text;
+	for (const wchar_t *p = text; ; ++p) {
+		if (*p == L'\n' || *p == L'\0') {
+			int len = static_cast<int>(p - lineStart);
+			TextOutW(dc, x, drawY, lineStart, len);
+			drawY += lineHeight;
+			if (*p == L'\0')
+				break;
+			lineStart = p + 1;
+		}
+	}
+	return background.bottom;
+}
+
 static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
 {
 	switch (msg) {
@@ -23,23 +72,12 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARA
 		HFONT font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
 		HGDIOBJ oldFont = font ? SelectObject(dc, font) : nullptr;
 
-		wchar_t text[256];
+		wchar_t text[512];
 		DX12GetOverlayStatus(text, ARRAYSIZE(text));
-
-		SIZE size = {};
-		GetTextExtentPoint32W(dc, text, lstrlenW(text), &size);
-
-		RECT background = {
-			12,
-			8,
-			20 + size.cx,
-			18 + size.cy
-		};
-		FillRect(dc, &background, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
 
 		SetBkMode(dc, TRANSPARENT);
 		SetTextColor(dc, RGB(0, 255, 0));
-		TextOutW(dc, 16, 12, text, lstrlenW(text));
+		DrawOverlayTextBlock(dc, text, 16, 12);
 
 		if (oldFont)
 			SelectObject(dc, oldFont);
@@ -71,7 +109,7 @@ DWORD WINAPI DX12OverlayThread(void*)
 	int x = GetSystemMetrics(SM_XVIRTUALSCREEN);
 	int y = GetSystemMetrics(SM_YVIRTUALSCREEN);
 	int width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-	int height = 48;
+	int height = 96;
 
 	HWND hwnd = CreateWindowExW(
 		WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
@@ -121,19 +159,9 @@ void DX12DrawSwapChainText(IDXGISwapChain *swapChain)
 	COLORREF oldTextColor = SetTextColor(dc, RGB(0, 255, 0));
 	HFONT font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
 	HGDIOBJ oldFont = font ? SelectObject(dc, font) : nullptr;
-	wchar_t text[256];
+	wchar_t text[512];
 	DX12GetOverlayStatus(text, ARRAYSIZE(text));
-	SIZE size = {};
-	GetTextExtentPoint32W(dc, text, lstrlenW(text), &size);
-	RECT background = {
-		16,
-		16,
-		24 + size.cx,
-		26 + size.cy
-	};
-	FillRect(dc, &background, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
-
-	TextOutW(dc, 20, 20, text, lstrlenW(text));
+	DrawOverlayTextBlock(dc, text, 20, 20);
 
 	if (oldFont)
 		SelectObject(dc, oldFont);

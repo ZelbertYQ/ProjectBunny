@@ -96,7 +96,7 @@ void DX12Initialize(HINSTANCE module)
 
 	DX12SetModule(module);
 	DX12OpenLogFile();
-	DX12Log("\n*** 3DMigoto DX12 proxy initialized ***\n");
+	DX12Log("\n*** 3DMigoto DX12 proxy initialized - stable F8 shader dump baseline, command-list hooks disabled ***\n");
 
 	HANDLE thread = CreateThread(nullptr, 0, DX12WorkerThread, nullptr, 0, nullptr);
 	if (thread)
@@ -198,7 +198,12 @@ extern "C" HRESULT WINAPI D3D12GetInterface(REFCLSID clsid, REFIID riid, void **
 	LoadRealD3D12();
 	if (!gOrigD3D12GetInterface)
 		return E_NOINTERFACE;
-	return gOrigD3D12GetInterface(clsid, riid, object);
+	HRESULT hr = gOrigD3D12GetInterface(clsid, riid, object);
+	DX12Log("D3D12GetInterface clsid=%p riid=%p result=0x%lx object=%p\n",
+		&clsid, &riid, hr, object ? *object : nullptr);
+	if (SUCCEEDED(hr) && object && *object)
+		DX12HookDeviceFactory(static_cast<IUnknown*>(*object));
+	return hr;
 }
 
 BOOL WINAPI DllMain(HINSTANCE module, DWORD reason, LPVOID)
