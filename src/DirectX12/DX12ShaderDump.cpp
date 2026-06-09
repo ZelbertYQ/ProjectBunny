@@ -7,10 +7,12 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <algorithm>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
+#include "DX12ResourceTracker.h"
 #include "DX12State.h"
 
 struct ShaderRecord
@@ -324,6 +326,344 @@ static bool WriteShaderDisassemblyFile(const wchar_t *dir, const ShaderRecord &r
 	return WriteDXBCDisassemblyFile(path, record);
 }
 
+struct ShaderAnalysisRecord
+{
+	ShaderRecord shader;
+	bool dxil = false;
+	size_t asmSize = 0;
+	UINT cbuffers = 0;
+	UINT textures = 0;
+	UINT samplers = 0;
+	UINT uavs = 0;
+	UINT samples = 0;
+	UINT textureLoads = 0;
+	UINT rawBufferLoads = 0;
+	UINT cbufferLoads = 0;
+	UINT storeOutputs = 0;
+	bool hasDiscard = false;
+	bool writesDepth = false;
+	std::string tags;
+};
+
+struct StageAnalysisStats
+{
+	UINT shaders = 0;
+	UINT dxil = 0;
+	UINT dxbc = 0;
+	UINT sampled = 0;
+	UINT uav = 0;
+	UINT discard = 0;
+	UINT depth = 0;
+	size_t bytecodeBytes = 0;
+	size_t asmBytes = 0;
+};
+
+static bool ReadTextFile(const wchar_t *path, std::string *text)
+{
+	if (!text)
+		return false;
+
+	FILE *file = _wfsopen(path, L"rb", _SH_DENYNO);
+	if (!file)
+		return false;
+
+	fseek(file, 0, SEEK_END);
+	long size = ftell(file);
+	if (size < 0) {
+		fclose(file);
+		return false;
+	}
+	fseek(file, 0, SEEK_SET);
+
+	text->resize(static_cast<size_t>(size));
+	if (size > 0)
+		fread(&(*text)[0], 1, static_cast<size_t>(size), file);
+	fclose(file);
+	return true;
+}
+
+static std::string LowerAscii(const std::string &text)
+{
+	std::string lower = text;
+	for (char &ch : lower) {
+		if (ch >= 'A' && ch <= 'Z')
+			ch = static_cast<char>(ch - 'A' + 'a');
+	}
+	return lower;
+}
+
+static UINT CountSubstring(const std::string &text, const char *needle)
+{
+	if (!needle || !needle[0])
+		return 0;
+
+	UINT count = 0;
+	size_t pos = 0;
+	const size_t needleLen = strlen(needle);
+	while ((pos = text.find(needle, pos)) != std::string::npos) {
+		count++;
+		pos += needleLen;
+	}
+	return count;
+}
+
+static UINT CountResourceBindingRows(const std::string &lowerText, const char *kind)
+{
+	UINT count = 0;
+	bool inBindings = false;
+	size_t pos = 0;
+	while (pos < lowerText.size()) {
+		size_t end = lowerText.find('\n', pos);
+		if (end == std::string::npos)
+			end = lowerText.size();
+		std::string line = lowerText.substr(pos, end - pos);
+
+		if (line.find("resource bindings:") != std::string::npos)
+			inBindings = true;
+		else if (inBindings && line.find(kind) != std::string::npos)
+			count++;
+
+		pos = end + 1;
+	}
+	return count;
+}
+
+static void AppendTag(std::string *tags, const char *tag)
+{
+	if (!tags || !tag || !tag[0])
+		return;
+	if (!tags->empty())
+		*tags += "|";
+	*tags += tag;
+}
+
+static void BuildShaderAsmPath(const wchar_t *dir, const ShaderRecord &shader, wchar_t *path, size_t pathCount)
+{
+	swprintf_s(path, pathCount, L"%s\\%016llx-%S.asm.txt",
+		dir, static_cast<unsigned long long>(shader.hash), shader.stage.c_str());
+}
+
+static void BuildShaderAnalysisRecord(
+	const wchar_t *dir, const ShaderRecord &shader, ShaderAnalysisRecord *analysis)
+{
+	if (!analysis)
+		return;
+
+	analysis->shader = shader;
+	analysis->dxil = ShaderIsDXIL(shader);
+
+	wchar_t asmPath[MAX_PATH];
+	BuildShaderAsmPath(dir, shader, asmPath, ARRAYSIZE(asmPath));
+
+	std::string text;
+	if (!ReadTextFile(asmPath, &text))
+		return;
+	analysis->asmSize = text.size();
+
+	std::string lower = LowerAscii(text);
+	analysis->cbuffers = CountResourceBindingRows(lower, " cbuffer ");
+	analysis->textures = CountResourceBindingRows(lower, " texture ");
+	analysis->samplers = CountResourceBindingRows(lower, " sampler ");
+	analysis->uavs =
+		CountResourceBindingRows(lower, " uav ") +
+		CountResourceBindingRows(lower, " rw") +
+		CountSubstring(lower, "dx.op.bufferstore") +
+		CountSubstring(lower, "dx.op.texturestore");
+	analysis->samples =
+		CountSubstring(lower, "dx.op.sample") +
+		CountSubstring(lower, "\nsample") +
+		CountSubstring(lower, "\nsample_l") +
+		CountSubstring(lower, "\nsample_d");
+	analysis->textureLoads =
+		CountSubstring(lower, "dx.op.textureload") +
+		CountSubstring(lower, "\nld ");
+	analysis->rawBufferLoads = CountSubstring(lower, "dx.op.rawbufferload");
+	analysis->cbufferLoads =
+		CountSubstring(lower, "dx.op.cbufferload") +
+		CountSubstring(lower, "cbufferloadlegacy");
+	analysis->storeOutputs =
+		CountSubstring(lower, "dx.op.storeoutput") +
+		CountSubstring(lower, "\nmov o");
+	analysis->hasDiscard =
+		lower.find("dx.op.discard") != std::string::npos ||
+		lower.find("\ndiscard") != std::string::npos;
+	analysis->writesDepth =
+		lower.find("sv_depth") != std::string::npos ||
+		lower.find("depthoutput=1") != std::string::npos;
+
+	AppendTag(&analysis->tags, analysis->dxil ? "dxil" : "dxbc");
+	AppendTag(&analysis->tags, shader.stage.c_str());
+	if (analysis->samples)
+		AppendTag(&analysis->tags, "samples-texture");
+	if (analysis->textureLoads || analysis->rawBufferLoads)
+		AppendTag(&analysis->tags, "loads-resource");
+	if (analysis->cbufferLoads || analysis->cbuffers)
+		AppendTag(&analysis->tags, "uses-cbuffer");
+	if (analysis->uavs)
+		AppendTag(&analysis->tags, "writes-uav");
+	if (analysis->storeOutputs)
+		AppendTag(&analysis->tags, "writes-output");
+	if (analysis->hasDiscard)
+		AppendTag(&analysis->tags, "discard");
+	if (analysis->writesDepth)
+		AppendTag(&analysis->tags, "depth");
+	if (lower.find("canvas") != std::string::npos || lower.find("atlas_texture") != std::string::npos)
+		AppendTag(&analysis->tags, "ui-canvas-candidate");
+	if (analysis->asmSize > 100000)
+		AppendTag(&analysis->tags, "large");
+}
+
+static int StageIndex(const std::string &stage)
+{
+	if (stage == "vs")
+		return 0;
+	if (stage == "ps")
+		return 1;
+	if (stage == "cs")
+		return 2;
+	return 3;
+}
+
+static void WriteShaderAnalysisFile(
+	const wchar_t *dir, const std::vector<ShaderRecord> &shaders,
+	const std::vector<PsoRecord> &psos)
+{
+	std::vector<ShaderAnalysisRecord> analyses;
+	analyses.reserve(shaders.size());
+	for (const ShaderRecord &shader : shaders) {
+		ShaderAnalysisRecord analysis;
+		BuildShaderAnalysisRecord(dir, shader, &analysis);
+		analyses.push_back(std::move(analysis));
+	}
+
+	std::sort(analyses.begin(), analyses.end(),
+		[](const ShaderAnalysisRecord &a, const ShaderAnalysisRecord &b) {
+			int stageA = StageIndex(a.shader.stage);
+			int stageB = StageIndex(b.shader.stage);
+			if (stageA != stageB)
+				return stageA < stageB;
+			return a.shader.hash < b.shader.hash;
+		});
+
+	StageAnalysisStats stageStats[4] = {};
+	UINT dxilCount = 0;
+	UINT dxbcCount = 0;
+	UINT sampledCount = 0;
+	UINT uavCount = 0;
+	UINT discardCount = 0;
+	UINT depthCount = 0;
+	for (const ShaderAnalysisRecord &analysis : analyses) {
+		int idx = StageIndex(analysis.shader.stage);
+		if (idx < 0 || idx > 3)
+			idx = 3;
+		StageAnalysisStats &stats = stageStats[idx];
+		stats.shaders++;
+		stats.bytecodeBytes += analysis.shader.bytecode.size();
+		stats.asmBytes += analysis.asmSize;
+		if (analysis.dxil) {
+			stats.dxil++;
+			dxilCount++;
+		} else {
+			stats.dxbc++;
+			dxbcCount++;
+		}
+		if (analysis.samples) {
+			stats.sampled++;
+			sampledCount++;
+		}
+		if (analysis.uavs) {
+			stats.uav++;
+			uavCount++;
+		}
+		if (analysis.hasDiscard) {
+			stats.discard++;
+			discardCount++;
+		}
+		if (analysis.writesDepth) {
+			stats.depth++;
+			depthCount++;
+		}
+	}
+
+	wchar_t path[MAX_PATH];
+	swprintf_s(path, L"%s\\ShaderAnalysis.txt", dir);
+	FILE *file = _wfsopen(path, L"w", _SH_DENYNO);
+	if (!file)
+		return;
+
+	fprintf(file, "DX12 Shader Analysis\n");
+	fprintf(file, "====================\n");
+	fprintf(file, "shaders=%zu psos=%zu dxil=%u dxbc=%u sampled=%u uav=%u discard=%u depth=%u\n\n",
+		analyses.size(), psos.size(), dxilCount, dxbcCount,
+		sampledCount, uavCount, discardCount, depthCount);
+
+	const char *stageNames[] = { "vs", "ps", "cs", "other" };
+	fprintf(file, "Stage Summary\n");
+	fprintf(file, "stage,shaders,dxil,dxbc,bytecode_bytes,asm_bytes,sampled,uav,discard,depth\n");
+	for (int i = 0; i < 4; ++i) {
+		const StageAnalysisStats &stats = stageStats[i];
+		if (!stats.shaders)
+			continue;
+		fprintf(file, "%s,%u,%u,%u,%zu,%zu,%u,%u,%u,%u\n",
+			stageNames[i], stats.shaders, stats.dxil, stats.dxbc,
+			stats.bytecodeBytes, stats.asmBytes, stats.sampled,
+			stats.uav, stats.discard, stats.depth);
+	}
+
+	std::vector<ShaderAnalysisRecord> bySize = analyses;
+	std::sort(bySize.begin(), bySize.end(),
+		[](const ShaderAnalysisRecord &a, const ShaderAnalysisRecord &b) {
+			return a.asmSize > b.asmSize;
+		});
+
+	fprintf(file, "\nLargest ASM Files\n");
+	fprintf(file, "hash,stage,asm_size,bytecode_size,tags\n");
+	for (size_t i = 0; i < bySize.size() && i < 20; ++i) {
+		const ShaderAnalysisRecord &analysis = bySize[i];
+		fprintf(file, "%016llx,%s,%zu,%zu,%s\n",
+			static_cast<unsigned long long>(analysis.shader.hash),
+			analysis.shader.stage.c_str(),
+			analysis.asmSize,
+			analysis.shader.bytecode.size(),
+			analysis.tags.c_str());
+	}
+
+	fprintf(file, "\nShader Details\n");
+	fprintf(file,
+		"hash,stage,container,size,asm_size,uses,first_pso,cbuffers,textures,samplers,uavs,"
+		"samples,texture_loads,raw_buffer_loads,cbuffer_loads,store_outputs,discard,depth,tags,file,asm_file\n");
+	for (const ShaderAnalysisRecord &analysis : analyses) {
+		fprintf(file,
+			"%016llx,%s,%s,%zu,%zu,%llu,%llu,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%s,%016llx-%s.bin,%016llx-%s.asm.txt\n",
+			static_cast<unsigned long long>(analysis.shader.hash),
+			analysis.shader.stage.c_str(),
+			analysis.dxil ? "dxil" : "dxbc",
+			analysis.shader.bytecode.size(),
+			analysis.asmSize,
+			static_cast<unsigned long long>(analysis.shader.useCount),
+			static_cast<unsigned long long>(analysis.shader.firstPsoIndex),
+			analysis.cbuffers,
+			analysis.textures,
+			analysis.samplers,
+			analysis.uavs,
+			analysis.samples,
+			analysis.textureLoads,
+			analysis.rawBufferLoads,
+			analysis.cbufferLoads,
+			analysis.storeOutputs,
+			analysis.hasDiscard ? 1 : 0,
+			analysis.writesDepth ? 1 : 0,
+			analysis.tags.c_str(),
+			static_cast<unsigned long long>(analysis.shader.hash),
+			analysis.shader.stage.c_str(),
+			static_cast<unsigned long long>(analysis.shader.hash),
+			analysis.shader.stage.c_str());
+	}
+	fclose(file);
+
+	DX12Log("Shader analysis written: %S entries=%zu\n", path, analyses.size());
+}
+
 static size_t AlignUp(size_t value, size_t alignment)
 {
 	return (value + alignment - 1) & ~(alignment - 1);
@@ -386,6 +726,63 @@ static size_t PipelineStateStreamPayloadSize(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE
 	}
 }
 
+static size_t PipelineStateStreamPayloadAlignment(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE type)
+{
+	switch (type) {
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE:
+		return alignof(ID3D12RootSignature*);
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VS:
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS:
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DS:
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_HS:
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_GS:
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CS:
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_AS:
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS:
+		return alignof(D3D12_SHADER_BYTECODE);
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_STREAM_OUTPUT:
+		return alignof(D3D12_STREAM_OUTPUT_DESC);
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_BLEND:
+		return alignof(D3D12_BLEND_DESC);
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_MASK:
+		return alignof(UINT);
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER:
+		return alignof(D3D12_RASTERIZER_DESC);
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL:
+		return alignof(D3D12_DEPTH_STENCIL_DESC);
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_INPUT_LAYOUT:
+		return alignof(D3D12_INPUT_LAYOUT_DESC);
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_IB_STRIP_CUT_VALUE:
+		return alignof(D3D12_INDEX_BUFFER_STRIP_CUT_VALUE);
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PRIMITIVE_TOPOLOGY:
+		return alignof(D3D12_PRIMITIVE_TOPOLOGY_TYPE);
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RENDER_TARGET_FORMATS:
+		return alignof(D3D12_RT_FORMAT_ARRAY);
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL_FORMAT:
+		return alignof(DXGI_FORMAT);
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_DESC:
+		return alignof(DXGI_SAMPLE_DESC);
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_NODE_MASK:
+		return alignof(UINT);
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CACHED_PSO:
+		return alignof(D3D12_CACHED_PIPELINE_STATE);
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_FLAGS:
+		return alignof(D3D12_PIPELINE_STATE_FLAGS);
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL1:
+		return alignof(D3D12_DEPTH_STENCIL_DESC1);
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VIEW_INSTANCING:
+		return alignof(D3D12_VIEW_INSTANCING_DESC);
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL2:
+		return alignof(D3D12_DEPTH_STENCIL_DESC2);
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER1:
+		return alignof(D3D12_RASTERIZER_DESC1);
+	case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER2:
+		return alignof(D3D12_RASTERIZER_DESC2);
+	default:
+		return 1;
+	}
+}
+
 static const char *PipelineStateStreamShaderStage(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE type)
 {
 	switch (type) {
@@ -423,6 +820,7 @@ void DX12RecordGraphicsPipelineState(
 	info.psoIndex = psoIndex;
 	pso.kind = "graphics";
 	pso.index = psoIndex;
+	DX12RecordPsoRootSignature(psoIndex, pso.kind.c_str(), pipelineState, desc->pRootSignature);
 	RecordShaderLocked(desc->VS, "vs", psoIndex, pso, &info);
 	RecordShaderLocked(desc->PS, "ps", psoIndex, pso, &info);
 	RecordShaderLocked(desc->DS, "ds", psoIndex, pso, nullptr);
@@ -457,6 +855,7 @@ void DX12RecordComputePipelineState(
 	info.psoIndex = psoIndex;
 	pso.kind = "compute";
 	pso.index = psoIndex;
+	DX12RecordPsoRootSignature(psoIndex, pso.kind.c_str(), pipelineState, desc->pRootSignature);
 	RecordShaderLocked(desc->CS, "cs", psoIndex, pso, &info);
 	gPsos.push_back(std::move(pso));
 	if (pipelineState)
@@ -489,12 +888,14 @@ void DX12RecordPipelineStateStream(
 	info.psoIndex = psoIndex;
 	pso.kind = "stream";
 	pso.index = psoIndex;
+	ID3D12RootSignature *rootSignature = nullptr;
 
 	while (offset + sizeof(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE) <= desc->SizeInBytes) {
 		D3D12_PIPELINE_STATE_SUBOBJECT_TYPE type =
 			*reinterpret_cast<const D3D12_PIPELINE_STATE_SUBOBJECT_TYPE*>(stream + offset);
-		size_t payloadOffset = AlignUp(offset + sizeof(type), alignof(void*));
 		size_t payloadSize = PipelineStateStreamPayloadSize(type);
+		size_t payloadAlignment = PipelineStateStreamPayloadAlignment(type);
+		size_t payloadOffset = AlignUp(offset + sizeof(type), payloadAlignment);
 		if (payloadSize == 0 || payloadOffset + payloadSize > desc->SizeInBytes) {
 			DX12Log("Stopped parsing pipeline state stream pso=%llu type=%d offset=%zu size=%zu\n",
 				static_cast<unsigned long long>(psoIndex), static_cast<int>(type),
@@ -507,12 +908,15 @@ void DX12RecordPipelineStateStream(
 			const D3D12_SHADER_BYTECODE *bytecode =
 				reinterpret_cast<const D3D12_SHADER_BYTECODE*>(stream + payloadOffset);
 			RecordShaderLocked(*bytecode, stage, psoIndex, pso, &info);
+		} else if (type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE) {
+			rootSignature = *reinterpret_cast<ID3D12RootSignature *const*>(stream + payloadOffset);
 		}
 
 		offset = AlignUp(payloadOffset + payloadSize, alignof(void*));
 	}
 
 	shadersInPso = pso.shaders.size();
+	DX12RecordPsoRootSignature(psoIndex, pso.kind.c_str(), pipelineState, rootSignature);
 	gPsos.push_back(std::move(pso));
 	if (pipelineState)
 		gPsoShaderInfo[pipelineState] = info;
@@ -607,10 +1011,13 @@ void DX12DumpCachedShaders()
 		fclose(psoLog);
 	}
 
+	WriteShaderAnalysisFile(dir, shaders, psos);
+	DX12DumpResourceMetadata(dir);
+
 	wchar_t status[128];
-	swprintf_s(status, L"F8 dumped %u shaders / %u asm / %zu PSOs",
+	swprintf_s(status, L"F8 dumped %u shaders / %u asm / %zu PSOs | analysis ready",
 		writtenShaders, writtenDisassembly, psos.size());
 	DX12SetOverlayStatus(status);
-	DX12Log("F8 shader dump complete: dir=%S shaders=%u/%zu asm=%u/%zu psos=%zu\n",
+	DX12Log("F8 shader dump complete: dir=%S shaders=%u/%zu asm=%u/%zu psos=%zu analysis=1\n",
 		dir, writtenShaders, shaders.size(), writtenDisassembly, shaders.size(), psos.size());
 }

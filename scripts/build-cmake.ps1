@@ -89,19 +89,26 @@ if ($Platform -eq 'x64') {
             Start-Sleep -Seconds 1
         }
 
-        Copy-Item $dx12Dll "$dx12TestDir\d3d12.dll" -Force
-        Write-Host "  Copied DX12 test DLL: $dx12TestDir\d3d12.dll" -ForegroundColor Gray
-
-        $dx12Log = "$dx12TestDir\d3d12_log.txt"
-        if (Test-Path $dx12Log) {
-            try {
-                Remove-Item $dx12Log -Force -ErrorAction Stop
-                Write-Host "  Removed old DX12 log: $dx12Log" -ForegroundColor Gray
-            } catch {
-                Write-Host "  Could not remove old DX12 log: $dx12Log" -ForegroundColor Yellow
-                Write-Host "  $($_.Exception.Message)" -ForegroundColor Yellow
+        $dx12CleanupPaths = @(
+            "$dx12TestDir\ShaderDumpDX12",
+            "$dx12TestDir\d3d12_log.txt",
+            "$dx12TestDir\d3d12_hook.log"
+        )
+        $dx12CleanupPaths += Get-ChildItem -Path $dx12TestDir -Filter "d3d12_log.before_*.txt" -File -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
+        foreach ($cleanupPath in $dx12CleanupPaths) {
+            if (Test-Path $cleanupPath) {
+                try {
+                    Remove-Item $cleanupPath -Recurse -Force -ErrorAction Stop
+                    Write-Host "  Removed old DX12 test artifact: $cleanupPath" -ForegroundColor Gray
+                } catch {
+                    Write-Host "  Could not remove old DX12 test artifact: $cleanupPath" -ForegroundColor Yellow
+                    Write-Host "  $($_.Exception.Message)" -ForegroundColor Yellow
+                }
             }
         }
+
+        Copy-Item $dx12Dll "$dx12TestDir\d3d12.dll" -Force
+        Write-Host "  Copied DX12 test DLL: $dx12TestDir\d3d12.dll" -ForegroundColor Gray
 
         $dx12SteamUri = "steam://run/2868840//--rendering-driver d3d12/"
         Start-Process $dx12SteamUri

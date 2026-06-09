@@ -2,6 +2,7 @@
 
 #include <d3d12.h>
 
+#include "DX12ResourceTracker.h"
 #include "DX12ShaderDump.h"
 #include "DX12State.h"
 
@@ -91,6 +92,7 @@ void DX12HookDevice(IUnknown *device)
 	DX12HookFunction(reinterpret_cast<void**>(&gOrigCreateComputePipelineState),
 		vtable[CreateComputePipelineStateIndex], HookedCreateComputePipelineState,
 		"ID3D12Device::CreateComputePipelineState");
+	DX12HookResourceMetadata(baseDevice);
 
 	baseDevice->Release();
 
