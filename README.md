@@ -37,6 +37,12 @@ Build the Release x64 version:
 
 (32-bit builds are not currently maintained because there are very few use cases and users. The project focuses on x64 first.)
 
+# NOTICE
+
+I don't know how DX12 work,so every single line of code may change, grow and change with my learn experience.
+
+it's totally not usable for mod work and will continue change until the first release published.
+
 # Support Development
 
 <a href="https://afdian.com/a/NicoMico666"><img width="200" src="https://pic1.afdiancdn.com/static/img/welcome/button-sponsorme.png" alt=""></a>
