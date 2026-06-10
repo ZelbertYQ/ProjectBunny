@@ -6,6 +6,7 @@
 This project is used to refactor and improve the original 3Dmigoto project.
 
 
+
 # Core Change
 
 - Refactor to CMake Project.
@@ -35,6 +36,16 @@ Build the Release x64 version:
 ```
 
 (32-bit builds are not currently maintained because there are very few use cases and users. The project focuses on x64 first.)
+
+# Support Development
+
+<a href="https://afdian.com/a/NicoMico666"><img width="200" src="https://pic1.afdiancdn.com/static/img/welcome/button-sponsorme.png" alt=""></a>
+
+# HOW CAN YOU DO? 
+
+I don't care; I'm pretty optimistic — the worst case is it becomes another NinjaRipper.
+
+Or you know, just develop for fun, how hard could it be ?
 
 # Star History
 
