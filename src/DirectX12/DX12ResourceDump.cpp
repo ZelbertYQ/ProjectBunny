@@ -609,12 +609,91 @@ static size_t CountCopiedTasks(const std::vector<DumpTask> &tasks)
 	return copied;
 }
 
+static const char *ShortBindSpace(const std::string &bindSpace)
+{
+	if (bindSpace == "graphics_cbv_srv_uav")
+		return "gfx";
+	if (bindSpace == "graphics_sampler")
+		return "gsp";
+	if (bindSpace == "compute_cbv_srv_uav")
+		return "cmp";
+	if (bindSpace == "compute_sampler")
+		return "csp";
+	return bindSpace.empty() ? "unk" : bindSpace.c_str();
+}
+
+static const char *ShortDescriptorKind(const std::string &kind)
+{
+	if (kind == "CONSTANT_BUFFER_VIEW")
+		return "cbv";
+	if (kind == "SHADER_RESOURCE_VIEW")
+		return "srv";
+	if (kind == "UNORDERED_ACCESS_VIEW")
+		return "uav";
+	if (kind == "SAMPLER")
+		return "smp";
+	if (kind == "RENDER_TARGET_VIEW")
+		return "rtv";
+	if (kind == "DEPTH_STENCIL_VIEW")
+		return "dsv";
+	return kind.empty() ? "res" : kind.c_str();
+}
+
+static void FormatEventPrefix(UINT64 drawId, UINT64 dispatchId, wchar_t *text, size_t textCount)
+{
+	if (!text || textCount == 0)
+		return;
+	if (dispatchId)
+		swprintf_s(text, textCount, L"c%06llu",
+			static_cast<unsigned long long>(dispatchId));
+	else if (drawId)
+		swprintf_s(text, textCount, L"d%06llu",
+			static_cast<unsigned long long>(drawId));
+	else
+		swprintf_s(text, textCount, L"e%06llu",
+			static_cast<unsigned long long>(0));
+}
+
+static void AppendShaderHashNamePart(
+	wchar_t *text, size_t textCount, const char *stage, bool hasHash, UINT64 hash)
+{
+	if (!text || textCount == 0 || !stage || !hasHash)
+		return;
+	const size_t used = wcslen(text);
+	if (used >= textCount)
+		return;
+	swprintf_s(text + used, textCount - used, L"-%S%016llx",
+		stage, static_cast<unsigned long long>(hash));
+}
+
+static void BuildShaderHashNamePart(
+	const DX12PsoShaderInfo &info, wchar_t *text, size_t textCount)
+{
+	if (!text || textCount == 0)
+		return;
+	text[0] = L'\0';
+	AppendShaderHashNamePart(text, textCount, "vs", info.hasVS, info.vs);
+	AppendShaderHashNamePart(text, textCount, "ps", info.hasPS, info.ps);
+	AppendShaderHashNamePart(text, textCount, "cs", info.hasCS, info.cs);
+}
+
 static void BuildFileName(const DumpTask &task, wchar_t *fileName, size_t fileNameCount)
 {
 	const wchar_t *ext = task.isTexture ? L"dds" : L"buf";
-	swprintf_s(fileName, fileNameCount, L"pso%llu_r%u_%p_o%llu_b%llu.%s",
+	wchar_t eventPrefix[32];
+	FormatEventPrefix(task.binding.drawId, task.binding.dispatchId,
+		eventPrefix, ARRAYSIZE(eventPrefix));
+	wchar_t shaderPart[96];
+	BuildShaderHashNamePart(task.binding.shaderInfo, shaderPart, ARRAYSIZE(shaderPart));
+	swprintf_s(fileName, fileNameCount,
+		L"%s-pso%llu%s-%S-r%u-d%llu-%S_%p_o%llu_b%llu.%s",
+		eventPrefix,
 		static_cast<unsigned long long>(task.binding.psoIndex),
+		shaderPart,
+		ShortBindSpace(task.binding.bindSpace),
 		task.binding.rootParameterIndex,
+		static_cast<unsigned long long>(task.binding.descriptorIndex),
+		ShortDescriptorKind(task.binding.descriptor.kind),
 		task.binding.descriptor.resource,
 		static_cast<unsigned long long>(task.sourceOffset),
 		static_cast<unsigned long long>(task.copyBytes),
@@ -639,6 +718,10 @@ static void WriteIndexRow(
 	if (task.sourceKind == DumpTaskSource::InputAssembler) {
 		const DX12FrameIaBufferBinding &buffer = task.iaBuffer;
 		const DX12BufferResourceSummary &resource = buffer.resource;
+		char vs[32], ps[32], cs[32];
+		FormatShaderHash(buffer.shaderInfo.vs, buffer.shaderInfo.hasVS, vs, ARRAYSIZE(vs));
+		FormatShaderHash(buffer.shaderInfo.ps, buffer.shaderInfo.hasPS, ps, ARRAYSIZE(ps));
+		FormatShaderHash(buffer.shaderInfo.cs, buffer.shaderInfo.hasCS, cs, ARRAYSIZE(cs));
 		fprintf(index,
 			"%s,0,-,-,-,input_assembler,%u,%p,%u,%u,0x%llx,0x0,0x%llx,"
 			"%s,%p,%s,%llu,%u,%u,0x%llx,%llu,%llu,0x%x,%u,%u,%u,%u,%u,%u,%u,%llu,%llu,%S,%s\n",
@@ -670,15 +753,40 @@ static void WriteIndexRow(
 			static_cast<unsigned long long>(copyBytes),
 			fileName ? fileName : L"",
 			note ? note : "");
+		DX12FrameAnalysisLogInfo(
+			"resource_file status=%s event=%llu draw=%llu dispatch=%llu pso=%llu vs=%s ps=%s cs=%s ia=%s slot=%u resource=%p dimension=%s gpu_va=0x%llx offset=%llu bytes=%llu state=0x%x state_known=%u file=%S note=%s\n",
+			status ? status : "",
+			static_cast<unsigned long long>(buffer.eventSerial),
+			static_cast<unsigned long long>(buffer.drawId),
+			static_cast<unsigned long long>(buffer.dispatchId),
+			static_cast<unsigned long long>(buffer.psoIndex),
+			vs, ps, cs,
+			buffer.role.c_str(),
+			buffer.slot,
+			resource.resource,
+			ResourceDimensionName(desc.Dimension),
+			static_cast<unsigned long long>(buffer.gpuVa),
+			static_cast<unsigned long long>(sourceOffset),
+			static_cast<unsigned long long>(copyBytes),
+			static_cast<UINT>(sourceState),
+			hasCurrentState ? 1 : 0,
+			fileName ? fileName : L"",
+			note ? note : "");
 		return;
 	}
 
 	DX12PsoShaderSummary shaders;
 	const bool hasShaders = DX12GetPsoShaderSummary(task.binding.psoIndex, &shaders);
 	char vs[32], ps[32], cs[32];
-	FormatShaderHash(hasShaders ? shaders.vs : 0, hasShaders && shaders.hasVS, vs, ARRAYSIZE(vs));
-	FormatShaderHash(hasShaders ? shaders.ps : 0, hasShaders && shaders.hasPS, ps, ARRAYSIZE(ps));
-	FormatShaderHash(hasShaders ? shaders.cs : 0, hasShaders && shaders.hasCS, cs, ARRAYSIZE(cs));
+	const bool hasVS = task.binding.shaderInfo.hasVS || (hasShaders && shaders.hasVS);
+	const bool hasPS = task.binding.shaderInfo.hasPS || (hasShaders && shaders.hasPS);
+	const bool hasCS = task.binding.shaderInfo.hasCS || (hasShaders && shaders.hasCS);
+	const UINT64 vsHash = task.binding.shaderInfo.hasVS ? task.binding.shaderInfo.vs : shaders.vs;
+	const UINT64 psHash = task.binding.shaderInfo.hasPS ? task.binding.shaderInfo.ps : shaders.ps;
+	const UINT64 csHash = task.binding.shaderInfo.hasCS ? task.binding.shaderInfo.cs : shaders.cs;
+	FormatShaderHash(vsHash, hasVS, vs, ARRAYSIZE(vs));
+	FormatShaderHash(psHash, hasPS, ps, ARRAYSIZE(ps));
+	FormatShaderHash(csHash, hasCS, cs, ARRAYSIZE(cs));
 
 	const DX12DescriptorSummary &descriptor = task.binding.descriptor;
 	fprintf(index,
@@ -714,6 +822,30 @@ static void WriteIndexRow(
 		descriptor.structureByteStride,
 		static_cast<unsigned long long>(descriptor.bufferViewOffset),
 		static_cast<unsigned long long>(descriptor.bufferViewBytes),
+		fileName ? fileName : L"",
+		note ? note : "");
+	DX12FrameAnalysisLogInfo(
+		"resource_file status=%s event=%llu draw=%llu dispatch=%llu pso=%llu vs=%s ps=%s cs=%s bind=%s root=%u descriptor=%llu kind=%s resource=%p dimension=%s size=%llux%u format=%u gpu_va=0x%llx offset=%llu bytes=%llu state=0x%x state_known=%u file=%S note=%s\n",
+		status ? status : "",
+		static_cast<unsigned long long>(task.binding.eventSerial),
+		static_cast<unsigned long long>(task.binding.drawId),
+		static_cast<unsigned long long>(task.binding.dispatchId),
+		static_cast<unsigned long long>(task.binding.psoIndex),
+		vs, ps, cs,
+		task.binding.bindSpace.c_str(),
+		task.binding.rootParameterIndex,
+		static_cast<unsigned long long>(task.binding.descriptorIndex),
+		descriptor.kind.c_str(),
+		descriptor.resource,
+		ResourceDimensionName(desc.Dimension),
+		static_cast<unsigned long long>(desc.Width),
+		desc.Height,
+		static_cast<UINT>(desc.Format),
+		static_cast<unsigned long long>(descriptor.gpuVirtualAddress),
+		static_cast<unsigned long long>(sourceOffset),
+		static_cast<unsigned long long>(copyBytes),
+		static_cast<UINT>(sourceState),
+		hasCurrentState ? 1 : 0,
 		fileName ? fileName : L"",
 		note ? note : "");
 }

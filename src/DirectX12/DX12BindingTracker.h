@@ -11,7 +11,11 @@
 
 struct DX12FrameResourceBinding
 {
+	UINT64 eventSerial = 0;
+	UINT64 drawId = 0;
+	UINT64 dispatchId = 0;
 	UINT64 psoIndex = 0;
+	DX12PsoShaderInfo shaderInfo;
 	std::string bindSpace;
 	UINT rootParameterIndex = 0;
 	ID3D12DescriptorHeap *heap = nullptr;
@@ -28,6 +32,11 @@ struct DX12FrameIaBufferBinding
 {
 	std::string bufferId;
 	std::string role;
+	UINT64 eventSerial = 0;
+	UINT64 drawId = 0;
+	UINT64 dispatchId = 0;
+	UINT64 psoIndex = 0;
+	DX12PsoShaderInfo shaderInfo;
 	UINT64 gpuVa = 0;
 	UINT64 size = 0;
 	UINT stride = 0;

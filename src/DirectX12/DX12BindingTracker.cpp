@@ -381,6 +381,39 @@ static void WriteShaderInfo(FILE *file, const DX12PsoShaderInfo &info)
 		fprintf(file, "%016llx", static_cast<unsigned long long>(info.cs));
 }
 
+static void FormatOptionalHashText(bool hasHash, UINT64 hash, char *text, size_t textCount)
+{
+	if (!text || textCount == 0)
+		return;
+	if (hasHash)
+		sprintf_s(text, textCount, "%016llx", static_cast<unsigned long long>(hash));
+	else
+		sprintf_s(text, textCount, "-");
+}
+
+static void AppendShaderHashNamePart(
+	wchar_t *text, size_t textCount, const char *stage, bool hasHash, UINT64 hash)
+{
+	if (!text || textCount == 0 || !stage || !hasHash)
+		return;
+	const size_t used = wcslen(text);
+	if (used >= textCount)
+		return;
+	swprintf_s(text + used, textCount - used, L"-%S%016llx",
+		stage, static_cast<unsigned long long>(hash));
+}
+
+static void BuildShaderHashNamePart(
+	const DX12PsoShaderInfo &info, wchar_t *text, size_t textCount)
+{
+	if (!text || textCount == 0)
+		return;
+	text[0] = L'\0';
+	AppendShaderHashNamePart(text, textCount, "vs", info.hasVS, info.vs);
+	AppendShaderHashNamePart(text, textCount, "ps", info.hasPS, info.ps);
+	AppendShaderHashNamePart(text, textCount, "cs", info.hasCS, info.cs);
+}
+
 static void WriteRootTables(FILE *file, const RootTableState *tables)
 {
 	bool first = true;
@@ -534,6 +567,11 @@ struct FlatBufferRow
 {
 	std::string id;
 	std::string role;
+	UINT64 eventSerial = 0;
+	UINT64 drawId = 0;
+	UINT64 dispatchId = 0;
+	UINT64 psoIndex = 0;
+	DX12PsoShaderInfo shaderInfo = {};
 	UINT64 gpuVa = 0;
 	UINT64 size = 0;
 	UINT stride = 0;
@@ -567,8 +605,8 @@ static std::string NextBufferId(const char *prefix, UINT *nextId)
 
 static const FlatBufferRow *GetOrAddBufferRow(
 	std::vector<FlatBufferRow> *rows, std::unordered_map<std::string, size_t> *rowByKey,
-	UINT *nextVbId, UINT *nextIbId, const char *role, UINT64 gpuVa, UINT64 size,
-	UINT stride, UINT slot, UINT format)
+	UINT *nextVbId, UINT *nextIbId, const BindingEvent &event, const char *role,
+	UINT64 gpuVa, UINT64 size, UINT stride, UINT slot, UINT format)
 {
 	if (!rows || !rowByKey || gpuVa == 0 || size == 0)
 		return nullptr;
@@ -582,6 +620,11 @@ static const FlatBufferRow *GetOrAddBufferRow(
 	row.id = NextBufferId(role && !strcmp(role, "IB") ? "ib" : "vb",
 		role && !strcmp(role, "IB") ? nextIbId : nextVbId);
 	row.role = role ? role : "";
+	row.eventSerial = event.serial;
+	row.drawId = event.drawId;
+	row.dispatchId = event.dispatchId;
+	row.psoIndex = event.shaderInfo.psoIndex;
+	row.shaderInfo = event.shaderInfo;
 	row.gpuVa = gpuVa;
 	row.size = size;
 	row.stride = stride;
@@ -603,7 +646,7 @@ static std::string BufferIdsForEvent(
 			continue;
 		const D3D12_VERTEX_BUFFER_VIEW &view = event.vertexBuffers[slot];
 		const FlatBufferRow *row = GetOrAddBufferRow(rows, rowByKey, nextVbId, nextIbId,
-			"VB", view.BufferLocation, view.SizeInBytes, view.StrideInBytes, slot, 0);
+			event, "VB", view.BufferLocation, view.SizeInBytes, view.StrideInBytes, slot, 0);
 		if (!row)
 			continue;
 		if (!ids.empty())
@@ -624,7 +667,7 @@ static std::string IndexBufferIdForEvent(
 		return "";
 
 	const FlatBufferRow *row = GetOrAddBufferRow(rows, rowByKey, nextVbId, nextIbId,
-		"IB", event.indexBuffer.BufferLocation, event.indexBuffer.SizeInBytes, 0, 0,
+		event, "IB", event.indexBuffer.BufferLocation, event.indexBuffer.SizeInBytes, 0, 0,
 		static_cast<UINT>(event.indexBuffer.Format));
 	return row ? row->id : "";
 }
@@ -652,6 +695,11 @@ static DX12FrameIaBufferBinding FrameIaBufferFromFlatRow(const FlatBufferRow &ro
 	DX12FrameIaBufferBinding buffer;
 	buffer.bufferId = row.id;
 	buffer.role = row.role;
+	buffer.eventSerial = row.eventSerial;
+	buffer.drawId = row.drawId;
+	buffer.dispatchId = row.dispatchId;
+	buffer.psoIndex = row.psoIndex;
+	buffer.shaderInfo = row.shaderInfo;
 	buffer.gpuVa = row.gpuVa;
 	buffer.size = row.size;
 	buffer.stride = row.stride;
@@ -670,8 +718,16 @@ void DX12BuildIaBufferFileName(
 
 	fileName[0] = L'\0';
 	const char *role = buffer.role.empty() ? "BUF" : buffer.role.c_str();
+	const wchar_t eventKind = buffer.dispatchId ? L'c' : L'd';
+	const UINT64 eventId = buffer.dispatchId ? buffer.dispatchId : buffer.drawId;
+	wchar_t shaderPart[96];
+	BuildShaderHashNamePart(buffer.shaderInfo, shaderPart, ARRAYSIZE(shaderPart));
 	swprintf_s(fileName, fileNameCount,
-		L"ia_%S_slot%u_va%016llx_size%llu_stride%u_fmt%u.buf",
+		L"%c%06llu-pso%llu%s-ia_%S_slot%u_va%016llx_size%llu_stride%u_fmt%u.buf",
+		eventKind,
+		static_cast<unsigned long long>(eventId),
+		static_cast<unsigned long long>(buffer.psoIndex),
+		shaderPart,
 		role,
 		buffer.slot,
 		static_cast<unsigned long long>(buffer.gpuVa),
@@ -982,7 +1038,11 @@ static void CollectFrameResourceBinding(
 		return;
 
 	DX12FrameResourceBinding binding;
+	binding.eventSerial = event.serial;
+	binding.drawId = event.drawId;
+	binding.dispatchId = event.dispatchId;
 	binding.psoIndex = event.shaderInfo.psoIndex;
+	binding.shaderInfo = event.shaderInfo;
 	binding.bindSpace = bindSpace ? bindSpace : "";
 	binding.rootParameterIndex = table.rootParameterIndex;
 	binding.heap = heap->heap;
@@ -1023,6 +1083,8 @@ void DX12GetCurrentFrameResourceBindings(std::vector<DX12FrameResourceBinding> *
 	bindings->clear();
 	std::unordered_set<std::string> seen;
 	for (const BindingEvent &event : events) {
+		if (!IsDrawEvent(event) && !IsDispatchEvent(event))
+			continue;
 		for (UINT i = 0; i < MaxRootParameters; ++i) {
 			CollectFrameResourceBinding(bindings, event, "graphics_cbv_srv_uav",
 				event.graphicsTables[i], D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
@@ -1130,6 +1192,10 @@ void DX12DumpBindingTrace(const wchar_t *dir)
 
 	fprintf(file,
 		"serial,kind,draw_id,dispatch_id,command_list,pipeline_state,pso,vs,ps,cs,topology,vertex_count,index_count,start_vertex,start_index,base_vertex,instance_count,start_instance,groups_x,groups_y,groups_z,vb_slots,ib_gpu_va,ib_size,ib_format,cbv_srv_uav_heap,sampler_heap,graphics_tables,compute_tables\n");
+	DX12FrameAnalysisLogInfo(
+		"DX12 binding trace begin: events=%zu dropped=%llu max_events=%u\n",
+		events.size(), static_cast<unsigned long long>(droppedEvents),
+		MaxTrackedEvents);
 	for (const BindingEvent &event : events) {
 		fprintf(file, "%llu,%s,%llu,%llu,%p,%p,",
 			static_cast<unsigned long long>(event.serial),
@@ -1168,9 +1234,41 @@ void DX12DumpBindingTrace(const wchar_t *dir)
 		fprintf(file, ",");
 		WriteRootTables(file, event.computeTables);
 		fprintf(file, "\n");
+
+		char vs[32], ps[32], cs[32];
+		FormatOptionalHashText(event.shaderInfo.hasVS, event.shaderInfo.vs, vs, ARRAYSIZE(vs));
+		FormatOptionalHashText(event.shaderInfo.hasPS, event.shaderInfo.ps, ps, ARRAYSIZE(ps));
+		FormatOptionalHashText(event.shaderInfo.hasCS, event.shaderInfo.cs, cs, ARRAYSIZE(cs));
+		DX12FrameAnalysisLogInfo(
+			"event=%llu kind=%s draw=%llu dispatch=%llu command_list=%p pso=%llu vs=%s ps=%s cs=%s topology=%s vertices=%u indices=%u instances=%u start_vertex=%u start_index=%u base_vertex=%d start_instance=%u groups=%u,%u,%u ib_va=0x%llx ib_size=%u ib_format=%u cbv_srv_uav_heap=%p sampler_heap=%p\n",
+			static_cast<unsigned long long>(event.serial),
+			event.kind.c_str(),
+			static_cast<unsigned long long>(event.drawId),
+			static_cast<unsigned long long>(event.dispatchId),
+			event.commandList,
+			static_cast<unsigned long long>(event.shaderInfo.psoIndex),
+			vs, ps, cs,
+			TopologyName(event.primitiveTopology),
+			event.vertexCountPerInstance,
+			event.indexCountPerInstance,
+			event.instanceCount,
+			event.startVertexLocation,
+			event.startIndexLocation,
+			event.baseVertexLocation,
+			event.startInstanceLocation,
+			event.threadGroupCountX,
+			event.threadGroupCountY,
+			event.threadGroupCountZ,
+			static_cast<unsigned long long>(event.indexBufferValid ? event.indexBuffer.BufferLocation : 0),
+			event.indexBufferValid ? event.indexBuffer.SizeInBytes : 0,
+			event.indexBufferValid ? static_cast<UINT>(event.indexBuffer.Format) : 0,
+			event.cbvSrvUavHeap,
+			event.samplerHeap);
 	}
 
 	fclose(file);
+	DX12FrameAnalysisLogInfo("DX12 binding trace end: events=%zu dropped=%llu\n",
+		events.size(), static_cast<unsigned long long>(droppedEvents));
 	DX12FrameAnalysisLogInfo("Current-frame binding trace written: %S events=%zu dropped=%llu\n",
 		path, events.size(), static_cast<unsigned long long>(droppedEvents));
 	WriteFlatFrameAnalysisFiles(dir, events, droppedEvents);
