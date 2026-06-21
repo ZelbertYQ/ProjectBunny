@@ -24,7 +24,7 @@ class ZAYCHIK_UL_frameanalysis_list(UIList):
         item: ZAYCHIK_PG_frameanalysis_item,
         icon: int,
         active_data: bpy.types.ID,
-        active_propname: str,
+        active_propname: str, 
         index: int,
         flt_flag: int,
     ) -> None:
@@ -70,6 +70,6 @@ class ZAYCHIK_PT_sidebar(Panel):
 
 CLASSES = (
     ZAYCHIK_UL_frameanalysis_list,
-    ZAYCHIK_PT_sidebar,
+    ZAYCHIK_PT_sidebar, 
 )
 

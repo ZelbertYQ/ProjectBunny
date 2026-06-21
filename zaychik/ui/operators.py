@@ -6,13 +6,20 @@ from typing import List
 import bpy
 from bpy.types import Operator
 
-from ..common.config import save_config
 from ..utils.importer import import_draw_call
 from ..utils.parser import parse_draw_calls
 from ..utils.paths import normalize_path, scan_frameanalysis_directories
 
 
 def refresh_frameanalysis_items(context: bpy.types.Context) -> int:
+    """Re-scan the dump root directory and rebuild the FrameAnalysis list.
+
+    Safe to call from non-draw contexts (operators, startup init). It writes
+    to ID data (CollectionProperty / IntProperty); the index update triggers
+    ``_on_frameanalysis_index_changed`` which keeps selected_frameanalysis_name
+    and Config.json in sync, so we do not write selected_frameanalysis_name nor
+    call save_config ourselves here.
+    """
     settings = context.scene.zaychik_settings
     root_dir = normalize_path(bpy.path.abspath(settings.dump_root_directory).strip())
     selected_name = settings.selected_frameanalysis_name
@@ -29,30 +36,30 @@ def refresh_frameanalysis_items(context: bpy.types.Context) -> int:
             selected_index = index
 
     if settings.frameanalysis_items:
+        # Assigning frameanalysis_index fires its update callback, which syncs
+        # selected_frameanalysis_name and saves Config.json.
         settings.frameanalysis_index = min(selected_index, len(settings.frameanalysis_items) - 1)
-        settings.selected_frameanalysis_name = settings.frameanalysis_items[
-            settings.frameanalysis_index
-        ].name
     else:
+        # No items: reset index (update callback will blank the name and save).
         settings.frameanalysis_index = 0
-        settings.selected_frameanalysis_name = ""
-    save_config(settings)
 
     return len(settings.frameanalysis_items)
 
 
 def get_selected_frameanalysis_path(context: bpy.types.Context) -> str | None:
+    """Return the path of the currently selected FrameAnalysis, or None.
+
+    READ-ONLY. This is called from the panel draw() method, which is not
+    allowed to write to ID datablocks — do NOT modify any property here and
+    do NOT call save_config.
+    """
     settings = context.scene.zaychik_settings
     if not settings.frameanalysis_items:
         return None
-    if settings.frameanalysis_index < 0 or settings.frameanalysis_index >= len(
-        settings.frameanalysis_items
-    ):
+    index = settings.frameanalysis_index
+    if index < 0 or index >= len(settings.frameanalysis_items):
         return None
-    item = settings.frameanalysis_items[settings.frameanalysis_index]
-    settings.selected_frameanalysis_name = item.name
-    save_config(settings)
-    return item.path
+    return settings.frameanalysis_items[index].path
 
 
 class ZAYCHIK_OT_refresh_frameanalysis_list(Operator):

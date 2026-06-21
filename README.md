@@ -18,8 +18,9 @@ This project is used to refactor and improve the original 3Dmigoto project.
 
 - Windows 11 Pro
 - VSCode
-- C++ Extension Pack (VSCode extension)
+- C++ Extension Pack [VSCode extension]
 - C++ 14 Standard
+- Blender Development(Jacques Lucke) [VSCode extension]
 
 # Build
 
