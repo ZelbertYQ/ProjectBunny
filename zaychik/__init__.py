@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 bl_info = {
     "name": "Zaychik DX12 Dump Importer",
     "author": "OpenAI",
-    "description": "Analyze a DX12 frame dump log.txt and try importing meshes into Blender",
+    "description": "Analyze a DX12 frame dump log.jsonl and try importing meshes into Blender",
     "blender": (4, 2, 0),
     "version": (0, 1, 0),
     "location": "View3D > Sidebar > Zaychik",

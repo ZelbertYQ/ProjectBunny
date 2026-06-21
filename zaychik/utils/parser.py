@@ -1,9 +1,10 @@
 """Frame-analysis log parser (strict, typed)."""
 from __future__ import annotations
 
-import re
+import json
+import os
 from dataclasses import dataclass, field
-from typing import ClassVar, Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 
 @dataclass
@@ -55,69 +56,164 @@ class DrawCall:
 
 
 class LogParser:
-    """Parses a DX12 frame-analysis log.txt into a list of DrawCall objects.
-
-    All regex state lives as ClassVar patterns; instance holds no parser state
-    between calls to :meth:`parse`.
-    """
-
-    # Key=value pairs in the log can be nested inside longer names (e.g.
-    # ``buffer_view_bytes=0 ... bytes=4096``).  _TOPLEVEL anchors a key to the
-    # preceding non-identifier character so we never match the tail of another
-    # key.
-    _TOPLEVEL: ClassVar[str] = r"(?<![A-Za-z0-9_])"
-
-    _CALL_DRAW_RE: ClassVar[re.Pattern] = re.compile(
-        r"call\.draw function=draw_indexed event=(?P<event>\d+).*?"
-        r"vs=(?P<vs>[0-9a-f-]+).*?"
-        r"topology=(?P<topology>[A-Z0-9_]+).*?"
-        + _TOPLEVEL + r"index_count=(?P<index_count>\d+).*?"
-        + _TOPLEVEL + r"start_vertex=(?P<start_vertex>-?\d+).*?"
-        + _TOPLEVEL + r"start_index=(?P<start_index>-?\d+).*?"
-        + _TOPLEVEL + r"base_vertex=(?P<base_vertex>-?\d+).*?"
-        + _TOPLEVEL + r"instance_count=(?P<instance_count>\d+)"
-    )
-
-    _BIND_IA_RE: ClassVar[re.Pattern] = re.compile(
-        r"bind\.ia event=(?P<event>\d+).*?"
-        r"role=(?P<role>VB|IB).*?"
-        r"slot=(?P<slot>\d+).*?"
-        + _TOPLEVEL + r"gpu=(?P<gpu>0x[0-9a-fA-F]+).*?"
-        + _TOPLEVEL + r"offset=(?P<offset>\d+).*?"
-        + _TOPLEVEL + r"bytes=(?P<bytes>\d+).*?"
-        r"stride=(?P<stride>\d+).*?"
-        r"fmt=(?P<fmt>\d+).*?"
-        r"fmt_name=(?P<fmt_name>[A-Z0-9_]+).*?"
-        r"(?:" + _TOPLEVEL + r"skin_source=(?P<skin_source>[a-z_]+).*?)?"
-        r"file=(?P<file>deduped\\[^ ]+)"
-    )
-
-    _BIND_RESOURCE_RE: ClassVar[re.Pattern] = re.compile(
-        r"bind\.resource event=(?P<event>\d+).*?"
-        r"bind=(?P<bind>[a-z_]+).*?"
-        r"kind=(?P<kind>[A-Z]+).*?"
-        + _TOPLEVEL + r"root=(?P<root>\d+).*?"
-        + _TOPLEVEL + r"reg=(?P<reg>\d+).*?"
-        + _TOPLEVEL + r"bytes=(?P<bytes>\d+).*?"
-        r"file=(?P<file>deduped\\[^ ]+)"
-    )
+    """Parses a DX12 frame-analysis log.jsonl into a list of DrawCall objects."""
 
     @staticmethod
     def _to_int(value: str, base: int = 10) -> int:
         return int(value, base) if value else 0
 
     @staticmethod
-    def _iter_lines(path: str) -> Iterable[str]:
+    def _iter_json_lines(path: str) -> Iterable[dict]:
         with open(path, "r", encoding="utf-8", errors="replace") as handle:
             for line in handle:
-                yield line.strip()
+                line = line.strip()
+                if line:
+                    try:
+                        yield json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
 
     @classmethod
     def parse(cls, log_path: str) -> List[DrawCall]:
+        # Try log.jsonl first, then fall back to log.txt
+        if not os.path.exists(log_path) and log_path.endswith('.jsonl'):
+            txt_path = log_path[:-6] + '.txt'
+            if os.path.exists(txt_path):
+                return cls._parse_txt(txt_path)
+        elif not os.path.exists(log_path):
+            jsonl_path = log_path[:-4] + '.jsonl' if log_path.endswith('.txt') else log_path + '.jsonl'
+            if os.path.exists(jsonl_path):
+                return cls.parse(jsonl_path)
+
         draws: Dict[int, DrawCall] = {}
 
-        for line in cls._iter_lines(log_path):
-            draw_match = cls._CALL_DRAW_RE.search(line)
+        for obj in cls._iter_json_lines(log_path):
+            type_str = obj.get('type')
+
+            if type_str in ('call.draw', 'call.dispatch'):
+                event = obj.get('event', 0)
+                draws[event] = DrawCall(
+                    event=event,
+                    vs=obj.get('vs', '-'),
+                    topology=obj.get('topology', 'UNKNOWN'),
+                    index_count=obj.get('index_count', 0),
+                    start_vertex=obj.get('start_vertex', 0),
+                    start_index=obj.get('start_index', 0),
+                    base_vertex=obj.get('base_vertex', 0),
+                    instance_count=obj.get('instance_count', 0),
+                )
+                continue
+
+            if type_str == 'bind.ia':
+                event = obj.get('event', 0)
+                draw = draws.get(event)
+                role = obj.get('role', '')
+                relative_path = obj.get('file', '')
+                gpu_str = obj.get('gpu', '0x0')
+                gpu = int(gpu_str, 16) if isinstance(gpu_str, str) else gpu_str
+                offset = obj.get('offset', 0)
+
+                if role == 'VB':
+                    binding = VertexBinding(
+                        slot=obj.get('slot', 0),
+                        bytes=obj.get('bytes', 0),
+                        stride=obj.get('stride', 0),
+                        fmt=obj.get('fmt', 0),
+                        fmt_name=obj.get('fmt_name', ''),
+                        skin_source=obj.get('skin_source') or 'unknown',
+                        relative_path=relative_path,
+                        gpu=gpu,
+                        offset=offset,
+                    )
+                    if draw is not None:
+                        draw.vertex_bindings[binding.slot] = binding
+                        if binding.skin_source != 'not_applicable':
+                            if draw.skin_source == 'unknown' or binding.skin_source == 'gpu_preskinning':
+                                draw.skin_source = binding.skin_source
+                elif role == 'IB':
+                    ib = IndexBinding(
+                        bytes=obj.get('bytes', 0),
+                        fmt=obj.get('fmt', 0),
+                        fmt_name=obj.get('fmt_name', ''),
+                        relative_path=relative_path,
+                        gpu=gpu,
+                        offset=offset,
+                    )
+                    if draw is not None:
+                        draw.index_binding = ib
+                continue
+
+            if type_str == 'bind.resource':
+                event = obj.get('event', 0)
+                draw = draws.get(event)
+                if draw is None:
+                    continue
+                if obj.get('kind') != 'CBV':
+                    continue
+                draw.constant_buffers.append(
+                    ConstantBufferBinding(
+                        bind_space=obj.get('bind', ''),
+                        root_index=obj.get('root', 0),
+                        reg=obj.get('reg', 0),
+                        bytes=obj.get('bytes', 0),
+                        relative_path=obj.get('file', ''),
+                    )
+                )
+
+        return sorted(draws.values(), key=lambda item: item.event)
+
+    @classmethod
+    def _parse_txt(cls, log_path: str) -> List[DrawCall]:
+        """Fallback parser for old log.txt format."""
+        import re
+
+        # Key=value pairs in the log can be nested inside longer names
+        _TOPLEVEL = r"(?<![A-Za-z0-9_])"
+
+        _CALL_DRAW_RE = re.compile(
+            r"call\.draw function=draw_indexed event=(?P<event>\d+).*?"
+            r"vs=(?P<vs>[0-9a-f-]+).*?"
+            r"topology=(?P<topology>[A-Z0-9_]+).*?"
+            + _TOPLEVEL + r"index_count=(?P<index_count>\d+).*?"
+            + _TOPLEVEL + r"start_vertex=(?P<start_vertex>-?\d+).*?"
+            + _TOPLEVEL + r"start_index=(?P<start_index>-?\d+).*?"
+            + _TOPLEVEL + r"base_vertex=(?P<base_vertex>-?\d+).*?"
+            + _TOPLEVEL + r"instance_count=(?P<instance_count>\d+)"
+        )
+
+        _BIND_IA_RE = re.compile(
+            r"bind\.ia event=(?P<event>\d+).*?"
+            r"role=(?P<role>VB|IB).*?"
+            r"slot=(?P<slot>\d+).*?"
+            + _TOPLEVEL + r"gpu=(?P<gpu>0x[0-9a-fA-F]+).*?"
+            + _TOPLEVEL + r"offset=(?P<offset>\d+).*?"
+            + _TOPLEVEL + r"bytes=(?P<bytes>\d+).*?"
+            r"stride=(?P<stride>\d+).*?"
+            r"fmt=(?P<fmt>\d+).*?"
+            r"fmt_name=(?P<fmt_name>[A-Z0-9_]+).*?"
+            r"(?:" + _TOPLEVEL + r"skin_source=(?P<skin_source>[a-z_]+).*?)?"
+            r"file=(?P<file>deduped\\[^ ]+)"
+        )
+
+        _BIND_RESOURCE_RE = re.compile(
+            r"bind\.resource event=(?P<event>\d+).*?"
+            r"bind=(?P<bind>[a-z_]+).*?"
+            r"kind=(?P<kind>[A-Z]+).*?"
+            + _TOPLEVEL + r"root=(?P<root>\d+).*?"
+            + _TOPLEVEL + r"reg=(?P<reg>\d+).*?"
+            + _TOPLEVEL + r"bytes=(?P<bytes>\d+).*?"
+            r"file=(?P<file>deduped\\[^ ]+)"
+        )
+
+        def _iter_lines(path: str) -> Iterable[str]:
+            with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                for line in handle:
+                    yield line.strip()
+
+        draws: Dict[int, DrawCall] = {}
+
+        for line in _iter_lines(log_path):
+            draw_match = _CALL_DRAW_RE.search(line)
             if draw_match:
                 event = int(draw_match.group("event"))
                 draws[event] = DrawCall(
@@ -132,7 +228,7 @@ class LogParser:
                 )
                 continue
 
-            bind_match = cls._BIND_IA_RE.search(line)
+            bind_match = _BIND_IA_RE.search(line)
             if bind_match:
                 event = int(bind_match.group("event"))
                 draw = draws.get(event)
@@ -170,7 +266,7 @@ class LogParser:
                         draw.index_binding = ib
                 continue
 
-            resource_match = cls._BIND_RESOURCE_RE.search(line)
+            resource_match = _BIND_RESOURCE_RE.search(line)
             if resource_match is None:
                 continue
 

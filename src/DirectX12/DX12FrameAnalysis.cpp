@@ -161,17 +161,14 @@ bool DX12FrameAnalysisState::OpenLogLocked()
 	if (!mActive || !mPath[0])
 		return false;
 
-	swprintf_s(filename, L"%s\\log.txt", mPath);
+	swprintf_s(filename, L"%s\\log.jsonl", mPath);
 	mLog = _wfsopen(filename, L"w", _SH_DENYNO);
 	if (!mLog) {
 		DX12Log("Error opening frame analysis log: %S\n", filename);
 		return false;
 	}
 
-	fprintf(mLog, "DX12 Frame Analysis\n");
-	fprintf(mLog, "schema: dx12-fa-log/1\n");
-	fprintf(mLog, "format: numbered records with record_type followed by key=value fields\n");
-	fprintf(mLog, "present_count_at_start: %ld\n", DX12GetPresentCount());
+	fprintf(mLog, "{\"type\":\"header\",\"schema\":\"dx12-fa-log/2\",\"present_count_at_start\":%ld}\n", DX12GetPresentCount());
 	return true;
 }
 
@@ -197,6 +194,20 @@ void DX12FrameAnalysisState::LogEvent(const char *fmt, ...)
 	va_start(args, fmt);
 	vfprintf(mLog, fmt, args);
 	va_end(args);
+	fflush(mLog);
+	ReleaseSRWLockExclusive(&mLock);
+}
+
+void DX12FrameAnalysisState::LogJsonLine(const char *json)
+{
+	AcquireSRWLockExclusive(&mLock);
+	if (!mActive || !OpenLogLocked()) {
+		ReleaseSRWLockExclusive(&mLock);
+		return;
+	}
+
+	++mLineNo;
+	fprintf(mLog, "%s\n", json);
 	fflush(mLog);
 	ReleaseSRWLockExclusive(&mLock);
 }
@@ -269,4 +280,9 @@ void DX12FrameAnalysisLogInfo(const char *fmt, ...)
 	vsnprintf(buffer, sizeof(buffer), fmt, args);
 	va_end(args);
 	DX12Log("FrameAnalysis %s", buffer);
+}
+
+void DX12FrameAnalysisLogJsonLine(const char *json)
+{
+	DX12FrameAnalysisState::Get().LogJsonLine(json);
 }

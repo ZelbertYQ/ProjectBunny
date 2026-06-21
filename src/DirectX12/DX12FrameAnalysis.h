@@ -18,6 +18,7 @@ public:
 	bool IsCapturing();
 	bool GetPath(wchar_t *path, size_t pathCount);
 	void LogEvent(const char *fmt, ...);
+	void LogJsonLine(const char *json);
 
 private:
 	DX12FrameAnalysisState();
@@ -52,3 +53,4 @@ bool DX12FrameAnalysisIsCapturing();
 bool DX12FrameAnalysisGetPath(wchar_t *path, size_t pathCount);
 void DX12FrameAnalysisLogEvent(const char *fmt, ...);
 void DX12FrameAnalysisLogInfo(const char *fmt, ...);
+void DX12FrameAnalysisLogJsonLine(const char *json);

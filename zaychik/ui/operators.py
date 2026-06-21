@@ -93,9 +93,9 @@ class ZAYCHIK_OT_refresh_frameanalysis_list(Operator):
 
 class ZAYCHIK_OT_import_dx12_dump(Operator):
     bl_idname = "zaychik.import_dx12_dump"
-    bl_label = "Analyze log.txt And Import"
+    bl_label = "Analyze log.jsonl And Import"
     bl_description = (
-        "Analyze log.txt in the selected dump directory and try importing model meshes"
+        "Analyze log.jsonl in the selected dump directory and try importing model meshes"
     )
     bl_options = {"REGISTER", "UNDO"}
 
@@ -107,18 +107,22 @@ class ZAYCHIK_OT_import_dx12_dump(Operator):
             return {"CANCELLED"}
 
         dump_dir = Paths.normalize(bpy.path.abspath(dump_dir).strip())
-        log_path = os.path.join(dump_dir, "log.txt")
+        log_path = os.path.join(dump_dir, "log.jsonl")
+        if not os.path.isfile(log_path):
+            # Fall back to old format
+            log_path = os.path.join(dump_dir, "log.txt")
         if not os.path.isdir(dump_dir):
             self.report({"ERROR"}, "Dump directory does not exist")
             return {"CANCELLED"}
         if not os.path.isfile(log_path):
-            self.report({"ERROR"}, "Selected directory does not contain log.txt")
+            self.report({"ERROR"}, "Selected directory does not contain log.jsonl or log.txt")
             return {"CANCELLED"}
 
         try:
             draws = LogParser.parse(log_path)
         except Exception as exc:  # pragma: no cover - Blender runtime path
-            self.report({"ERROR"}, f"Failed to parse log.txt: {exc}")
+            filename = os.path.basename(log_path)
+            self.report({"ERROR"}, f"Failed to parse {filename}: {exc}")
             settings.last_status = "Parse failed"
             return {"CANCELLED"}
 
