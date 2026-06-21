@@ -177,11 +177,12 @@ extern "C" HRESULT WINAPI D3D12CreateDevice(
 {
 	LoadRealD3D12();
 	DX12InstallDXGIHooks();
-	DX12Log("D3D12CreateDevice adapter=%p minFeature=0x%x\n", adapter, minimumFeatureLevel);
 	if (!gOrigD3D12CreateDevice)
 		return E_FAIL;
 	HRESULT hr = gOrigD3D12CreateDevice(adapter, minimumFeatureLevel, riid, device);
-	DX12Log("D3D12CreateDevice result=0x%lx device=%p\n", hr, device ? *device : nullptr);
+	DX12LogJsonFunc("D3D12CreateDevice",
+		"\"adapter\":\"%p\",\"minFeature\":\"0x%x\",\"hr\":\"0x%lx\",\"device\":\"%p\"",
+		adapter, minimumFeatureLevel, hr, device ? *device : nullptr);
 	if (SUCCEEDED(hr) && device && *device)
 		DX12HookDevice(static_cast<IUnknown*>(*device));
 	return hr;
@@ -250,7 +251,8 @@ extern "C" HRESULT WINAPI D3D12GetInterface(REFCLSID clsid, REFIID riid, void **
 	if (!gOrigD3D12GetInterface)
 		return E_NOINTERFACE;
 	HRESULT hr = gOrigD3D12GetInterface(clsid, riid, object);
-	DX12Log("D3D12GetInterface clsid=%p riid=%p result=0x%lx object=%p\n",
+	DX12LogJsonFunc("D3D12GetInterface",
+		"\"clsid\":\"%p\",\"riid\":\"%p\",\"hr\":\"0x%lx\",\"object\":\"%p\"",
 		&clsid, &riid, hr, object ? *object : nullptr);
 	if (SUCCEEDED(hr) && object && *object)
 		DX12HookDeviceFactory(static_cast<IUnknown*>(*object));

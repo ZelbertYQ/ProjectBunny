@@ -15,6 +15,7 @@
 #include "DX12BindingTracker.h"
 #include "DX12FrameAnalysis.h"
 #include "DX12FrameAnalysisManifest.h"
+#include "DX12Json.h"
 #include "DX12ShaderDump.h"
 #include "DX12State.h"
 
@@ -91,7 +92,8 @@ static uint32_t HashBytes(uint32_t seed, const void *data, size_t size)
 		return crc32c_append(seed, static_cast<const uint8_t*>(data), size);
 	}
 	__except (EXCEPTION_EXECUTE_HANDLER) {
-		DX12FrameAnalysisLogInfo("crc32c failed exception=0x%lx size=%zu\n", GetExceptionCode(), size);
+		DX12FrameAnalysisLogJsonFunc("Crc32cFailed",
+			"\"exception\":\"0x%lx\",\"size\":%zu", GetExceptionCode(), size);
 		return 0;
 	}
 }
@@ -549,8 +551,8 @@ static bool MapAndWriteTask(
 	}
 	__except (EXCEPTION_EXECUTE_HANDLER) {
 		task->skipNote = "map_or_write_exception";
-		DX12FrameAnalysisLogInfo(
-			"Current-frame resource map/write skipped after exception=0x%lx source=%p readback=%p direct=%u offset=%llu bytes=%llu\n",
+		DX12FrameAnalysisLogJsonFunc("ResourceMapWriteSkipped",
+			"\"exception\":\"0x%lx\",\"source\":\"%p\",\"readback\":\"%p\",\"direct\":%u,\"offset\":%llu,\"bytes\":%llu",
 			GetExceptionCode(), task->source, task->readback, task->directMap ? 1 : 0,
 			static_cast<unsigned long long>(task->readbackOffset),
 			static_cast<unsigned long long>(task->copyBytes));
@@ -904,7 +906,8 @@ static bool ExecuteCopyBatch(
 	ID3D12GraphicsCommandList *commandList = nullptr;
 	HRESULT hr = device->GetDeviceRemovedReason();
 	if (FAILED(hr)) {
-		DX12FrameAnalysisLogInfo("Current-frame resource copy skipped: device removed hr=0x%lx\n", hr);
+		DX12FrameAnalysisLogJsonFunc("ResourceCopySkipped",
+			"\"reason\":\"device_removed\",\"hr\":\"0x%lx\"", hr);
 		return false;
 	}
 
@@ -912,7 +915,8 @@ static bool ExecuteCopyBatch(
 	if (SUCCEEDED(hr))
 		hr = device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator, nullptr, IID_PPV_ARGS(&commandList));
 	if (FAILED(hr) || !allocator || !commandList) {
-		DX12FrameAnalysisLogInfo("Current-frame resource copy setup failed hr=0x%lx tasks=%zu\n",
+		DX12FrameAnalysisLogJsonFunc("ResourceCopySetupFailed",
+			"\"hr\":\"0x%lx\",\"tasks\":%zu",
 			hr, tasks->size());
 		if (commandList)
 			commandList->Release();
@@ -951,8 +955,8 @@ static bool ExecuteCopyBatch(
 		__except (EXCEPTION_EXECUTE_HANDLER) {
 			task.copied = false;
 			task.skipNote = "copy_record_exception";
-			DX12FrameAnalysisLogInfo(
-				"Current-frame resource copy task skipped after exception=0x%lx source=%p texture=%u offset=%llu bytes=%llu state=0x%x\n",
+			DX12FrameAnalysisLogJsonFunc("ResourceCopyTaskSkipped",
+				"\"exception\":\"0x%lx\",\"source\":\"%p\",\"texture\":%u,\"offset\":%llu,\"bytes\":%llu,\"state\":\"0x%x\"",
 				GetExceptionCode(), task.source, task.isTexture ? 1 : 0,
 				static_cast<unsigned long long>(task.sourceOffset),
 				static_cast<unsigned long long>(task.copyBytes),
@@ -962,21 +966,25 @@ static bool ExecuteCopyBatch(
 
 	hr = commandList->Close();
 	if (FAILED(hr)) {
-		DX12FrameAnalysisLogInfo("Current-frame resource copy batch close failed hr=0x%lx tasks=%zu\n",
+		DX12FrameAnalysisLogJsonFunc("ResourceCopyBatchCloseFailed",
+			"\"hr\":\"0x%lx\",\"tasks\":%zu",
 			hr, tasks->size());
 		commandList->Release();
 		allocator->Release();
 		return false;
 	}
 	ID3D12CommandList *lists[] = { commandList };
-	DX12FrameAnalysisLogInfo("Current-frame resource copy batch executing tasks=%zu\n", tasks->size());
+	if (tasks->size() > 1)
+		DX12FrameAnalysisLogJsonFunc("ResourceCopyBatchExecuting",
+			"\"tasks\":%zu", tasks->size());
 	bool ok = false;
 	__try {
 		queue->ExecuteCommandLists(1, lists);
 		ok = WaitForFence(queue, device);
 	}
 	__except (EXCEPTION_EXECUTE_HANDLER) {
-		DX12FrameAnalysisLogInfo("Current-frame resource copy batch execute failed exception=0x%lx tasks=%zu\n",
+		DX12FrameAnalysisLogJsonFunc("ResourceCopyBatchExecuteFailed",
+			"\"exception\":\"0x%lx\",\"tasks\":%zu",
 			GetExceptionCode(), tasks->size());
 		ok = false;
 	}
@@ -1019,14 +1027,16 @@ static size_t ExecuteCopyTasksWithFallback(
 		return copied;
 	}
 
-	DX12FrameAnalysisLogInfo("Current-frame resource copy batch failed; retrying per resource tasks=%zu\n",
+	DX12FrameAnalysisLogJsonFunc("ResourceCopyBatchFallback",
+		"\"tasks\":%zu",
 		tasks->size());
 	size_t copied = 0;
 	for (DumpTask &task : *tasks) {
 		if (!task.ready || !task.readback)
 			continue;
 		if (FAILED(device->GetDeviceRemovedReason())) {
-			DX12FrameAnalysisLogInfo("Current-frame resource copy fallback stopped: device removed copied=%zu tasks=%zu\n",
+			DX12FrameAnalysisLogJsonFunc("ResourceCopyFallbackStopped",
+				"\"reason\":\"device_removed\",\"copied\":%zu,\"tasks\":%zu",
 				copied, tasks->size());
 			break;
 		}
@@ -1089,8 +1099,8 @@ void DX12DumpCurrentFrameResources(const wchar_t *dir)
 
 	const UINT64 frameReadbackBudget = FrameReadbackBudgetBytes();
 	UINT64 frameReadbackBytes = 0;
-	DX12FrameAnalysisLogEvent(
-		"ResourceDump bindings=%zu ia=%zu maxBytes=%llu frameReadbackBudget=%llu unsafeCopy=%u gpuCopy=%u stateTracking=1\n",
+	DX12FrameAnalysisLogJsonFunc("ResourceDump",
+		"\"bindings\":%zu,\"ia\":%zu,\"maxBytes\":%llu,\"frameReadbackBudget\":%llu,\"unsafeCopy\":%u,\"gpuCopy\":%u,\"stateTracking\":1",
 		bindings.size(), iaBuffers.size(), static_cast<unsigned long long>(MaxResourceDumpBytes),
 		static_cast<unsigned long long>(frameReadbackBudget),
 		UnsafeResourceCopyEnabled() ? 1 : 0,
@@ -1099,10 +1109,10 @@ void DX12DumpCurrentFrameResources(const wchar_t *dir)
 	ID3D12CommandQueue *queue = DX12AcquireCommandQueue();
 	ID3D12Device *device = nullptr;
 	if (!queue || FAILED(queue->GetDevice(IID_PPV_ARGS(&device))) || !device) {
-		DX12FrameAnalysisLogEvent("ResourceDump status=failed note=missing_command_queue\n");
+		DX12FrameAnalysisLogJsonFunc("ResourceDump",
+			"\"status\":\"failed\",\"reason\":\"missing_command_queue\"");
 		if (queue)
 			queue->Release();
-		DX12FrameAnalysisLogInfo("Current-frame resource file dump skipped: no command queue\n");
 		return;
 	}
 
@@ -1215,7 +1225,8 @@ void DX12DumpCurrentFrameResources(const wchar_t *dir)
 
 	bool readbackCopyOk = false;
 	const size_t copiedTasks = ExecuteReadbackCopyTasks(device, queue, &tasks, &readbackCopyOk);
-	DX12FrameAnalysisLogInfo("Current-frame resource copy result gpuCopy=%u readbackOk=%u copied=%zu tasks=%zu duplicates=%u\n",
+	DX12FrameAnalysisLogJsonFunc("ResourceCopyResult",
+		"\"gpuCopy\":%u,\"readbackOk\":%u,\"copied\":%zu,\"tasks\":%zu,\"duplicates\":%u",
 		GpuResourceCopyEnabled() ? 1 : 0,
 		readbackCopyOk ? 1 : 0, copiedTasks, tasks.size(), duplicates);
 
@@ -1276,8 +1287,8 @@ void DX12DumpCurrentFrameResources(const wchar_t *dir)
 	device->Release();
 	queue->Release();
 
-	DX12FrameAnalysisLogEvent(
-		"resource.summary textures=%u buffers=%u linked=%u skipped=%u duplicates=%u failed=%u readback_bytes=%llu bindings=%zu ia=%zu\n",
+	DX12FrameAnalysisLogJsonFunc("ResourceSummary",
+		"\"textures\":%u,\"buffers\":%u,\"linked\":%u,\"skipped\":%u,\"duplicates\":%u,\"failed\":%u,\"readbackBytes\":%llu,\"bindings\":%zu,\"ia\":%zu",
 		dumpedTextures, dumpedBuffers, linked, skipped, duplicates, failed,
 		static_cast<unsigned long long>(frameReadbackBytes),
 		bindings.size(), iaBuffers.size());

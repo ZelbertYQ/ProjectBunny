@@ -243,8 +243,7 @@ void DX12FrameAnalysisLogEvent(const char *fmt, ...)
 {
 	va_list args;
 	char buffer[1024];
-	char messageJson[1200];
-	char fields[1400];
+	char fields[4096];
 
 	if (!DX12FrameAnalysisIsActive())
 		return;
@@ -253,8 +252,8 @@ void DX12FrameAnalysisLogEvent(const char *fmt, ...)
 	vsnprintf(buffer, sizeof(buffer), fmt, args);
 	va_end(args);
 
-	DX12JsonEscapeString(messageJson, sizeof(messageJson), buffer);
-	sprintf_s(fields, sizeof(fields), "\"func\":\"Event\",\"message\":%s", messageJson);
+	strcpy_s(fields, sizeof(fields), "\"func\":\"Event\"");
+	DX12JsonAppendLogFieldsFromText(fields, sizeof(fields), buffer);
 	DX12FrameAnalysisLogJsonFields(fields);
 }
 
@@ -262,8 +261,7 @@ void DX12FrameAnalysisLogInfo(const char *fmt, ...)
 {
 	va_list args;
 	char buffer[1024];
-	char messageJson[1200];
-	char fields[1400];
+	char fields[4096];
 
 	if (!DX12FrameAnalysisIsActive())
 		return;
@@ -272,8 +270,33 @@ void DX12FrameAnalysisLogInfo(const char *fmt, ...)
 	vsnprintf(buffer, sizeof(buffer), fmt, args);
 	va_end(args);
 
-	DX12JsonEscapeString(messageJson, sizeof(messageJson), buffer);
-	sprintf_s(fields, sizeof(fields), "\"func\":\"LogInfo\",\"message\":%s", messageJson);
+	strcpy_s(fields, sizeof(fields), "\"func\":\"LogInfo\"");
+	DX12JsonAppendLogFieldsFromText(fields, sizeof(fields), buffer);
+	DX12FrameAnalysisLogJsonFields(fields);
+}
+
+void DX12FrameAnalysisLogJsonFunc(const char *func, const char *fmt, ...)
+{
+	if (!DX12FrameAnalysisIsActive())
+		return;
+
+	char funcJson[512];
+	char extra[4096];
+	char fields[4608];
+	DX12JsonEscapeString(funcJson, sizeof(funcJson), func ? func : "Unknown");
+	extra[0] = '\0';
+
+	if (fmt && fmt[0]) {
+		va_list args;
+		va_start(args, fmt);
+		vsnprintf(extra, sizeof(extra), fmt, args);
+		va_end(args);
+	}
+
+	if (extra[0])
+		sprintf_s(fields, sizeof(fields), "\"func\":%s,%s", funcJson, extra);
+	else
+		sprintf_s(fields, sizeof(fields), "\"func\":%s", funcJson);
 	DX12FrameAnalysisLogJsonFields(fields);
 }
 

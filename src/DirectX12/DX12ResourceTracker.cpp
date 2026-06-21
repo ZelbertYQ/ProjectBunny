@@ -12,6 +12,7 @@
 
 #include "DX12FrameAnalysis.h"
 #include "DX12HookManager.h"
+#include "DX12Json.h"
 #include "DX12State.h"
 
 static void GetSummaryDirectory(const wchar_t *dir, wchar_t *path, size_t pathCount)
@@ -1505,7 +1506,8 @@ void DX12GetResourceMetadataSnapshot(
 		if (record.hasCurrentState)
 			descriptorStateKnown++;
 	}
-	DX12FrameAnalysisLogInfo("Metadata snapshot: begin roots=%zu descriptors=%zu descriptorStates=%zu resources=%zu resourcesFromCreate=%llu psoRoots=%zu heaps=%zu requested=%u%u%u%u\n",
+	DX12FrameAnalysisLogJsonFunc("MetadataSnapshotBegin",
+		"\"roots\":%zu,\"descriptors\":%zu,\"descriptorStates\":%zu,\"resources\":%zu,\"resourcesFromCreate\":%llu,\"psoRoots\":%zu,\"heaps\":%zu,\"wantRoots\":%u,\"wantDescriptors\":%u,\"wantPsoRoots\":%u,\"wantHeaps\":%u",
 		gRootSignatures.size(), gDescriptors.size(), descriptorStateKnown,
 		gResources.size(),
 		static_cast<unsigned long long>(gResourcesRecordedFromCreate),
@@ -1531,7 +1533,8 @@ void DX12GetResourceMetadataSnapshot(
 			summary.parameters = record.parameters;
 			rootSignatures->push_back(summary);
 		}
-		DX12FrameAnalysisLogInfo("Metadata snapshot: roots copied=%zu\n", rootSignatures->size());
+		DX12FrameAnalysisLogJsonFunc("MetadataSnapshotCopied",
+			"\"kind\":\"roots\",\"count\":%zu", rootSignatures->size());
 	}
 
 	if (descriptors) {
@@ -1542,7 +1545,8 @@ void DX12GetResourceMetadataSnapshot(
 			FillDescriptorSummary(&summary, record);
 			descriptors->push_back(summary);
 		}
-		DX12FrameAnalysisLogInfo("Metadata snapshot: descriptors copied=%zu\n", descriptors->size());
+		DX12FrameAnalysisLogJsonFunc("MetadataSnapshotCopied",
+			"\"kind\":\"descriptors\",\"count\":%zu", descriptors->size());
 	}
 
 	if (psoRoots) {
@@ -1556,7 +1560,8 @@ void DX12GetResourceMetadataSnapshot(
 			summary.rootSignature = record.rootSignature;
 			psoRoots->push_back(summary);
 		}
-		DX12FrameAnalysisLogInfo("Metadata snapshot: psoRoots copied=%zu\n", psoRoots->size());
+		DX12FrameAnalysisLogJsonFunc("MetadataSnapshotCopied",
+			"\"kind\":\"psoRoots\",\"count\":%zu", psoRoots->size());
 	}
 
 	if (descriptorHeaps) {
@@ -1574,11 +1579,12 @@ void DX12GetResourceMetadataSnapshot(
 			summary.increment = record.increment;
 			descriptorHeaps->push_back(summary);
 		}
-		DX12FrameAnalysisLogInfo("Metadata snapshot: heaps copied=%zu\n", descriptorHeaps->size());
+		DX12FrameAnalysisLogJsonFunc("MetadataSnapshotCopied",
+			"\"kind\":\"heaps\",\"count\":%zu", descriptorHeaps->size());
 	}
 
 	ReleaseSRWLockShared(&gResourceLock);
-	DX12FrameAnalysisLogInfo("Metadata snapshot: complete\n");
+	DX12FrameAnalysisLogJsonFunc("MetadataSnapshotComplete", nullptr);
 }
 
 static void WriteResourceDesc(FILE *file, const DescriptorRecord &record)
@@ -1779,6 +1785,11 @@ void DX12DumpResourceMetadata(const wchar_t *dir)
 	}
 
 	fclose(file);
-	DX12FrameAnalysisLogInfo("Resource metadata written: %S roots=%zu heaps=%zu descriptors=%zu psoRoots=%zu\n",
-		path, rootSignatures.size(), descriptorHeaps.size(), descriptors.size(), psoRoots.size());
+	char fields[512] = "";
+	DX12JsonAppendWStringField(fields, sizeof(fields), "path", path);
+	DX12JsonAppendRawField(fields, sizeof(fields), "roots", std::to_string(rootSignatures.size()).c_str());
+	DX12JsonAppendRawField(fields, sizeof(fields), "heaps", std::to_string(descriptorHeaps.size()).c_str());
+	DX12JsonAppendRawField(fields, sizeof(fields), "descriptors", std::to_string(descriptors.size()).c_str());
+	DX12JsonAppendRawField(fields, sizeof(fields), "psoRoots", std::to_string(psoRoots.size()).c_str());
+	DX12FrameAnalysisLogJsonFunc("ResourceMetadataWritten", "%s", fields + 1);
 }

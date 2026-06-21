@@ -91,7 +91,7 @@ class LogParser:
             type_str = obj.get('type')
             func = obj.get('func')
 
-            if func in ('DrawIndexedInstanced', 'DrawInstanced', 'Dispatch') or type_str in ('call.draw', 'call.dispatch'):
+            if func in ('DrawIndexedInstanced', 'DrawInstanced') or type_str == 'call.draw':
                 event = obj.get('call_index', obj.get('event', obj.get('index', 0)))
                 draws[event] = DrawCall(
                     event=event,

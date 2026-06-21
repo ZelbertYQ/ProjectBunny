@@ -9,6 +9,7 @@ HINSTANCE DX12GetModule();
 bool DX12OpenLogFile();
 void DX12CloseLogFile();
 void DX12Log(const char *fmt, ...);
+void DX12LogJsonFunc(const char *func, const char *fmt, ...);
 
 DWORD DX12HookFunction(void **original, void *target, void *hook, const char *name);
 void *DX12GetOriginalFunction(void *target);

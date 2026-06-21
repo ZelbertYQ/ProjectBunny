@@ -144,7 +144,8 @@ static void HookDXGIFactoryVTables(HMODULE dxgi)
 static HRESULT WINAPI HookedCreateDXGIFactory(REFIID riid, void **factory)
 {
 	HRESULT hr = gOrigCreateDXGIFactory(riid, factory);
-	DX12Log("CreateDXGIFactory riid=%p result=0x%lx factory=%p\n",
+	DX12LogJsonFunc("CreateDXGIFactory",
+		"\"riid\":\"%p\",\"hr\":\"0x%lx\",\"factory\":\"%p\"",
 		&riid, hr, factory ? *factory : nullptr);
 	if (SUCCEEDED(hr) && factory)
 		HookFactory(static_cast<IUnknown*>(*factory));
@@ -154,7 +155,8 @@ static HRESULT WINAPI HookedCreateDXGIFactory(REFIID riid, void **factory)
 static HRESULT WINAPI HookedCreateDXGIFactory1(REFIID riid, void **factory)
 {
 	HRESULT hr = gOrigCreateDXGIFactory1(riid, factory);
-	DX12Log("CreateDXGIFactory1 riid=%p result=0x%lx factory=%p\n",
+	DX12LogJsonFunc("CreateDXGIFactory1",
+		"\"riid\":\"%p\",\"hr\":\"0x%lx\",\"factory\":\"%p\"",
 		&riid, hr, factory ? *factory : nullptr);
 	if (SUCCEEDED(hr) && factory)
 		HookFactory(static_cast<IUnknown*>(*factory));
@@ -164,7 +166,8 @@ static HRESULT WINAPI HookedCreateDXGIFactory1(REFIID riid, void **factory)
 static HRESULT WINAPI HookedCreateDXGIFactory2(UINT flags, REFIID riid, void **factory)
 {
 	HRESULT hr = gOrigCreateDXGIFactory2(flags, riid, factory);
-	DX12Log("CreateDXGIFactory2 flags=0x%x riid=%p result=0x%lx factory=%p\n",
+	DX12LogJsonFunc("CreateDXGIFactory2",
+		"\"flags\":\"0x%x\",\"riid\":\"%p\",\"hr\":\"0x%lx\",\"factory\":\"%p\"",
 		flags, &riid, hr, factory ? *factory : nullptr);
 	if (SUCCEEDED(hr) && factory)
 		HookFactory(static_cast<IUnknown*>(*factory));
@@ -176,7 +179,8 @@ static HRESULT STDMETHODCALLTYPE HookedCreateSwapChain(
 {
 	HookDeviceFromDXGIArgument(device);
 	HRESULT hr = gOrigCreateSwapChain(factory, device, desc, swapChain);
-	DX12Log("CreateSwapChain device=%p result=0x%lx swapchain=%p\n",
+	DX12LogJsonFunc("IDXGIFactory::CreateSwapChain",
+		"\"device\":\"%p\",\"hr\":\"0x%lx\",\"swapchain\":\"%p\"",
 		device, hr, swapChain ? *swapChain : nullptr);
 	if (SUCCEEDED(hr) && swapChain)
 		HookSwapChain(*swapChain);
@@ -189,7 +193,8 @@ static HRESULT STDMETHODCALLTYPE HookedCreateSwapChainForHwnd(
 {
 	HookDeviceFromDXGIArgument(device);
 	HRESULT hr = gOrigCreateSwapChainForHwnd(factory, device, window, desc, fullscreenDesc, output, swapChain);
-	DX12Log("CreateSwapChainForHwnd device=%p hwnd=%p result=0x%lx swapchain=%p\n",
+	DX12LogJsonFunc("IDXGIFactory2::CreateSwapChainForHwnd",
+		"\"device\":\"%p\",\"hwnd\":\"%p\",\"hr\":\"0x%lx\",\"swapchain\":\"%p\"",
 		device, window, hr, swapChain ? *swapChain : nullptr);
 	if (SUCCEEDED(hr) && swapChain)
 		HookSwapChain(*swapChain);
@@ -202,7 +207,8 @@ static HRESULT STDMETHODCALLTYPE HookedCreateSwapChainForCoreWindow(
 {
 	HookDeviceFromDXGIArgument(device);
 	HRESULT hr = gOrigCreateSwapChainForCoreWindow(factory, device, window, desc, output, swapChain);
-	DX12Log("CreateSwapChainForCoreWindow device=%p result=0x%lx swapchain=%p\n",
+	DX12LogJsonFunc("IDXGIFactory2::CreateSwapChainForCoreWindow",
+		"\"device\":\"%p\",\"hr\":\"0x%lx\",\"swapchain\":\"%p\"",
 		device, hr, swapChain ? *swapChain : nullptr);
 	if (SUCCEEDED(hr) && swapChain)
 		HookSwapChain(*swapChain);
@@ -215,7 +221,8 @@ static HRESULT STDMETHODCALLTYPE HookedCreateSwapChainForComposition(
 {
 	HookDeviceFromDXGIArgument(device);
 	HRESULT hr = gOrigCreateSwapChainForComposition(factory, device, desc, output, swapChain);
-	DX12Log("CreateSwapChainForComposition device=%p result=0x%lx swapchain=%p\n",
+	DX12LogJsonFunc("IDXGIFactory2::CreateSwapChainForComposition",
+		"\"device\":\"%p\",\"hr\":\"0x%lx\",\"swapchain\":\"%p\"",
 		device, hr, swapChain ? *swapChain : nullptr);
 	if (SUCCEEDED(hr) && swapChain)
 		HookSwapChain(*swapChain);
@@ -231,7 +238,8 @@ static HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain *swapChain, UINT s
 	DX12IncrementPresentCount();
 	DX12DrawSwapChainText(swapChain);
 	if (dumpFrame) {
-		DX12FrameAnalysisLogEvent("FrameCaptureEnd present=%ld\n", DX12GetPresentCount());
+		DX12FrameAnalysisLogJsonFunc("FrameCaptureEnd",
+			"\"present\":%ld", DX12GetPresentCount());
 		DX12DumpFrameAnalysis();
 		DX12FrameAnalysisEnd();
 	} else if (dumpShaders) {
@@ -239,7 +247,8 @@ static HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain *swapChain, UINT s
 	} else if (DX12FrameAnalysisIsCaptureRequested()) {
 		DX12BindingBeginFrame();
 		DX12FrameAnalysisBeginCapture();
-		DX12FrameAnalysisLogEvent("FrameCaptureBegin present=%ld\n", DX12GetPresentCount());
+		DX12FrameAnalysisLogJsonFunc("FrameCaptureBegin",
+			"\"present\":%ld", DX12GetPresentCount());
 	} else if (DX12ShaderDumpIsCaptureRequested()) {
 		DX12BindingBeginFrame();
 		DX12ShaderDumpBeginCapture();
@@ -259,7 +268,8 @@ static HRESULT STDMETHODCALLTYPE HookedPresent1(
 	DX12IncrementPresentCount();
 	DX12DrawSwapChainText(swapChain);
 	if (dumpFrame) {
-		DX12FrameAnalysisLogEvent("FrameCaptureEnd present=%ld\n", DX12GetPresentCount());
+		DX12FrameAnalysisLogJsonFunc("FrameCaptureEnd",
+			"\"present\":%ld", DX12GetPresentCount());
 		DX12DumpFrameAnalysis();
 		DX12FrameAnalysisEnd();
 	} else if (dumpShaders) {
@@ -267,7 +277,8 @@ static HRESULT STDMETHODCALLTYPE HookedPresent1(
 	} else if (DX12FrameAnalysisIsCaptureRequested()) {
 		DX12BindingBeginFrame();
 		DX12FrameAnalysisBeginCapture();
-		DX12FrameAnalysisLogEvent("FrameCaptureBegin present=%ld\n", DX12GetPresentCount());
+		DX12FrameAnalysisLogJsonFunc("FrameCaptureBegin",
+			"\"present\":%ld", DX12GetPresentCount());
 	} else if (DX12ShaderDumpIsCaptureRequested()) {
 		DX12BindingBeginFrame();
 		DX12ShaderDumpBeginCapture();

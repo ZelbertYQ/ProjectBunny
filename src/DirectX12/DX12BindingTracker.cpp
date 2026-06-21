@@ -10,6 +10,7 @@
 
 #include "DX12FrameAnalysis.h"
 #include "DX12FrameAnalysisManifest.h"
+#include "DX12Json.h"
 #include "DX12ResourceTracker.h"
 #include "DX12ShaderDump.h"
 #include "DX12State.h"
@@ -1049,7 +1050,8 @@ void DX12GetCurrentFrameIaBuffers(std::vector<DX12FrameIaBufferBinding> *buffers
 	for (const FlatBufferRow &row : rows)
 		buffers->push_back(FrameIaBufferFromFlatRow(row));
 
-	DX12FrameAnalysisLogInfo("IA buffer stage: events=%zu buffers=%zu\n",
+	DX12FrameAnalysisLogJsonFunc("IaBufferStage",
+		"\"events\":%zu,\"buffers\":%zu",
 		events.size(), buffers->size());
 }
 
@@ -1135,8 +1137,12 @@ static void WriteFlatFrameAnalysisFiles(
 				resourceRefs.c_str());
 		}
 		fclose(drawFile);
-		DX12FrameAnalysisLogInfo("Draw call CSV written: %S draws=%zu dispatches=%zu buffers=%zu\n",
-			drawPath, drawRows, dispatchRows, buffers.size());
+		char fields[512] = "";
+		DX12JsonAppendWStringField(fields, sizeof(fields), "path", drawPath);
+		DX12JsonAppendRawField(fields, sizeof(fields), "draws", std::to_string(drawRows).c_str());
+		DX12JsonAppendRawField(fields, sizeof(fields), "dispatches", std::to_string(dispatchRows).c_str());
+		DX12JsonAppendRawField(fields, sizeof(fields), "buffers", std::to_string(buffers.size()).c_str());
+		DX12FrameAnalysisLogJsonFunc("DrawCallCsvWritten", "%s", fields + 1);
 	}
 
 	wchar_t bufferPath[MAX_PATH];
@@ -1184,7 +1190,10 @@ static void WriteFlatFrameAnalysisFiles(
 				row.producerShaderRegister);
 		}
 		fclose(bufferFile);
-		DX12FrameAnalysisLogInfo("Buffer CSV written: %S rows=%zu\n", bufferPath, buffers.size());
+		char fields[512] = "";
+		DX12JsonAppendWStringField(fields, sizeof(fields), "path", bufferPath);
+		DX12JsonAppendRawField(fields, sizeof(fields), "rows", std::to_string(buffers.size()).c_str());
+		DX12FrameAnalysisLogJsonFunc("BufferCsvWritten", "%s", fields + 1);
 	}
 
 	wchar_t framePath[MAX_PATH];
@@ -1204,8 +1213,11 @@ static void WriteFlatFrameAnalysisFiles(
 			descriptors.size(),
 			buffers.size());
 		fclose(frameFile);
-		DX12FrameAnalysisLogInfo("Frame analysis CSV written: %S events=%zu buffers=%zu\n",
-			framePath, events.size(), buffers.size());
+		char fields[512] = "";
+		DX12JsonAppendWStringField(fields, sizeof(fields), "path", framePath);
+		DX12JsonAppendRawField(fields, sizeof(fields), "events", std::to_string(events.size()).c_str());
+		DX12JsonAppendRawField(fields, sizeof(fields), "buffers", std::to_string(buffers.size()).c_str());
+		DX12FrameAnalysisLogJsonFunc("FrameAnalysisCsvWritten", "%s", fields + 1);
 	}
 }
 
@@ -1670,17 +1682,19 @@ void DX12GetCurrentFrameResourceBindings(std::vector<DX12FrameResourceBinding> *
 	AcquireSRWLockShared(&gBindingLock);
 	events = gEvents;
 	ReleaseSRWLockShared(&gBindingLock);
-	DX12FrameAnalysisLogInfo("Binding resources stage: events snapshot=%zu\n", events.size());
+	DX12FrameAnalysisLogJsonFunc("BindingResourcesSnapshot",
+		"\"events\":%zu", events.size());
 
 	std::vector<DX12DescriptorSummary> descriptors;
 	std::vector<DX12DescriptorHeapSummary> heaps;
-	DX12FrameAnalysisLogInfo("Binding resources stage: metadata snapshot begin\n");
 	DX12GetResourceMetadataSnapshot(nullptr, &descriptors, nullptr, &heaps);
-	DX12FrameAnalysisLogInfo("Binding resources stage: metadata snapshot ready descriptors=%zu heaps=%zu\n",
+	DX12FrameAnalysisLogJsonFunc("BindingResourcesMetadataReady",
+		"\"descriptors\":%zu,\"heaps\":%zu",
 		descriptors.size(), heaps.size());
 	std::unordered_map<SIZE_T, const DX12DescriptorSummary*> descriptorsByCpuHandle;
 	BuildDescriptorLookup(descriptors, &descriptorsByCpuHandle);
-	DX12FrameAnalysisLogInfo("Binding resources stage: descriptor lookup ready entries=%zu\n",
+	DX12FrameAnalysisLogJsonFunc("BindingResourcesLookupReady",
+		"\"entries\":%zu",
 		descriptorsByCpuHandle.size());
 
 	bindings->clear();
@@ -1707,7 +1721,8 @@ void DX12GetCurrentFrameResourceBindings(std::vector<DX12FrameResourceBinding> *
 				event.computeRootDescriptors[i], &seen);
 		}
 	}
-	DX12FrameAnalysisLogInfo("Binding resources stage: collected bindings=%zu unique=%zu\n",
+	DX12FrameAnalysisLogJsonFunc("BindingResourcesCollected",
+		"\"bindings\":%zu,\"unique\":%zu",
 		bindings->size(), seen.size());
 }
 
@@ -1718,13 +1733,15 @@ static void WriteFrameResourceFile(const wchar_t *dir, const std::vector<Binding
 
 	std::vector<DX12DescriptorSummary> descriptors;
 	std::vector<DX12DescriptorHeapSummary> heaps;
-	DX12FrameAnalysisLogInfo("Frame resource file stage: metadata snapshot begin events=%zu\n", events.size());
 	DX12GetResourceMetadataSnapshot(nullptr, &descriptors, nullptr, &heaps);
-	DX12FrameAnalysisLogInfo("Frame resource file stage: metadata snapshot ready descriptors=%zu heaps=%zu\n",
+	DX12FrameAnalysisLogJsonFunc("FrameResourceFileMetadataReady",
+		"\"events\":%zu,\"descriptors\":%zu,\"heaps\":%zu",
+		events.size(),
 		descriptors.size(), heaps.size());
 	std::unordered_map<SIZE_T, const DX12DescriptorSummary*> descriptorsByCpuHandle;
 	BuildDescriptorLookup(descriptors, &descriptorsByCpuHandle);
-	DX12FrameAnalysisLogInfo("Frame resource file stage: descriptor lookup ready entries=%zu\n",
+	DX12FrameAnalysisLogJsonFunc("FrameResourceFileLookupReady",
+		"\"entries\":%zu",
 		descriptorsByCpuHandle.size());
 
 	wchar_t path[MAX_PATH];
@@ -1734,7 +1751,11 @@ static void WriteFrameResourceFile(const wchar_t *dir, const std::vector<Binding
 	FILE *file = _wfsopen(path, L"w", _SH_DENYNO);
 	if (!file)
 		return;
-	DX12FrameAnalysisLogInfo("Frame resource file stage: file opened %S\n", path);
+	{
+		char fields[512] = "";
+		DX12JsonAppendWStringField(fields, sizeof(fields), "path", path);
+		DX12FrameAnalysisLogJsonFunc("FrameResourceFileOpened", "%s", fields + 1);
+	}
 
 	fprintf(file, "DX12 Current Frame Resources\n");
 	fprintf(file, "============================\n");
@@ -1768,12 +1789,19 @@ static void WriteFrameResourceFile(const wchar_t *dir, const std::vector<Binding
 		}
 		eventRows++;
 	}
-	DX12FrameAnalysisLogInfo("Frame resource file stage: events processed=%zu bindings=%zu\n",
+	DX12FrameAnalysisLogJsonFunc("FrameResourceFileProcessed",
+		"\"events\":%zu,\"bindings\":%zu",
 		eventRows, seen.size());
 
 	fclose(file);
-	DX12FrameAnalysisLogInfo("Current-frame resources written: %S bindings=%zu heaps=%zu descriptors=%zu\n",
-		path, seen.size(), heaps.size(), descriptors.size());
+	{
+		char fields[512] = "";
+		DX12JsonAppendWStringField(fields, sizeof(fields), "path", path);
+		DX12JsonAppendRawField(fields, sizeof(fields), "bindings", std::to_string(seen.size()).c_str());
+		DX12JsonAppendRawField(fields, sizeof(fields), "heaps", std::to_string(heaps.size()).c_str());
+		DX12JsonAppendRawField(fields, sizeof(fields), "descriptors", std::to_string(descriptors.size()).c_str());
+		DX12FrameAnalysisLogJsonFunc("CurrentFrameResourcesWritten", "%s", fields + 1);
+	}
 }
 
 void DX12DumpBindingTrace(const wchar_t *dir)
@@ -1788,8 +1816,8 @@ void DX12DumpBindingTrace(const wchar_t *dir)
 	droppedEvents = gDroppedEvents;
 	ReleaseSRWLockShared(&gBindingLock);
 
-	DX12FrameAnalysisLogInfo(
-		"DX12 binding trace begin: events=%zu dropped=%llu max_events=%u\n",
+	DX12FrameAnalysisLogJsonFunc("BindingTraceBegin",
+		"\"events\":%zu,\"dropped\":%llu,\"maxEvents\":%u",
 		events.size(), static_cast<unsigned long long>(droppedEvents),
 		MaxTrackedEvents);
 	for (const BindingEvent &event : events) {
@@ -1819,37 +1847,9 @@ void DX12DumpBindingTrace(const wchar_t *dir)
 				event.indexBuffer.Format);
 		}
 
-		char vs[32], ps[32], cs[32];
-		FormatOptionalHashText(event.shaderInfo.hasVS, event.shaderInfo.vs, vs, ARRAYSIZE(vs));
-		FormatOptionalHashText(event.shaderInfo.hasPS, event.shaderInfo.ps, ps, ARRAYSIZE(ps));
-		FormatOptionalHashText(event.shaderInfo.hasCS, event.shaderInfo.cs, cs, ARRAYSIZE(cs));
-		DX12FrameAnalysisLogInfo(
-			"event=%llu kind=%s draw=%llu dispatch=%llu command_list=%p pso=%llu vs=%s ps=%s cs=%s topology=%s vertices=%u indices=%u instances=%u start_vertex=%u start_index=%u base_vertex=%d start_instance=%u groups=%u,%u,%u ib_va=0x%llx ib_size=%u ib_format=%u cbv_srv_uav_heap=%p sampler_heap=%p\n",
-			static_cast<unsigned long long>(event.serial),
-			event.kind.c_str(),
-			static_cast<unsigned long long>(event.drawId),
-			static_cast<unsigned long long>(event.dispatchId),
-			event.commandList,
-			static_cast<unsigned long long>(event.shaderInfo.psoIndex),
-			vs, ps, cs,
-			TopologyName(event.primitiveTopology),
-			event.vertexCountPerInstance,
-			event.indexCountPerInstance,
-			event.instanceCount,
-			event.startVertexLocation,
-			event.startIndexLocation,
-			event.baseVertexLocation,
-			event.startInstanceLocation,
-			event.threadGroupCountX,
-			event.threadGroupCountY,
-			event.threadGroupCountZ,
-			static_cast<unsigned long long>(event.indexBufferValid ? event.indexBuffer.BufferLocation : 0),
-			event.indexBufferValid ? event.indexBuffer.SizeInBytes : 0,
-			event.indexBufferValid ? static_cast<UINT>(event.indexBuffer.Format) : 0,
-			event.cbvSrvUavHeap,
-			event.samplerHeap);
 	}
 
-	DX12FrameAnalysisLogInfo("DX12 binding trace end: events=%zu dropped=%llu\n",
+	DX12FrameAnalysisLogJsonFunc("BindingTraceEnd",
+		"\"events\":%zu,\"dropped\":%llu",
 		events.size(), static_cast<unsigned long long>(droppedEvents));
 }

@@ -13,8 +13,8 @@ DWORD DX12InstallVTableHook(void *object, const DX12VTableHook &hook)
 {
 	void **vtable = DX12GetVTable(object);
 	if (!vtable) {
-		DX12Log("Cannot install %s hook: object has no vtable\n",
-			hook.name ? hook.name : "unknown");
+		DX12LogJsonFunc(hook.name ? hook.name : "HookInstall",
+			"\"event\":\"HookInstall\",\"status\":\"failed\",\"reason\":\"missing_vtable\"");
 		return ERROR_INVALID_FUNCTION;
 	}
 

@@ -1,6 +1,7 @@
 #include "DX12State.h"
 
 #include <Shlwapi.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <unordered_map>
 #include <unordered_set>
@@ -58,15 +59,39 @@ void DX12Log(const char *fmt, ...)
 
 	va_list args;
 	char message[2048];
-	char messageJson[2400];
+	char fields[4096];
 
 	va_start(args, fmt);
 	vsnprintf(message, sizeof(message), fmt, args);
 	va_end(args);
 
-	DX12JsonEscapeString(messageJson, sizeof(messageJson), message);
-	fprintf(gLog, "{\"index\":%llu,\"func\":\"Log\",\"message\":%s}\n",
-		++gLogLineNo, messageJson);
+	strcpy_s(fields, sizeof(fields), "\"func\":\"Log\"");
+	DX12JsonAppendLogFieldsFromText(fields, sizeof(fields), message);
+	fprintf(gLog, "{\"index\":%llu,%s}\n", ++gLogLineNo, fields);
+	fflush(gLog);
+}
+
+void DX12LogJsonFunc(const char *func, const char *fmt, ...)
+{
+	if (!gLog)
+		return;
+
+	char funcJson[512];
+	char extra[4096];
+	DX12JsonEscapeString(funcJson, sizeof(funcJson), func ? func : "Unknown");
+	extra[0] = '\0';
+
+	if (fmt && fmt[0]) {
+		va_list args;
+		va_start(args, fmt);
+		vsnprintf(extra, sizeof(extra), fmt, args);
+		va_end(args);
+	}
+
+	if (extra[0])
+		fprintf(gLog, "{\"index\":%llu,\"func\":%s,%s}\n", ++gLogLineNo, funcJson, extra);
+	else
+		fprintf(gLog, "{\"index\":%llu,\"func\":%s}\n", ++gLogLineNo, funcJson);
 	fflush(gLog);
 }
 
@@ -99,9 +124,10 @@ DWORD DX12HookFunction(void **original, void *target, void *hook, const char *na
 	DWORD result = gHookMgr.Hook(&hookId, original, target, hook);
 	if (result == ERROR_SUCCESS && original)
 		RememberOriginal(target, *original);
-	DX12Log("%s hook %s target=%p original=%p result=0x%lx\n",
-		result == ERROR_SUCCESS ? "Installed" : "Failed",
-		name, target, original ? *original : nullptr, result);
+	DX12LogJsonFunc(name ? name : "HookInstall",
+		"\"event\":\"HookInstall\",\"status\":\"%s\",\"target\":\"%p\",\"original\":\"%p\",\"result\":\"0x%lx\"",
+		result == ERROR_SUCCESS ? "installed" : "failed",
+		target, original ? *original : nullptr, result);
 	return result;
 }
 

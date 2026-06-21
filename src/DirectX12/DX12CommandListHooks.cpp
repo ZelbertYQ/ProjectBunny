@@ -269,8 +269,9 @@ static T GetCommandListOriginal(
 	if (fallback)
 		return fallback;
 
-	DX12Log("DX12CallMissingOriginal %s this=%p slot=%u\n",
-		name ? name : "unknown", commandList, slot);
+	DX12LogJsonFunc(name ? name : "ID3D12GraphicsCommandList::Unknown",
+		"\"event\":\"MissingOriginal\",\"this\":\"%p\",\"slot\":%u",
+		commandList, slot);
 	return nullptr;
 }
 
@@ -305,7 +306,8 @@ static HRESULT STDMETHODCALLTYPE HookedCreateCommandQueue(
 		desc ? static_cast<int>(desc->Type) : -1,
 		desc ? static_cast<UINT>(desc->Flags) : 0);
 	HRESULT hr = gOrigCreateCommandQueue(device, desc, riid, commandQueue);
-	DX12FrameAnalysisLogInfo("DX12CallResult ID3D12Device::CreateCommandQueue hr=0x%lx queue=%p\n",
+	DX12FrameAnalysisLogJsonFunc("ID3D12Device::CreateCommandQueue",
+		"\"hr\":\"0x%lx\",\"queue\":\"%p\"",
 		hr, commandQueue ? *commandQueue : nullptr);
 	if (SUCCEEDED(hr) && commandQueue && *commandQueue)
 		RegisterCommandQueue(static_cast<IUnknown*>(*commandQueue));
@@ -318,7 +320,8 @@ static HRESULT STDMETHODCALLTYPE HookedCreateCommandAllocator(
 	LogDX12Call("ID3D12Device::CreateCommandAllocator", device, " type=%d",
 		static_cast<int>(type));
 	HRESULT hr = gOrigCreateCommandAllocator(device, type, riid, allocator);
-	DX12FrameAnalysisLogInfo("DX12CallResult ID3D12Device::CreateCommandAllocator hr=0x%lx allocator=%p\n",
+	DX12FrameAnalysisLogJsonFunc("ID3D12Device::CreateCommandAllocator",
+		"\"hr\":\"0x%lx\",\"allocator\":\"%p\"",
 		hr, allocator ? *allocator : nullptr);
 	return hr;
 }
@@ -332,7 +335,8 @@ static HRESULT STDMETHODCALLTYPE HookedCreateCommandList(
 		" nodeMask=%u type=%d allocator=%p initialPso=%p",
 		nodeMask, static_cast<int>(type), allocator, initialState);
 	HRESULT hr = gOrigCreateCommandList(device, nodeMask, type, allocator, initialState, riid, commandList);
-	DX12FrameAnalysisLogInfo("DX12CallResult ID3D12Device::CreateCommandList hr=0x%lx commandList=%p\n",
+	DX12FrameAnalysisLogJsonFunc("ID3D12Device::CreateCommandList",
+		"\"hr\":\"0x%lx\",\"commandList\":\"%p\"",
 		hr, commandList ? *commandList : nullptr);
 	if (SUCCEEDED(hr) && commandList && *commandList)
 		RegisterCommandList(static_cast<IUnknown*>(*commandList), initialState);
@@ -347,7 +351,8 @@ static HRESULT STDMETHODCALLTYPE HookedCreateCommandList1(
 		" nodeMask=%u type=%d flags=0x%x",
 		nodeMask, static_cast<int>(type), static_cast<UINT>(flags));
 	HRESULT hr = gOrigCreateCommandList1(device, nodeMask, type, flags, riid, commandList);
-	DX12FrameAnalysisLogInfo("DX12CallResult ID3D12Device4::CreateCommandList1 hr=0x%lx commandList=%p\n",
+	DX12FrameAnalysisLogJsonFunc("ID3D12Device4::CreateCommandList1",
+		"\"hr\":\"0x%lx\",\"commandList\":\"%p\"",
 		hr, commandList ? *commandList : nullptr);
 	if (SUCCEEDED(hr) && commandList && *commandList)
 		RegisterCommandList(static_cast<IUnknown*>(*commandList), nullptr);

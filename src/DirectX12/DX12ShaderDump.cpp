@@ -16,6 +16,7 @@
 
 #include "DX12BindingTracker.h"
 #include "DX12FrameAnalysis.h"
+#include "DX12Json.h"
 #include "DX12ResourceDump.h"
 #include "DX12ResourceTracker.h"
 #include "DX12State.h"
@@ -713,7 +714,12 @@ static void WriteShaderAnalysisFile(
 	}
 	fclose(file);
 
-	DX12FrameAnalysisLogInfo("Shader analysis written: %S entries=%zu\n", path, analyses.size());
+	{
+		char fields[512] = "";
+		DX12JsonAppendWStringField(fields, sizeof(fields), "path", path);
+		DX12JsonAppendRawField(fields, sizeof(fields), "entries", std::to_string(analyses.size()).c_str());
+		DX12FrameAnalysisLogJsonFunc("ShaderAnalysisWritten", "%s", fields + 1);
+	}
 }
 
 static void WritePsoResourceSummaryFile(
@@ -725,20 +731,22 @@ static void WritePsoResourceSummaryFile(
 
 	std::unordered_map<std::string, ShaderAnalysisRecord> analysesByKey;
 	analysesByKey.reserve(shaders.size());
-	DX12FrameAnalysisLogInfo("PSO summary stage: build shader analyses shaders=%zu\n", shaders.size());
+	DX12FrameAnalysisLogJsonFunc("PsoSummaryBuildShaderAnalyses",
+		"\"shaders\":%zu", shaders.size());
 	for (const ShaderRecord &shader : shaders) {
 		ShaderAnalysisRecord analysis;
 		BuildShaderAnalysisRecord(dir, shader, &analysis);
 		analysesByKey.emplace(MakeShaderKey(shader.stage.c_str(), shader.hash), std::move(analysis));
 	}
-	DX12FrameAnalysisLogInfo("PSO summary stage: shader analyses ready entries=%zu\n", analysesByKey.size());
+	DX12FrameAnalysisLogJsonFunc("PsoSummaryShaderAnalysesReady",
+		"\"entries\":%zu", analysesByKey.size());
 
 	std::vector<DX12RootSignatureSummary> rootSignatures;
 	std::vector<DX12DescriptorSummary> descriptors;
 	std::vector<DX12PsoRootSummary> psoRoots;
-	DX12FrameAnalysisLogInfo("PSO summary stage: metadata snapshot begin\n");
 	DX12GetResourceMetadataSnapshot(&rootSignatures, &descriptors, &psoRoots);
-	DX12FrameAnalysisLogInfo("PSO summary stage: metadata snapshot ready roots=%zu descriptors=%zu psoRoots=%zu\n",
+	DX12FrameAnalysisLogJsonFunc("PsoSummaryMetadataReady",
+		"\"roots\":%zu,\"descriptors\":%zu,\"psoRoots\":%zu",
 		rootSignatures.size(), descriptors.size(), psoRoots.size());
 
 	std::unordered_map<ID3D12RootSignature*, DX12RootSignatureSummary> rootsByPtr;
@@ -752,7 +760,8 @@ static void WritePsoResourceSummaryFile(
 	psoRootsByIndex.reserve(psoRoots.size());
 	for (const DX12PsoRootSummary &root : psoRoots)
 		psoRootsByIndex[root.psoIndex] = root;
-	DX12FrameAnalysisLogInfo("PSO summary stage: lookup maps ready roots=%zu psoRoots=%zu\n",
+	DX12FrameAnalysisLogJsonFunc("PsoSummaryLookupReady",
+		"\"roots\":%zu,\"psoRoots\":%zu",
 		rootsByPtr.size(), psoRootsByIndex.size());
 
 	UINT64 totalCBV = 0;
@@ -784,17 +793,27 @@ static void WritePsoResourceSummaryFile(
 				totalBuffer++;
 		}
 	}
-	DX12FrameAnalysisLogInfo("PSO summary stage: descriptor inventory counted cbv=%llu srv=%llu uav=%llu\n",
+	DX12FrameAnalysisLogJsonFunc("PsoSummaryDescriptorInventory",
+		"\"cbv\":%llu,\"srv\":%llu,\"uav\":%llu,\"rtv\":%llu,\"dsv\":%llu,\"sampler\":%llu,\"texture2d\":%llu,\"buffer\":%llu",
 		static_cast<unsigned long long>(totalCBV),
 		static_cast<unsigned long long>(totalSRV),
-		static_cast<unsigned long long>(totalUAV));
+		static_cast<unsigned long long>(totalUAV),
+		static_cast<unsigned long long>(totalRTV),
+		static_cast<unsigned long long>(totalDSV),
+		static_cast<unsigned long long>(totalSampler),
+		static_cast<unsigned long long>(totalTexture2D),
+		static_cast<unsigned long long>(totalBuffer));
 
 	wchar_t path[MAX_PATH];
 	swprintf_s(path, L"%s\\PsoResourceSummaryDX12.txt", dir);
 	FILE *file = _wfsopen(path, L"w", _SH_DENYNO);
 	if (!file)
 		return;
-	DX12FrameAnalysisLogInfo("PSO summary stage: file opened %S\n", path);
+	{
+		char fields[512] = "";
+		DX12JsonAppendWStringField(fields, sizeof(fields), "path", path);
+		DX12FrameAnalysisLogJsonFunc("PsoSummaryFileOpened", "%s", fields + 1);
+	}
 
 	fprintf(file, "DX12 PSO Resource Summary\n");
 	fprintf(file, "=========================\n");
@@ -926,7 +945,8 @@ static void WritePsoResourceSummaryFile(
 			candidate);
 		psoRows++;
 	}
-	DX12FrameAnalysisLogInfo("PSO summary stage: pso rows written=%zu\n", psoRows);
+	DX12FrameAnalysisLogJsonFunc("PsoSummaryRowsWritten",
+		"\"rows\":%zu", psoRows);
 
 	fprintf(file, "\nRoot Signature Usage\n");
 	fprintf(file, "root_signature,root_hash,root_size,pso_count,first_pso\n");
@@ -950,7 +970,8 @@ static void WritePsoResourceSummaryFile(
 			item.second,
 			static_cast<unsigned long long>(rootFirstPso[item.first]));
 	}
-	DX12FrameAnalysisLogInfo("PSO summary stage: root usage rows written=%zu\n", rootUseCount.size());
+	DX12FrameAnalysisLogJsonFunc("PsoSummaryRootUsageWritten",
+		"\"rows\":%zu", rootUseCount.size());
 
 	fprintf(file, "\nDescriptor Inventory\n");
 	fprintf(file, "kind,count\n");
@@ -962,8 +983,14 @@ static void WritePsoResourceSummaryFile(
 	fprintf(file, "Sampler,%llu\n", static_cast<unsigned long long>(totalSampler));
 
 	fclose(file);
-	DX12FrameAnalysisLogInfo("PSO resource summary written: %S psos=%zu roots=%zu descriptors=%zu\n",
-		path, psos.size(), rootSignatures.size(), descriptors.size());
+	{
+		char fields[512] = "";
+		DX12JsonAppendWStringField(fields, sizeof(fields), "path", path);
+		DX12JsonAppendRawField(fields, sizeof(fields), "psos", std::to_string(psos.size()).c_str());
+		DX12JsonAppendRawField(fields, sizeof(fields), "roots", std::to_string(rootSignatures.size()).c_str());
+		DX12JsonAppendRawField(fields, sizeof(fields), "descriptors", std::to_string(descriptors.size()).c_str());
+		DX12FrameAnalysisLogJsonFunc("PsoResourceSummaryWritten", "%s", fields + 1);
+	}
 }
 
 static bool TryWritePsoResourceSummaryFile(
@@ -1180,7 +1207,8 @@ void DX12RecordGraphicsPipelineState(
 	UINT64 psoCount = gPsos.size();
 	ReleaseSRWLockExclusive(&gDumpLock);
 
-	DX12FrameAnalysisLogInfo("Recorded graphics PSO #%llu shaders=%llu cachedShaders=%llu cachedPSOs=%llu\n",
+	DX12FrameAnalysisLogJsonFunc("ID3D12Device::CreateGraphicsPipelineState",
+		"\"pso\":%llu,\"shaders\":%llu,\"cachedShaders\":%llu,\"cachedPsos\":%llu",
 		static_cast<unsigned long long>(psoIndex),
 		static_cast<unsigned long long>(shadersInPso),
 		static_cast<unsigned long long>(shaderCount),
@@ -1212,7 +1240,8 @@ void DX12RecordComputePipelineState(
 	UINT64 psoCount = gPsos.size();
 	ReleaseSRWLockExclusive(&gDumpLock);
 
-	DX12FrameAnalysisLogInfo("Recorded compute PSO #%llu cachedShaders=%llu cachedPSOs=%llu\n",
+	DX12FrameAnalysisLogJsonFunc("ID3D12Device::CreateComputePipelineState",
+		"\"pso\":%llu,\"cachedShaders\":%llu,\"cachedPsos\":%llu",
 		static_cast<unsigned long long>(psoIndex),
 		static_cast<unsigned long long>(shaderCount),
 		static_cast<unsigned long long>(psoCount));
@@ -1246,7 +1275,8 @@ void DX12RecordPipelineStateStream(
 		size_t payloadAlignment = PipelineStateStreamPayloadAlignment(type);
 		size_t payloadOffset = AlignUp(offset + sizeof(type), payloadAlignment);
 		if (payloadSize == 0 || payloadOffset + payloadSize > desc->SizeInBytes) {
-			DX12FrameAnalysisLogInfo("Stopped parsing pipeline state stream pso=%llu type=%d offset=%zu size=%zu\n",
+			DX12FrameAnalysisLogJsonFunc("PipelineStateStreamParseStopped",
+				"\"pso\":%llu,\"type\":%d,\"offset\":%zu,\"size\":%zu",
 				static_cast<unsigned long long>(psoIndex), static_cast<int>(type),
 				offset, desc->SizeInBytes);
 			break;
@@ -1274,7 +1304,8 @@ void DX12RecordPipelineStateStream(
 	UINT64 psoCount = gPsos.size();
 	ReleaseSRWLockExclusive(&gDumpLock);
 
-	DX12FrameAnalysisLogInfo("Recorded stream PSO #%llu shaders=%llu cachedShaders=%llu cachedPSOs=%llu\n",
+	DX12FrameAnalysisLogJsonFunc("ID3D12Device2::CreatePipelineState",
+		"\"pso\":%llu,\"shaders\":%llu,\"cachedShaders\":%llu,\"cachedPsos\":%llu",
 		static_cast<unsigned long long>(psoIndex),
 		static_cast<unsigned long long>(shadersInPso),
 		static_cast<unsigned long long>(shaderCount),
@@ -1436,18 +1467,26 @@ void DX12DumpFrameAnalysis()
 	std::vector<PsoRecord> psos;
 	SnapshotShadersAndPsos(&shaders, &psos);
 
-	DX12Log("F8 stage: binding trace and resource files begin\n");
-	DX12FrameAnalysisLogEvent("FrameAnalysisSummary dir=%S shaders=%zu psos=%zu\n",
-		dir, shaders.size(), psos.size());
+	DX12LogJsonFunc("FrameAnalysisDumpBegin",
+		"\"shaders\":%zu,\"psos\":%zu", shaders.size(), psos.size());
+	{
+		char fields[512] = "";
+		DX12JsonAppendWStringField(fields, sizeof(fields), "dir", dir);
+		DX12JsonAppendRawField(fields, sizeof(fields), "shaders", std::to_string(shaders.size()).c_str());
+		DX12JsonAppendRawField(fields, sizeof(fields), "psos", std::to_string(psos.size()).c_str());
+		DX12FrameAnalysisLogJsonFunc("FrameAnalysisSummary", "%s", fields + 1);
+	}
 	bool bindingTraceOk = TryDumpBindingTrace(dir);
 	bool resourceFilesOk = TryDumpCurrentFrameResources(dir);
 
 	DX12SetOverlayStatus(L"F8 frame analysis complete");
-	DX12Log("F8 frame analysis complete: dir=%S shadersReferenced=%zu psos=%zu bindingTrace=%u resourceFiles=%u\n",
-		dir, shaders.size(), psos.size(),
+	DX12LogJsonFunc("FrameAnalysisDumpComplete",
+		"\"shaders\":%zu,\"psos\":%zu,\"bindingTrace\":%u,\"resourceFiles\":%u",
+		shaders.size(), psos.size(),
 		bindingTraceOk ? 1 : 0,
 		resourceFilesOk ? 1 : 0);
-	DX12FrameAnalysisLogEvent("FrameAnalysisComplete shaders=%zu psos=%zu bindingTrace=%u resourceFiles=%u\n",
+	DX12FrameAnalysisLogJsonFunc("FrameAnalysisComplete",
+		"\"shaders\":%zu,\"psos\":%zu,\"bindingTrace\":%u,\"resourceFiles\":%u",
 		shaders.size(), psos.size(),
 		bindingTraceOk ? 1 : 0,
 		resourceFilesOk ? 1 : 0);

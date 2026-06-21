@@ -120,7 +120,8 @@ DWORD WINAPI DX12OverlayThread(void*)
 		nullptr, nullptr, DX12GetModule(), nullptr);
 
 	if (!hwnd) {
-		DX12Log("Failed to create lightweight overlay window, error=%lu\n", GetLastError());
+		DX12LogJsonFunc("OverlayWindowCreate",
+			"\"status\":\"failed\",\"error\":%lu", GetLastError());
 		return 0;
 	}
 
@@ -131,7 +132,8 @@ DWORD WINAPI DX12OverlayThread(void*)
 		SWP_NOACTIVATE | SWP_SHOWWINDOW);
 	SetTimer(hwnd, 1, 250, nullptr);
 
-	DX12Log("Lightweight overlay window created: %p\n", hwnd);
+	DX12LogJsonFunc("OverlayWindowCreate",
+		"\"status\":\"ok\",\"hwnd\":\"%p\"", hwnd);
 
 	MSG msg;
 	while (GetMessageW(&msg, nullptr, 0, 0) > 0) {

@@ -13,13 +13,13 @@ void DX12PollInput()
 {
 	const bool f8Down = (GetAsyncKeyState(VK_F8) & 0x8000) != 0;
 	if (f8Down && !gF8WasDown) {
-		DX12Log("F8 pressed; frame analysis requested\n");
+		DX12LogJsonFunc("InputHotkey", "\"key\":\"F8\",\"action\":\"FrameAnalysisRequest\"");
 		if (DX12FrameAnalysisBegin()) {
-			DX12FrameAnalysisLogEvent("FrameAnalysisArmed\n");
+			DX12FrameAnalysisLogJsonFunc("FrameAnalysisArmed", nullptr);
 			DX12FrameAnalysisRequestCapture();
 			DX12SetOverlayStatus(L"F8 frame analysis armed");
 		} else {
-			DX12Log("F8 frame analysis failed: cannot create directory\n");
+			DX12LogJsonFunc("FrameAnalysisBeginFailed", "\"reason\":\"create_directory_failed\"");
 			DX12SetOverlayStatus(L"F8 dump failed: cannot create directory");
 		}
 	}
@@ -27,7 +27,7 @@ void DX12PollInput()
 
 	const bool f9Down = (GetAsyncKeyState(VK_F9) & 0x8000) != 0;
 	if (f9Down && !gF9WasDown) {
-		DX12Log("F9 pressed; shader dump requested\n");
+		DX12LogJsonFunc("InputHotkey", "\"key\":\"F9\",\"action\":\"ShaderDumpRequest\"");
 		DX12RequestShaderDump();
 	}
 	gF9WasDown = f9Down;

@@ -60,8 +60,9 @@ static HRESULT STDMETHODCALLTYPE HookedDeviceFactoryCreateDevice(
 	REFIID riid, void **device)
 {
 	HRESULT hr = gOrigDeviceFactoryCreateDevice(factory, adapter, featureLevel, riid, device);
-	DX12Log("ID3D12DeviceFactory::CreateDevice result=0x%lx device=%p\n",
-		hr, device ? *device : nullptr);
+	DX12LogJsonFunc("ID3D12DeviceFactory::CreateDevice",
+		"\"adapter\":\"%p\",\"featureLevel\":\"0x%x\",\"hr\":\"0x%lx\",\"device\":\"%p\"",
+		adapter, featureLevel, hr, device ? *device : nullptr);
 	if (SUCCEEDED(hr) && device && *device)
 		DX12HookDevice(static_cast<IUnknown*>(*device));
 	return hr;
@@ -89,7 +90,7 @@ void DX12HookDevice(IUnknown *device)
 	DX12InstallVTableHooks(baseDevice, deviceHooks);
 	DX12HookResourceMetadata(baseDevice);
 	DX12HookCommandListCreation(baseDevice);
-	DX12Log("DX12 command queue hooks and command-list creation tracking enabled\n");
+	DX12LogJsonFunc("DeviceHooksReady", "\"device\":\"%p\"", baseDevice);
 
 	baseDevice->Release();
 
@@ -138,7 +139,8 @@ void DX12HookDeviceFromCommandQueue(IUnknown *commandQueue)
 
 	ID3D12Device *device = nullptr;
 	HRESULT hr = queue->GetDevice(IID_PPV_ARGS(&device));
-	DX12Log("ID3D12CommandQueue::GetDevice result=0x%lx device=%p\n", hr, device);
+	DX12LogJsonFunc("ID3D12CommandQueue::GetDevice",
+		"\"hr\":\"0x%lx\",\"device\":\"%p\"", hr, device);
 	DX12HookCommandQueue(queue);
 	if (SUCCEEDED(hr) && device) {
 		DX12HookDevice(device);

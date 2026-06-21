@@ -14,6 +14,8 @@ class Paths:
     @staticmethod
     def resolve_binding(root_dir: str, relative_path: str) -> str:
         fixed_relative = relative_path.replace("\\", os.sep)
+        if os.sep not in fixed_relative:
+            fixed_relative = os.path.join("deduped", fixed_relative)
         return Paths.normalize(os.path.join(root_dir, fixed_relative))
 
     @staticmethod
