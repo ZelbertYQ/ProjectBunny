@@ -561,15 +561,8 @@ static bool MapAndWriteTask(
 
 static bool ShouldDumpBinding(const DX12FrameResourceBinding &binding)
 {
-	if (!binding.hasDescriptor || !binding.descriptor.resource || !binding.descriptor.hasResourceDesc)
-		return false;
-	if (binding.descriptor.kind != "SRV" &&
-		binding.descriptor.kind != "UAV" &&
-		binding.descriptor.kind != "CBV")
-		return false;
-	D3D12_RESOURCE_DIMENSION dimension = binding.descriptor.resourceDesc.Dimension;
-	return dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
-		dimension == D3D12_RESOURCE_DIMENSION_BUFFER;
+	(void)binding;
+	return false;
 }
 
 static bool CreateReadbackForTask(
@@ -1084,6 +1077,8 @@ void DX12DumpCurrentFrameResources(const wchar_t *dir)
 	UINT duplicates = 0;
 
 	for (const DX12FrameResourceBinding &binding : bindings) {
+		if (!ShouldDumpBinding(binding))
+			continue;
 		if (!binding.hasDescriptor) {
 			DumpTask skipped;
 			skipped.binding = binding;
@@ -1132,7 +1127,12 @@ void DX12DumpCurrentFrameResources(const wchar_t *dir)
 
 	for (const DX12FrameIaBufferBinding &buffer : iaBuffers) {
 		char key[128];
-		sprintf_s(key, "ia|%s", buffer.bufferId.c_str());
+		sprintf_s(key, "ia|%p|%llu|%llu|%u|%u",
+			buffer.resource.resource,
+			static_cast<unsigned long long>(buffer.resource.resourceOffset),
+			static_cast<unsigned long long>(buffer.size),
+			buffer.stride,
+			buffer.format);
 		auto canonicalIt = canonicalTaskByKey.find(key);
 		if (canonicalIt != canonicalTaskByKey.end()) {
 			DumpTask duplicate;

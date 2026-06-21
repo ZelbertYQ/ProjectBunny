@@ -197,46 +197,9 @@ static PFN_EXECUTE_INDIRECT gOrigExecuteIndirect = nullptr;
 
 static void LogDX12Call(const char *name, const void *object, const char *fmt = nullptr, ...)
 {
-	if (!DX12FrameAnalysisIsCapturing())
-		return;
-	if (!name)
-		return;
-
-	const char *shortName = strrchr(name, ':');
-	shortName = shortName ? shortName + 1 : name;
-	if (shortName[0] == ':')
-		shortName++;
-
-	if (strcmp(shortName, "SetPipelineState") &&
-		strcmp(shortName, "SetGraphicsRootSignature") &&
-		strcmp(shortName, "SetComputeRootSignature") &&
-		strcmp(shortName, "SetDescriptorHeaps") &&
-		strcmp(shortName, "SetGraphicsRootDescriptorTable") &&
-		strcmp(shortName, "SetComputeRootDescriptorTable") &&
-		strcmp(shortName, "SetGraphicsRootConstantBufferView") &&
-		strcmp(shortName, "SetComputeRootConstantBufferView") &&
-		strcmp(shortName, "SetGraphicsRootShaderResourceView") &&
-		strcmp(shortName, "SetComputeRootShaderResourceView") &&
-		strcmp(shortName, "SetGraphicsRootUnorderedAccessView") &&
-		strcmp(shortName, "SetComputeRootUnorderedAccessView") &&
-		strcmp(shortName, "IASetPrimitiveTopology") &&
-		strcmp(shortName, "IASetIndexBuffer") &&
-		strcmp(shortName, "IASetVertexBuffers") &&
-		strcmp(shortName, "DrawInstanced") &&
-		strcmp(shortName, "DrawIndexedInstanced") &&
-		strcmp(shortName, "Dispatch") &&
-		strcmp(shortName, "ExecuteIndirect"))
-		return;
-
-	char extra[512] = {};
-	if (fmt) {
-		va_list args;
-		va_start(args, fmt);
-		vsnprintf(extra, sizeof(extra), fmt, args);
-		va_end(args);
-	}
-
-	DX12FrameAnalysisLogEvent("%s list=%p%s\n", shortName, object, extra);
+	(void)name;
+	(void)object;
+	(void)fmt;
 }
 
 static bool ShouldTrackBindings()

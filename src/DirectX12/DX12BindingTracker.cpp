@@ -774,6 +774,59 @@ static void CollectFlatBuffersForEvents(
 	}
 }
 
+static void AddFrameIaBufferRow(
+	std::vector<FlatBufferRow> *rows, UINT *nextVbId, UINT *nextIbId,
+	const BindingEvent &event, const char *role, UINT64 gpuVa, UINT64 size,
+	UINT stride, UINT slot, UINT format)
+{
+	if (!rows || gpuVa == 0 || size == 0)
+		return;
+
+	FlatBufferRow row;
+	row.id = NextBufferId(role && !strcmp(role, "IB") ? "ib" : "vb",
+		role && !strcmp(role, "IB") ? nextIbId : nextVbId);
+	row.role = role ? role : "";
+	row.eventSerial = event.serial;
+	row.drawId = event.drawId;
+	row.dispatchId = event.dispatchId;
+	row.psoIndex = event.shaderInfo.psoIndex;
+	row.shaderInfo = event.shaderInfo;
+	row.gpuVa = gpuVa;
+	row.size = size;
+	row.stride = stride;
+	row.slot = slot;
+	row.format = format;
+	row.resolved = DX12ResolveBufferResourceByGpuVa(gpuVa, size, &row.resource);
+	rows->push_back(row);
+}
+
+static void CollectFrameIaBuffersForEvents(
+	const std::vector<BindingEvent> &events, std::vector<FlatBufferRow> *buffers)
+{
+	if (!buffers)
+		return;
+
+	buffers->clear();
+	UINT nextVbId = 0;
+	UINT nextIbId = 0;
+	for (const BindingEvent &event : events) {
+		if (!IsDrawEvent(event))
+			continue;
+		for (UINT slot = 0; slot < MaxVertexBufferSlots; ++slot) {
+			if (!event.vertexBufferValid[slot])
+				continue;
+			const D3D12_VERTEX_BUFFER_VIEW &view = event.vertexBuffers[slot];
+			AddFrameIaBufferRow(buffers, &nextVbId, &nextIbId, event, "VB",
+				view.BufferLocation, view.SizeInBytes, view.StrideInBytes, slot, 0);
+		}
+		if (event.indexBufferValid) {
+			AddFrameIaBufferRow(buffers, &nextVbId, &nextIbId, event, "IB",
+				event.indexBuffer.BufferLocation, event.indexBuffer.SizeInBytes, 0, 0,
+				static_cast<UINT>(event.indexBuffer.Format));
+		}
+	}
+}
+
 static DX12FrameIaBufferBinding FrameIaBufferFromFlatRow(const FlatBufferRow &row)
 {
 	DX12FrameIaBufferBinding buffer;
@@ -831,7 +884,7 @@ void DX12GetCurrentFrameIaBuffers(std::vector<DX12FrameIaBufferBinding> *buffers
 	ReleaseSRWLockShared(&gBindingLock);
 
 	std::vector<FlatBufferRow> rows;
-	CollectFlatBuffersForEvents(events, &rows);
+	CollectFrameIaBuffersForEvents(events, &rows);
 
 	buffers->clear();
 	buffers->reserve(rows.size());
