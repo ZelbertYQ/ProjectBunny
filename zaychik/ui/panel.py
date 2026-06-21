@@ -5,11 +5,22 @@ import os
 import bpy
 from bpy.types import Panel, UIList
 
-from ..common.properties import ZAYCHIK_PG_frameanalysis_item
+from ..common.properties import (
+    ZAYCHIK_PG_frameanalysis_item,
+    ZAYCHIK_PG_trace_command_list_item,
+    ZAYCHIK_PG_trace_draw_item,
+    ZAYCHIK_PG_trace_resource_item,
+)
 from .operators import (
     FrameAnalysisUI,
     ZAYCHIK_OT_import_dx12_dump,
+    ZAYCHIK_OT_load_trace_command_list,
+    ZAYCHIK_OT_load_trace_draw_resources,
+    ZAYCHIK_OT_open_trace_metadata,
+    ZAYCHIK_OT_open_trace_resource,
     ZAYCHIK_OT_refresh_frameanalysis_list,
+    ZAYCHIK_OT_reveal_trace_resource,
+    ZAYCHIK_OT_scan_trace_browser,
 )
 
 
@@ -30,6 +41,68 @@ class ZAYCHIK_UL_frameanalysis_list(UIList):
     ) -> None:
         del context, data, icon, active_data, active_propname, index, flt_flag
         layout.label(text=item.name, icon="FILE_FOLDER")
+
+
+class ZAYCHIK_UL_trace_draw_list(UIList):
+    bl_idname = "ZAYCHIK_UL_trace_draw_list"
+
+    def draw_item(
+        self,
+        context: bpy.types.Context,
+        layout: bpy.types.UILayout,
+        data: bpy.types.ID,
+        item: ZAYCHIK_PG_trace_draw_item,
+        icon: int,
+        active_data: bpy.types.ID,
+        active_propname: str,
+        index: int,
+        flt_flag: int,
+    ) -> None:
+        del context, data, icon, active_data, active_propname, index, flt_flag
+        label = item.label or item.name
+        layout.label(text=label, icon="RESTRICT_SELECT_OFF")
+
+
+class ZAYCHIK_UL_trace_command_list(UIList):
+    bl_idname = "ZAYCHIK_UL_trace_command_list"
+
+    def draw_item(
+        self,
+        context: bpy.types.Context,
+        layout: bpy.types.UILayout,
+        data: bpy.types.ID,
+        item: ZAYCHIK_PG_trace_command_list_item,
+        icon: int,
+        active_data: bpy.types.ID,
+        active_propname: str,
+        index: int,
+        flt_flag: int,
+    ) -> None:
+        del context, data, icon, active_data, active_propname, index, flt_flag
+        layout.label(text=item.label or item.cmdlist, icon="OUTLINER_OB_EMPTY")
+
+
+class ZAYCHIK_UL_trace_resource_list(UIList):
+    bl_idname = "ZAYCHIK_UL_trace_resource_list"
+
+    def draw_item(
+        self,
+        context: bpy.types.Context,
+        layout: bpy.types.UILayout,
+        data: bpy.types.ID,
+        item: ZAYCHIK_PG_trace_resource_item,
+        icon: int,
+        active_data: bpy.types.ID,
+        active_propname: str,
+        index: int,
+        flt_flag: int,
+    ) -> None:
+        del context, data, icon, active_data, active_propname, index, flt_flag
+        row = layout.row(align=True)
+        row.label(text=item.slot, icon="OUTLINER_DATA_MESH")
+        hash_text = item.hash[:8] if item.hash else "-"
+        detail = item.register or item.kind
+        row.label(text=f"{detail} {hash_text}")
 
 
 class ZAYCHIK_PT_sidebar(Panel):
@@ -63,6 +136,58 @@ class ZAYCHIK_PT_sidebar(Panel):
         layout.prop(settings, "vertex_layout_preset")
         layout.operator(ZAYCHIK_OT_import_dx12_dump.bl_idname, icon="IMPORT")
 
+        trace_box = layout.box()
+        trace_box.label(text="Trace Browser", icon="VIEWZOOM")
+        row = trace_box.row(align=True)
+        row.operator(ZAYCHIK_OT_scan_trace_browser.bl_idname, icon="FILE_REFRESH")
+        row.operator(ZAYCHIK_OT_load_trace_command_list.bl_idname, icon="DISCLOSURE_TRI_RIGHT")
+
+        trace_box.template_list(
+            ZAYCHIK_UL_trace_command_list.bl_idname,
+            "",
+            settings,
+            "trace_command_list_items",
+            settings,
+            "trace_command_list_index",
+            rows=4,
+        )
+        trace_box.operator(
+            ZAYCHIK_OT_load_trace_draw_resources.bl_idname,
+            icon="TRACKING_FORWARDS_SINGLE",
+        )
+
+        trace_box.template_list(
+            ZAYCHIK_UL_trace_draw_list.bl_idname,
+            "",
+            settings,
+            "trace_draw_items",
+            settings,
+            "trace_draw_index",
+            rows=5,
+        )
+        trace_box.template_list(
+            ZAYCHIK_UL_trace_resource_list.bl_idname,
+            "",
+            settings,
+            "trace_resource_items",
+            settings,
+            "trace_resource_index",
+            rows=8,
+        )
+
+        resource = FrameAnalysisUI.selected_trace_resource(context)
+        if resource:
+            if resource.summary:
+                summary_box = trace_box.box()
+                summary_box.label(text="Metadata")
+                for chunk in resource.summary.split("; ")[:4]:
+                    summary_box.label(text=chunk[:96])
+
+            row = trace_box.row(align=True)
+            row.operator(ZAYCHIK_OT_open_trace_resource.bl_idname, icon="FILE")
+            row.operator(ZAYCHIK_OT_reveal_trace_resource.bl_idname, icon="FILE_FOLDER")
+            row.operator(ZAYCHIK_OT_open_trace_metadata.bl_idname, icon="TEXT")
+
         box = layout.box()
         box.label(text="Status")
         box.label(text=settings.last_status)
@@ -74,6 +199,9 @@ class ZAYCHIK_PT_sidebar(Panel):
 
 CLASSES = (
     ZAYCHIK_UL_frameanalysis_list,
+    ZAYCHIK_UL_trace_command_list,
+    ZAYCHIK_UL_trace_draw_list,
+    ZAYCHIK_UL_trace_resource_list,
     ZAYCHIK_PT_sidebar,
 )
 

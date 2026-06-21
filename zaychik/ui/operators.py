@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from typing import List, Optional
 
 import bpy
@@ -9,6 +10,7 @@ from bpy.types import Context, Operator
 from ..utils.importer import DrawImporter
 from ..utils.parser import LogParser
 from ..utils.paths import Paths
+from ..utils.trace import TraceBrowser, TraceCommandList, TraceDraw, TraceResource
 
 
 class FrameAnalysisUI:
@@ -66,6 +68,119 @@ class FrameAnalysisUI:
         if index < 0 or index >= len(settings.frameanalysis_items):
             return None
         return settings.frameanalysis_items[index].path
+
+    @staticmethod
+    def selected_trace_resource(context: Context):
+        settings = context.scene.zaychik_settings
+        if not settings.trace_resource_items:
+            return None
+        index = settings.trace_resource_index
+        if index < 0 or index >= len(settings.trace_resource_items):
+            return None
+        return settings.trace_resource_items[index]
+
+    @staticmethod
+    def populate_trace_draws(context: Context, draws: List[TraceDraw]) -> None:
+        settings = context.scene.zaychik_settings
+        settings.trace_draw_items.clear()
+        settings.trace_resource_items.clear()
+        settings.trace_draw_index = 0
+        settings.trace_resource_index = 0
+
+        for draw in draws:
+            item = settings.trace_draw_items.add()
+            item.name = f"{draw.draw:06d}"
+            item.draw = draw.draw
+            item.shader = draw.shader
+            item.resource_count = len(draw.resources)
+            item.cmdlist = draw.cmdlist
+            item.func = draw.func
+            item.pso = draw.pso
+            item.index_count = draw.index_count
+            item.vertex_count = draw.vertex_count
+            shader_text = f" shader={draw.shader[:8]}" if draw.shader and draw.shader != "-" else ""
+            count_text = f" idx={draw.index_count}" if draw.index_count else f" vtx={draw.vertex_count}"
+            item.label = f"{draw.draw:06d} {draw.func}{shader_text}{count_text} res={len(draw.resources)}"
+
+    @staticmethod
+    def populate_trace_command_lists(
+        context: Context,
+        command_lists: List[TraceCommandList],
+    ) -> None:
+        settings = context.scene.zaychik_settings
+        settings.trace_command_list_items.clear()
+        settings.trace_command_list_index = 0
+        settings.trace_draw_items.clear()
+        settings.trace_draw_index = 0
+        settings.trace_resource_items.clear()
+        settings.trace_resource_index = 0
+
+        for command_list in command_lists:
+            item = settings.trace_command_list_items.add()
+            item.name = command_list.cmdlist
+            item.cmdlist = command_list.cmdlist
+            item.draw_count = len(command_list.draws)
+            item.label = f"{command_list.cmdlist[-8:]} draws={len(command_list.draws)}"
+
+    @staticmethod
+    def populate_trace_resources(context: Context, resources: List[TraceResource]) -> None:
+        settings = context.scene.zaychik_settings
+        settings.trace_resource_items.clear()
+        settings.trace_resource_index = 0
+
+        for resource in resources:
+            item = settings.trace_resource_items.add()
+            item.name = resource.slot
+            item.slot = resource.slot
+            item.kind = resource.kind
+            item.hash = resource.hash
+            item.shader = resource.shader
+            item.cmdlist = resource.cmdlist
+            item.call_index = resource.call_index
+            item.register = resource.register
+            item.bytes = resource.bytes
+            item.stride = resource.stride
+            item.fmt_name = resource.fmt_name
+            item.path = resource.path
+            item.target = resource.target
+            item.text_path = resource.text_path
+            item.summary = resource.summary
+
+    @staticmethod
+    def selected_trace_draw_number(context: Context) -> Optional[int]:
+        settings = context.scene.zaychik_settings
+        if not settings.trace_draw_items:
+            return None
+        index = settings.trace_draw_index
+        if index < 0 or index >= len(settings.trace_draw_items):
+            return None
+        return settings.trace_draw_items[index].draw
+
+    @staticmethod
+    def selected_trace_command_list(context: Context) -> Optional[str]:
+        settings = context.scene.zaychik_settings
+        if not settings.trace_command_list_items:
+            return None
+        index = settings.trace_command_list_index
+        if index < 0 or index >= len(settings.trace_command_list_items):
+            return None
+        return settings.trace_command_list_items[index].cmdlist
+
+    @staticmethod
+    def open_path(path: str) -> None:
+        if not path:
+            raise FileNotFoundError("No path selected")
+        if not os.path.exists(path):
+            raise FileNotFoundError(path)
+        os.startfile(path)  # type: ignore[attr-defined]
+
+    @staticmethod
+    def reveal_path(path: str) -> None:
+        if not path:
+            raise FileNotFoundError("No path selected")
+        if not os.path.exists(path):
+            raise FileNotFoundError(path)
+        subprocess.Popen(["explorer", f"/select,{path}"])
 
     @staticmethod
     def draw_import_priority(draw: object) -> tuple[int, int, int, int]:
@@ -193,9 +308,168 @@ class ZAYCHIK_OT_import_dx12_dump(Operator):
         return {"FINISHED"}
 
 
+class ZAYCHIK_OT_scan_trace_browser(Operator):
+    bl_idname = "zaychik.scan_trace_browser"
+    bl_label = "Scan Draw Resources"
+    bl_description = "Scan 3Dmigoto/DX11 FrameAnalysis files and group resources by draw"
+
+    def execute(self, context: Context) -> set[str]:
+        settings = context.scene.zaychik_settings
+        dump_dir = FrameAnalysisUI.selected_path(context)
+        if not dump_dir:
+            self.report({"ERROR"}, "Please select a FrameAnalysis directory first")
+            return {"CANCELLED"}
+
+        result = TraceBrowser.parse_result(Paths.normalize(bpy.path.abspath(dump_dir).strip()))
+        FrameAnalysisUI.populate_trace_command_lists(context, result.command_lists)
+        if result.command_lists:
+            first = result.command_lists[0]
+            FrameAnalysisUI.populate_trace_draws(context, first.draws)
+            if first.draws:
+                FrameAnalysisUI.populate_trace_resources(context, first.draws[0].resources)
+
+        draw_count = sum(len(command_list.draws) for command_list in result.command_lists)
+        settings.last_status = (
+            f"Trace browser loaded {len(result.command_lists)} command list(s), "
+            f"{draw_count} draw/dispatch call(s)"
+        )
+        self.report({"INFO"}, settings.last_status)
+        return {"FINISHED"}
+
+
+class ZAYCHIK_OT_load_trace_command_list(Operator):
+    bl_idname = "zaychik.load_trace_command_list"
+    bl_label = "Load CommandList"
+    bl_description = "Load draw/dispatch calls for the selected CommandList"
+
+    def execute(self, context: Context) -> set[str]:
+        settings = context.scene.zaychik_settings
+        dump_dir = FrameAnalysisUI.selected_path(context)
+        cmdlist = FrameAnalysisUI.selected_trace_command_list(context)
+        if not dump_dir or not cmdlist:
+            self.report({"ERROR"}, "Please scan and select a CommandList first")
+            return {"CANCELLED"}
+
+        command_list = TraceBrowser.find_command_list(
+            Paths.normalize(bpy.path.abspath(dump_dir).strip()),
+            cmdlist,
+        )
+        if command_list is None:
+            self.report({"WARNING"}, "Selected CommandList was not found in the dump")
+            settings.trace_draw_items.clear()
+            settings.trace_resource_items.clear()
+            return {"CANCELLED"}
+
+        FrameAnalysisUI.populate_trace_draws(context, command_list.draws)
+        if command_list.draws:
+            FrameAnalysisUI.populate_trace_resources(context, command_list.draws[0].resources)
+        settings.last_status = (
+            f"Loaded {len(command_list.draws)} draw/dispatch call(s) for {cmdlist}"
+        )
+        self.report({"INFO"}, settings.last_status)
+        return {"FINISHED"}
+
+
+class ZAYCHIK_OT_load_trace_draw_resources(Operator):
+    bl_idname = "zaychik.load_trace_draw_resources"
+    bl_label = "Load Draw Resources"
+    bl_description = "Load slot resources for the selected draw/dispatch call"
+
+    def execute(self, context: Context) -> set[str]:
+        settings = context.scene.zaychik_settings
+        dump_dir = FrameAnalysisUI.selected_path(context)
+        draw_number = FrameAnalysisUI.selected_trace_draw_number(context)
+        if not dump_dir or draw_number is None:
+            self.report({"ERROR"}, "Please scan and select a draw/dispatch call first")
+            return {"CANCELLED"}
+
+        draw = TraceBrowser.find_draw(
+            Paths.normalize(bpy.path.abspath(dump_dir).strip()),
+            draw_number,
+        )
+        if draw is None:
+            self.report({"WARNING"}, "Selected draw was not found in the dump")
+            settings.trace_resource_items.clear()
+            return {"CANCELLED"}
+
+        FrameAnalysisUI.populate_trace_resources(context, draw.resources)
+        settings.last_status = f"Loaded {len(draw.resources)} resource(s) for draw {draw.draw:06d}"
+        self.report({"INFO"}, settings.last_status)
+        return {"FINISHED"}
+
+
+class ZAYCHIK_OT_open_trace_resource(Operator):
+    bl_idname = "zaychik.open_trace_resource"
+    bl_label = "Open Resource"
+    bl_description = "Open the selected buffer or texture file"
+
+    use_target: bpy.props.BoolProperty(default=True)  # type: ignore
+
+    def execute(self, context: Context) -> set[str]:
+        resource = FrameAnalysisUI.selected_trace_resource(context)
+        if resource is None:
+            self.report({"ERROR"}, "Please select a resource first")
+            return {"CANCELLED"}
+
+        path = resource.target if self.use_target and resource.target else resource.path
+        try:
+            FrameAnalysisUI.open_path(path)
+        except OSError as exc:
+            self.report({"ERROR"}, f"Cannot open resource: {exc}")
+            return {"CANCELLED"}
+        return {"FINISHED"}
+
+
+class ZAYCHIK_OT_reveal_trace_resource(Operator):
+    bl_idname = "zaychik.reveal_trace_resource"
+    bl_label = "Reveal Resource"
+    bl_description = "Reveal the selected buffer or texture in Explorer"
+
+    use_target: bpy.props.BoolProperty(default=True)  # type: ignore
+
+    def execute(self, context: Context) -> set[str]:
+        resource = FrameAnalysisUI.selected_trace_resource(context)
+        if resource is None:
+            self.report({"ERROR"}, "Please select a resource first")
+            return {"CANCELLED"}
+
+        path = resource.target if self.use_target and resource.target else resource.path
+        try:
+            FrameAnalysisUI.reveal_path(path)
+        except OSError as exc:
+            self.report({"ERROR"}, f"Cannot reveal resource: {exc}")
+            return {"CANCELLED"}
+        return {"FINISHED"}
+
+
+class ZAYCHIK_OT_open_trace_metadata(Operator):
+    bl_idname = "zaychik.open_trace_metadata"
+    bl_label = "Open Metadata"
+    bl_description = "Open the selected resource metadata txt file"
+
+    def execute(self, context: Context) -> set[str]:
+        resource = FrameAnalysisUI.selected_trace_resource(context)
+        if resource is None:
+            self.report({"ERROR"}, "Please select a resource first")
+            return {"CANCELLED"}
+
+        try:
+            FrameAnalysisUI.open_path(resource.text_path)
+        except OSError as exc:
+            self.report({"ERROR"}, f"Cannot open metadata: {exc}")
+            return {"CANCELLED"}
+        return {"FINISHED"}
+
+
 CLASSES = (
     ZAYCHIK_OT_refresh_frameanalysis_list,
     ZAYCHIK_OT_import_dx12_dump,
+    ZAYCHIK_OT_scan_trace_browser,
+    ZAYCHIK_OT_load_trace_command_list,
+    ZAYCHIK_OT_load_trace_draw_resources,
+    ZAYCHIK_OT_open_trace_resource,
+    ZAYCHIK_OT_reveal_trace_resource,
+    ZAYCHIK_OT_open_trace_metadata,
 )
 
 

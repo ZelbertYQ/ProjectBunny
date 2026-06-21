@@ -24,6 +24,44 @@ class ZAYCHIK_PG_frameanalysis_item(PropertyGroup):
     path: StringProperty(name="Path")
 
 
+class ZAYCHIK_PG_trace_draw_item(PropertyGroup):
+    name: StringProperty(name="Draw")
+    label: StringProperty(name="Label")
+    draw: IntProperty(name="Draw")
+    shader: StringProperty(name="Shader")
+    resource_count: IntProperty(name="Resources")
+    cmdlist: StringProperty(name="CommandList")
+    func: StringProperty(name="Func")
+    pso: IntProperty(name="PSO")
+    index_count: IntProperty(name="Index Count")
+    vertex_count: IntProperty(name="Vertex Count")
+
+
+class ZAYCHIK_PG_trace_command_list_item(PropertyGroup):
+    name: StringProperty(name="CommandList")
+    cmdlist: StringProperty(name="CommandList")
+    label: StringProperty(name="Label")
+    draw_count: IntProperty(name="Draws")
+
+
+class ZAYCHIK_PG_trace_resource_item(PropertyGroup):
+    name: StringProperty(name="Slot")
+    slot: StringProperty(name="Slot")
+    kind: StringProperty(name="Kind")
+    hash: StringProperty(name="Hash")
+    shader: StringProperty(name="Shader")
+    cmdlist: StringProperty(name="CommandList")
+    call_index: IntProperty(name="Call Index")
+    register: StringProperty(name="Register")
+    bytes: IntProperty(name="Bytes")
+    stride: IntProperty(name="Stride")
+    fmt_name: StringProperty(name="Format")
+    path: StringProperty(name="Path")
+    target: StringProperty(name="Target")
+    text_path: StringProperty(name="Text Path")
+    summary: StringProperty(name="Summary")
+
+
 class ZAYCHIK_PG_settings(PropertyGroup):
     dump_root_directory: StringProperty(
         name="Migoto Directory",
@@ -94,6 +132,12 @@ class ZAYCHIK_PG_settings(PropertyGroup):
         default=0,
         update=on_frameanalysis_index_changed,
     ) # type: ignore
+    trace_draw_items: CollectionProperty(type=ZAYCHIK_PG_trace_draw_item) # type: ignore
+    trace_draw_index: IntProperty(name="Draw Index", default=0) # type: ignore
+    trace_command_list_items: CollectionProperty(type=ZAYCHIK_PG_trace_command_list_item) # type: ignore
+    trace_command_list_index: IntProperty(name="CommandList Index", default=0) # type: ignore
+    trace_resource_items: CollectionProperty(type=ZAYCHIK_PG_trace_resource_item) # type: ignore
+    trace_resource_index: IntProperty(name="Resource Index", default=0) # type: ignore
 
 
 class SettingsCallbacks:
@@ -112,6 +156,9 @@ class SettingsCallbacks:
 
 CLASSES = (
     ZAYCHIK_PG_frameanalysis_item,
+    ZAYCHIK_PG_trace_command_list_item,
+    ZAYCHIK_PG_trace_draw_item,
+    ZAYCHIK_PG_trace_resource_item,
     ZAYCHIK_PG_settings,
 )
 

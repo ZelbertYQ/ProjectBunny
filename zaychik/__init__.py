@@ -42,6 +42,7 @@ class ZaychikAddon:
         "zaychik.utils.formats",
         "zaychik.utils.layouts",
         "zaychik.utils.paths",
+        "zaychik.utils.trace",
         "zaychik.utils.parser",
         "zaychik.utils.importer",
         "zaychik.ui.operators",

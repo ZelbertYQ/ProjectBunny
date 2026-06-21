@@ -23,6 +23,10 @@ class Paths:
         if not root_dir or not os.path.isdir(root_dir):
             return []
 
+        root_name = os.path.basename(os.path.normpath(root_dir))
+        if root_name.startswith("FrameAnalysis-"):
+            return [(root_name, Paths.normalize(root_dir))]
+
         entries: List[Tuple[str, str]] = []
         for entry in os.scandir(root_dir):
             if not entry.is_dir():
