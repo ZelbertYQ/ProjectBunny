@@ -8,7 +8,13 @@ import bpy
 from bpy.types import Context, Operator
 
 from ..utils.importer import DrawImporter
-from ..utils.parser import LogParser
+from ..utils.parser import (
+    ConstantBufferBinding,
+    DrawCall,
+    IndexBinding,
+    LogParser,
+    VertexBinding,
+)
 from ..utils.paths import Paths
 from ..utils.trace import TraceBrowser, TraceCommandList, TraceDraw, TraceResource
 
@@ -233,6 +239,82 @@ class FrameAnalysisUI:
         return True
 
     @staticmethod
+    def selected_trace_draw(context: Context) -> Optional[TraceDraw]:
+        dump_dir = FrameAnalysisUI.selected_path(context)
+        draw_number = FrameAnalysisUI.selected_trace_draw_number(context)
+        if not dump_dir or draw_number is None:
+            return None
+        return TraceBrowser.find_draw(
+            Paths.normalize(bpy.path.abspath(dump_dir).strip()),
+            draw_number,
+        )
+
+    @staticmethod
+    def relative_dump_path(dump_dir: str, path: str) -> str:
+        if not path:
+            return ""
+        try:
+            return os.path.relpath(path, dump_dir)
+        except ValueError:
+            return path
+
+    @staticmethod
+    def trace_draw_to_import_draw(dump_dir: str, trace_draw: TraceDraw) -> DrawCall:
+        draw = DrawCall(
+            event=trace_draw.draw,
+            vs=trace_draw.shader,
+            topology=trace_draw.topology,
+            index_count=trace_draw.index_count,
+            start_vertex=trace_draw.start_vertex,
+            start_index=trace_draw.start_index,
+            base_vertex=trace_draw.base_vertex,
+            instance_count=trace_draw.instance_count,
+        )
+
+        for resource in trace_draw.resources:
+            relative_path = FrameAnalysisUI.relative_dump_path(dump_dir, resource.path)
+            if resource.slot == "ib":
+                draw.index_binding = IndexBinding(
+                    bytes=resource.bytes,
+                    fmt=0,
+                    fmt_name=resource.fmt_name,
+                    relative_path=relative_path,
+                    gpu=0,
+                    offset=0,
+                )
+                continue
+            if resource.slot.startswith("vb"):
+                slot_text = resource.slot[2:]
+                if not slot_text.isdigit():
+                    continue
+                binding = VertexBinding(
+                    slot=int(slot_text),
+                    bytes=resource.bytes,
+                    stride=resource.stride,
+                    fmt=0,
+                    fmt_name=resource.fmt_name,
+                    skin_source=resource.skin_source or "unknown",
+                    relative_path=relative_path,
+                )
+                draw.vertex_bindings[binding.slot] = binding
+                if binding.skin_source != "not_applicable":
+                    if draw.skin_source == "unknown" or binding.skin_source == "gpu_preskinning":
+                        draw.skin_source = binding.skin_source
+                continue
+            if resource.kind != "CBV":
+                continue
+            draw.constant_buffers.append(
+                ConstantBufferBinding(
+                    bind_space="graphics_root",
+                    root_index=0,
+                    reg=0,
+                    bytes=resource.bytes,
+                    relative_path=relative_path,
+                )
+            )
+        return draw
+
+    @staticmethod
     def open_path(path: str) -> None:
         if not path:
             raise FileNotFoundError("No path selected")
@@ -453,6 +535,47 @@ class ZAYCHIK_OT_load_trace_draw_resources(Operator):
         return {"FINISHED"}
 
 
+class ZAYCHIK_OT_import_selected_trace_draw(Operator):
+    bl_idname = "zaychik.import_selected_trace_draw"
+    bl_label = "Identify And Import Draw"
+    bl_description = "Identify the selected draw's slot layout with presets and import it into Blender"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context: Context) -> set[str]:
+        settings = context.scene.zaychik_settings
+        dump_dir = FrameAnalysisUI.selected_path(context)
+        if not dump_dir:
+            self.report({"ERROR"}, "Please select a FrameAnalysis directory first")
+            return {"CANCELLED"}
+
+        dump_dir = Paths.normalize(bpy.path.abspath(dump_dir).strip())
+        trace_draw = FrameAnalysisUI.selected_trace_draw(context)
+        if trace_draw is None:
+            self.report({"ERROR"}, "Please select a DrawIndexedInstanced/DrawInstanced call first")
+            return {"CANCELLED"}
+        if trace_draw.func == "Dispatch":
+            self.report({"ERROR"}, "Dispatch calls cannot be imported as meshes")
+            return {"CANCELLED"}
+
+        draw = FrameAnalysisUI.trace_draw_to_import_draw(dump_dir, trace_draw)
+        try:
+            ok, message = DrawImporter.import_draw_call(
+                context,
+                dump_dir,
+                draw,
+                settings.apply_world_matrices,
+                settings.world_matrix_scale,
+                settings.vertex_layout_preset,
+            )
+        except Exception as exc:  # pragma: no cover - Blender runtime path
+            ok = False
+            message = f"draw {trace_draw.draw}: {exc}"
+
+        settings.last_status = message
+        self.report({"INFO"} if ok else {"WARNING"}, message)
+        return {"FINISHED"} if ok else {"CANCELLED"}
+
+
 class ZAYCHIK_OT_open_trace_resource(Operator):
     bl_idname = "zaychik.open_trace_resource"
     bl_label = "Open Resource"
@@ -522,6 +645,7 @@ CLASSES = (
     ZAYCHIK_OT_scan_trace_browser,
     ZAYCHIK_OT_load_trace_command_list,
     ZAYCHIK_OT_load_trace_draw_resources,
+    ZAYCHIK_OT_import_selected_trace_draw,
     ZAYCHIK_OT_open_trace_resource,
     ZAYCHIK_OT_reveal_trace_resource,
     ZAYCHIK_OT_open_trace_metadata,

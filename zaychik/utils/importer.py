@@ -263,6 +263,28 @@ class DrawImporter:
                             normals: Optional[List[Tuple[float, float, float]]],
                             collection_name: Optional[str],
                             world_matrix: Optional[Matrix]) -> bpy.types.Object:
+        object_location: Optional[Vector] = None
+        if world_matrix is None and positions:
+            min_x = min(p[0] for p in positions)
+            min_y = min(p[1] for p in positions)
+            min_z = min(p[2] for p in positions)
+            max_x = max(p[0] for p in positions)
+            max_y = max(p[1] for p in positions)
+            max_z = max(p[2] for p in positions)
+            object_location = Vector((
+                (min_x + max_x) * 0.5,
+                (min_y + max_y) * 0.5,
+                (min_z + max_z) * 0.5,
+            ))
+            positions = [
+                (
+                    p[0] - object_location.x,
+                    p[1] - object_location.y,
+                    p[2] - object_location.z,
+                )
+                for p in positions
+            ]
+
         mesh = bpy.data.meshes.new(name)
         mesh.from_pydata(positions, [], faces)
         mesh.update()
@@ -288,6 +310,8 @@ class DrawImporter:
             context.collection.objects.link(obj)
         if world_matrix is not None:
             obj.matrix_world = world_matrix
+        elif object_location is not None:
+            obj.location = object_location
         return obj
 
     # ------------------------------------------------------------------
@@ -395,4 +419,7 @@ class DrawImporter:
             world_matrix = Matrix.Diagonal((scale, scale, scale, 1.0)) @ world_matrix
         cls._create_mesh_object(context, object_name, positions, faces, uvs,
                                 normals, collection_name, world_matrix)
-        return True, f"Imported {object_name} via {factory.name}"
+        return True, (
+            f"Imported {object_name} via {factory.name} "
+            f"(verts={len(positions)}, faces={len(faces)})"
+        )

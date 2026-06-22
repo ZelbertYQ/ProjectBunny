@@ -21,6 +21,7 @@ class TraceResource:
     bytes: int = 0
     stride: int = 0
     fmt_name: str = ""
+    skin_source: str = ""
     text_path: str = ""
     target: str = ""
     summary: str = ""
@@ -226,6 +227,7 @@ class TraceBrowser:
             bytes=cls._to_int(obj.get("bytes")),
             stride=cls._to_int(obj.get("stride")),
             fmt_name=cls._to_str(obj.get("fmt_name")),
+            skin_source=cls._to_str(obj.get("skin_source")),
             text_path=text_path,
             target=cls._resolve_target(path) if path else "",
             summary="; ".join(summary_parts),

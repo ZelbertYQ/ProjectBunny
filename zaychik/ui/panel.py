@@ -14,6 +14,7 @@ from ..common.properties import (
 from .operators import (
     FrameAnalysisUI,
     ZAYCHIK_OT_import_dx12_dump,
+    ZAYCHIK_OT_import_selected_trace_draw,
     ZAYCHIK_OT_open_trace_metadata,
     ZAYCHIK_OT_open_trace_resource,
     ZAYCHIK_OT_refresh_frameanalysis_list,
@@ -57,8 +58,32 @@ class ZAYCHIK_UL_trace_draw_list(UIList):
         flt_flag: int,
     ) -> None:
         del context, data, icon, active_data, active_propname, index, flt_flag
-        label = item.label or item.name
-        layout.label(text=label, icon="RESTRICT_SELECT_OFF")
+        row = layout.row(align=True)
+        row.label(text=item.name, icon="RESTRICT_SELECT_OFF")
+        split = row.split(factor=0.23, align=True)
+        split.label(text=item.func.replace("Instanced", "Inst"))
+        split = split.split(factor=0.14, align=True)
+        split.label(text=str(item.pso))
+        split = split.split(factor=0.17, align=True)
+        split.label(text=item.shader[:8] if item.shader and item.shader != "-" else "-")
+        split = split.split(factor=0.16, align=True)
+        if item.func == "Dispatch":
+            split.label(text=f"{item.groups_x},{item.groups_y},{item.groups_z}")
+        elif item.index_count:
+            split.label(text=str(item.index_count))
+        else:
+            split.label(text=str(item.vertex_count))
+        split = split.split(factor=0.17, align=True)
+        split.label(text=str(item.start_index if item.index_count else item.start_vertex))
+        split = split.split(factor=0.16, align=True)
+        split.label(text=str(item.base_vertex))
+        split = split.split(factor=0.18, align=True)
+        split.label(text=str(item.instance_count))
+        split = split.split(factor=0.22, align=True)
+        split.label(text=str(item.ib_fmt) if item.ib_fmt else "-")
+        split = split.split(factor=0.34, align=True)
+        split.label(text=str(item.ib_bytes) if item.ib_bytes else "-")
+        split.label(text=str(item.resource_count))
 
 
 class ZAYCHIK_UL_trace_command_list(UIList):
@@ -98,9 +123,15 @@ class ZAYCHIK_UL_trace_resource_list(UIList):
         del context, data, icon, active_data, active_propname, index, flt_flag
         row = layout.row(align=True)
         row.label(text=item.slot, icon="OUTLINER_DATA_MESH")
-        hash_text = item.hash[:8] if item.hash else "-"
-        detail = item.register or item.kind
-        row.label(text=f"{detail} {hash_text}")
+        split = row.split(factor=0.16, align=True)
+        split.label(text=item.kind)
+        split = split.split(factor=0.24, align=True)
+        split.label(text=item.register or "-")
+        split = split.split(factor=0.22, align=True)
+        split.label(text=item.hash[:8] if item.hash else "-")
+        split = split.split(factor=0.22, align=True)
+        split.label(text=str(item.bytes))
+        split.label(text=str(item.stride))
 
 
 class ZAYCHIK_PT_sidebar(Panel):
@@ -145,70 +176,42 @@ class ZAYCHIK_PT_sidebar(Panel):
 
 class FrameAnalysisPanelUI:
     @staticmethod
-    def selected_draw(context: bpy.types.Context):
-        settings = context.scene.zaychik_settings
-        if not settings.trace_draw_items:
-            return None
-        index = settings.trace_draw_index
-        if index < 0 or index >= len(settings.trace_draw_items):
-            return None
-        return settings.trace_draw_items[index]
+    def draw_table_header(layout: bpy.types.UILayout) -> None:
+        row = layout.row(align=True)
+        row.label(text="Call")
+        split = row.split(factor=0.23, align=True)
+        split.label(text="Func")
+        split = split.split(factor=0.14, align=True)
+        split.label(text="PSO")
+        split = split.split(factor=0.17, align=True)
+        split.label(text="Shader")
+        split = split.split(factor=0.16, align=True)
+        split.label(text="Count")
+        split = split.split(factor=0.17, align=True)
+        split.label(text="Start")
+        split = split.split(factor=0.16, align=True)
+        split.label(text="Base")
+        split = split.split(factor=0.18, align=True)
+        split.label(text="Inst")
+        split = split.split(factor=0.22, align=True)
+        split.label(text="IBFmt")
+        split = split.split(factor=0.34, align=True)
+        split.label(text="IBBytes")
+        split.label(text="Res")
 
     @staticmethod
-    def draw_selected_draw_details(
-        layout: bpy.types.UILayout,
-        context: bpy.types.Context,
-    ) -> None:
-        draw = FrameAnalysisPanelUI.selected_draw(context)
-        if draw is None:
-            return
-
-        box = layout.box()
-        box.label(text="Draw Parameters")
-        box.label(text=f"func={draw.func} call={draw.draw} pso={draw.pso}")
-        if draw.shader and draw.shader != "-":
-            box.label(text=f"shader={draw.shader}")
-        if draw.func == "Dispatch":
-            box.label(text=f"groups={draw.groups_x}, {draw.groups_y}, {draw.groups_z}")
-            return
-
-        if draw.index_count:
-            box.label(
-                text=(
-                    f"index_count={draw.index_count} "
-                    f"start_index={draw.start_index} "
-                    f"base_vertex={draw.base_vertex}"
-                )
-            )
-            box.label(
-                text=(
-                    f"instance_count={draw.instance_count} "
-                    f"start_instance={draw.start_instance}"
-                )
-            )
-            if draw.ib_gpu:
-                box.label(
-                    text=(
-                        f"ib_gpu={draw.ib_gpu} "
-                        f"ib_bytes={draw.ib_bytes} "
-                        f"ib_fmt={draw.ib_fmt}"
-                    )
-                )
-            return
-
-        box.label(
-            text=(
-                f"vertex_count={draw.vertex_count} "
-                f"start_vertex={draw.start_vertex}"
-            )
-        )
-        box.label(
-            text=(
-                f"instance_count={draw.instance_count} "
-                f"start_instance={draw.start_instance}"
-            )
-        )
-
+    def draw_resource_header(layout: bpy.types.UILayout) -> None:
+        row = layout.row(align=True)
+        row.label(text="Slot")
+        split = row.split(factor=0.16, align=True)
+        split.label(text="Kind")
+        split = split.split(factor=0.24, align=True)
+        split.label(text="Bind")
+        split = split.split(factor=0.22, align=True)
+        split.label(text="Hash")
+        split = split.split(factor=0.22, align=True)
+        split.label(text="Bytes")
+        split.label(text="Stride")
 
 class ZAYCHIK_PT_frameanalysis(Panel):
     bl_label = "FrameAnalysis"
@@ -235,6 +238,7 @@ class ZAYCHIK_PT_frameanalysis(Panel):
         )
 
         layout.label(text="Draw / Dispatch")
+        FrameAnalysisPanelUI.draw_table_header(layout)
         layout.template_list(
             ZAYCHIK_UL_trace_draw_list.bl_idname,
             "",
@@ -244,9 +248,10 @@ class ZAYCHIK_PT_frameanalysis(Panel):
             "trace_draw_index",
             rows=5,
         )
-        FrameAnalysisPanelUI.draw_selected_draw_details(layout, context)
+        layout.operator(ZAYCHIK_OT_import_selected_trace_draw.bl_idname, icon="IMPORT")
 
         layout.label(text="Resources")
+        FrameAnalysisPanelUI.draw_resource_header(layout)
         layout.template_list(
             ZAYCHIK_UL_trace_resource_list.bl_idname,
             "",
