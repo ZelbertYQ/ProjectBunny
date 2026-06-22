@@ -56,13 +56,15 @@ class DrawImporter:
 
     @classmethod
     def _read_indices(cls, data: bytes, fmt_name: str,
-                      start_index: int, index_count: int) -> List[int]:
+                      start_index: int, index_count: int,
+                      base_byte_offset: int = 0) -> List[int]:
         from .formats import DxgiFormat
         fmt = DxgiFormat.get(fmt_name)
         if fmt is None or not fmt.is_integer or fmt.component_count != 1 or fmt.byte_width not in (2, 4):
             raise ValueError(f"Unsupported index format: {fmt_name}")
         stride = fmt.byte_width
-        start_offset = start_index * stride
+        base = cls._effective_byte_offset(data, base_byte_offset)
+        start_offset = base + start_index * stride
         end_offset = start_offset + index_count * stride
         if end_offset > len(data):
             raise ValueError(
@@ -79,23 +81,37 @@ class DrawImporter:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _effective_byte_offset(data: bytes, byte_offset: int) -> int:
+        if byte_offset <= 0:
+            return 0
+        # Some dump files are already sliced to the view's byte offset. In
+        # that case applying the original GPU buffer offset again would seek
+        # past EOF, so treat the local dump as offset-zero.
+        if byte_offset >= len(data):
+            return 0
+        return byte_offset
+
+    @staticmethod
     def _decode_stream_element(data: bytes, element: VertexElement,
-                               vertex_count: int, stream_stride: int) -> List[Tuple]:
+                               vertex_count: int, stream_stride: int,
+                               base_byte_offset: int = 0) -> List[Tuple]:
         out: List[Tuple] = []
         fw = element.byte_width
         decode = element.format_info.decode
+        stream_base = DrawImporter._effective_byte_offset(data, base_byte_offset)
         for i in range(vertex_count):
-            base = i * stream_stride + element.offset
+            base = stream_base + i * stream_stride + element.offset
             if base + fw > len(data):
                 break
             out.append(decode(data, base))
         return out
 
-    @staticmethod
-    def _vertex_count_for_binding(data: bytes, binding: VertexBinding) -> int:
+    @classmethod
+    def _vertex_count_for_binding(cls, data: bytes, binding: VertexBinding) -> int:
         if binding.stride <= 0:
             return 0
-        return len(data) // binding.stride
+        start = cls._effective_byte_offset(data, binding.offset)
+        return max(len(data) - start, 0) // binding.stride
 
     # ------------------------------------------------------------------
     # Factory selection
@@ -338,7 +354,8 @@ class DrawImporter:
         ib_data = cls._read_binary_file(ib_path)
         try:
             indices = cls._read_indices(ib_data, draw.index_binding.fmt_name,
-                                        draw.start_index, draw.index_count)
+                                        draw.start_index, draw.index_count,
+                                        draw.index_binding.offset)
         except (ValueError, struct.error) as exc:
             return False, f"event {draw.event}: IB decode failed ({exc})"
         if not indices:
@@ -357,6 +374,7 @@ class DrawImporter:
             pos_data, pos_element,
             cls._vertex_count_for_binding(pos_data, pos_binding),
             pos_binding.stride,
+            pos_binding.offset,
         )
         positions = [(float(p[0]), float(p[1]), float(p[2])) for p in positions_raw]
         if not positions:
@@ -381,6 +399,7 @@ class DrawImporter:
                     uv_data, uv_element,
                     cls._vertex_count_for_binding(uv_data, uv_binding),
                     uv_binding.stride,
+                    uv_binding.offset,
                 )
                 if raw and len(raw[0]) >= 2:
                     uvs = []
@@ -402,6 +421,7 @@ class DrawImporter:
                     nrm_data, nrm_element,
                     cls._vertex_count_for_binding(nrm_data, nrm_binding),
                     nrm_binding.stride,
+                    nrm_binding.offset,
                 )
                 if raw and len(raw[0]) >= 3:
                     normals = [(float(t[0]), float(t[1]), float(t[2])) for t in raw]

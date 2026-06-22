@@ -88,6 +88,7 @@ class ZAYCHIK_PG_trace_resource_item(PropertyGroup):
     call_index: IntProperty(name="Call Index")
     register: StringProperty(name="Register")
     bytes: IntProperty(name="Bytes")
+    offset: IntProperty(name="Offset")
     stride: IntProperty(name="Stride")
     fmt_name: StringProperty(name="Format")
     path: StringProperty(name="Path")

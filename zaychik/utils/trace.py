@@ -19,6 +19,7 @@ class TraceResource:
     call_index: int = 0
     register: str = ""
     bytes: int = 0
+    offset: int = 0
     stride: int = 0
     fmt_name: str = ""
     skin_source: str = ""
@@ -225,6 +226,7 @@ class TraceBrowser:
             call_index=call_index,
             register=register,
             bytes=cls._to_int(obj.get("bytes")),
+            offset=cls._to_int(obj.get("offset")),
             stride=cls._to_int(obj.get("stride")),
             fmt_name=cls._to_str(obj.get("fmt_name")),
             skin_source=cls._to_str(obj.get("skin_source")),

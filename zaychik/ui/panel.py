@@ -129,8 +129,10 @@ class ZAYCHIK_UL_trace_resource_list(UIList):
         split.label(text=item.register or "-")
         split = split.split(factor=0.22, align=True)
         split.label(text=item.hash[:8] if item.hash else "-")
-        split = split.split(factor=0.22, align=True)
+        split = split.split(factor=0.20, align=True)
         split.label(text=str(item.bytes))
+        split = split.split(factor=0.28, align=True)
+        split.label(text=str(item.offset))
         split.label(text=str(item.stride))
 
 
@@ -209,8 +211,10 @@ class FrameAnalysisPanelUI:
         split.label(text="Bind")
         split = split.split(factor=0.22, align=True)
         split.label(text="Hash")
-        split = split.split(factor=0.22, align=True)
+        split = split.split(factor=0.20, align=True)
         split.label(text="Bytes")
+        split = split.split(factor=0.28, align=True)
+        split.label(text="Offset")
         split.label(text="Stride")
 
 class ZAYCHIK_PT_frameanalysis(Panel):

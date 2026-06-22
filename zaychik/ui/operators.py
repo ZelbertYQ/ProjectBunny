@@ -170,6 +170,7 @@ class FrameAnalysisUI:
             item.call_index = resource.call_index
             item.register = resource.register
             item.bytes = resource.bytes
+            item.offset = resource.offset
             item.stride = resource.stride
             item.fmt_name = resource.fmt_name
             item.path = resource.path
@@ -280,7 +281,7 @@ class FrameAnalysisUI:
                     fmt_name=resource.fmt_name,
                     relative_path=relative_path,
                     gpu=0,
-                    offset=0,
+                    offset=resource.offset,
                 )
                 continue
             if resource.slot.startswith("vb"):
@@ -295,6 +296,7 @@ class FrameAnalysisUI:
                     fmt_name=resource.fmt_name,
                     skin_source=resource.skin_source or "unknown",
                     relative_path=relative_path,
+                    offset=resource.offset,
                 )
                 draw.vertex_bindings[binding.slot] = binding
                 if binding.skin_source != "not_applicable":
