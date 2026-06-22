@@ -1,17 +1,33 @@
 {
-  "GameId": "002",
+  "GameId": "003",
   "Games": [
     {
       "GameId": "001",
       "TargetExe": "C:\\SteamLibrary\\steamapps\\common\\StellarBladeDemo\\SB\\Binaries\\Win64\\SB-Win64-Shipping.exe",
       "WorkingDirectory": "",
-      "LaunchArguments": ""
+      "LaunchArguments": "",
+      "CopyToTargetDirectoryPath": "",
+      "CopyToTargetDirectory": false,
+      "LaunchGame": false
     },
     {
       "GameId": "002",
       "TargetExe": "D:\\Softs\\miHoYo Launcher\\games\\ZenlessZoneZero Game\\ZenlessZoneZero.exe",
       "WorkingDirectory": "",
-      "LaunchArguments": "-use-d3d12"
+      "LaunchArguments": "-use-d3d12",
+      "CopyToTargetDirectoryPath": "",
+      "CopyToTargetDirectory": false,
+      "LaunchGame": false
+    },
+    {
+      "GameId": "003",
+      "TargetExe": "",
+      "WorkingDirectory": "",
+      "LaunchArguments": "",
+      "CopyToTargetDirectoryPath": "",
+      "CopyToTargetDirectory": true,
+      "LaunchGame": false,
+      "Notice": "此配置用于编译后自动复制d3d12.dll到目标目录"
     }
   ]
 }

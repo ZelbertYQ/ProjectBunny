@@ -142,27 +142,37 @@ if ($Platform -eq 'x64') {
     $hasWorkingDirectory = $null -ne $gameConfig.PSObject.Properties["WorkingDirectory"]
     $dx12WorkingDirectory = if ($hasWorkingDirectory) { [string]$gameConfig.WorkingDirectory } else { Split-Path -Parent $dx12Exe }
     $dx12LaunchArguments = [string]$gameConfig.LaunchArguments
+    $hasCopyToTargetDirectory = $null -ne $gameConfig.PSObject.Properties["CopyToTargetDirectory"]
+    $copyToTargetDirectory = if ($hasCopyToTargetDirectory) { [bool]$gameConfig.CopyToTargetDirectory } else { $true }
+    $copyToTargetDirectoryPath = [string]$gameConfig.CopyToTargetDirectoryPath
+    $hasLaunchGame = $null -ne $gameConfig.PSObject.Properties["LaunchGame"]
+    $launchGame = if ($hasLaunchGame) { [bool]$gameConfig.LaunchGame } else { $true }
     if (-not $dx12Exe) {
-        Write-Host "  Warning: GameId '$selectedGameId' has no TargetExe. Skipping DX12 test DLL copy and launch." -ForegroundColor Yellow
+        Write-Host "  Warning: GameId '$selectedGameId' has no TargetExe. Skipping DX12 post-build actions." -ForegroundColor Yellow
         return
     }
     if (-not (Test-Path $dx12Exe)) {
-        Write-Host "  Skipped DX12 test DLL copy: executable not found: $dx12Exe" -ForegroundColor Yellow
+        Write-Host "  Skipped DX12 post-build actions: executable not found: $dx12Exe" -ForegroundColor Yellow
         return
     }
 
     if ($dx12WorkingDirectory -and -not (Test-Path $dx12WorkingDirectory)) {
-        Write-Host "  Skipped DX12 test DLL copy: working directory not found: $dx12WorkingDirectory" -ForegroundColor Yellow
+        Write-Host "  Skipped DX12 launch: working directory not found: $dx12WorkingDirectory" -ForegroundColor Yellow
+        $launchGame = $false
+    }
+
+    if (-not $copyToTargetDirectory -and -not $launchGame) {
+        Write-Host "  Skipped DX12 target copy and launch for GameId '$selectedGameId'." -ForegroundColor Gray
         return
     }
 
-    $dx12TestDir = Split-Path -Parent $dx12Exe
+    $dx12TestDir = if ($copyToTargetDirectoryPath) { $copyToTargetDirectoryPath } else { Split-Path -Parent $dx12Exe }
     $dx12Dll = "$outDir\d3d12.dll"
-    if ((Test-Path $dx12Dll) -and (Test-Path $dx12TestDir)) {
+    if ($copyToTargetDirectory -and (Test-Path $dx12Dll) -and (Test-Path $dx12TestDir)) {
         $dx12ProcessName = [System.IO.Path]::GetFileNameWithoutExtension($dx12Exe)
         $dx12Processes = Get-Process -Name $dx12ProcessName -ErrorAction SilentlyContinue
         if ($dx12Processes) {
-            Write-Host "  Stopping running DX12 test game before DLL copy..." -ForegroundColor Gray
+            Write-Host "  Stopping running DX12 target before DLL copy..." -ForegroundColor Gray
             $dx12Processes | Stop-Process -Force
             Start-Sleep -Seconds 1
         }
@@ -188,8 +198,16 @@ if ($Platform -eq 'x64') {
         }
 
         Copy-Item $dx12Dll "$dx12TestDir\d3d12.dll" -Force
-        Write-Host "  Copied DX12 test DLL: $dx12TestDir\d3d12.dll" -ForegroundColor Gray
+        Write-Host "  Copied DX12 DLL: $dx12TestDir\d3d12.dll" -ForegroundColor Gray
+    } elseif ($copyToTargetDirectory -and -not (Test-Path $dx12TestDir)) {
+        Write-Host "  Skipped DX12 DLL copy: directory not found: $dx12TestDir" -ForegroundColor Yellow
+    } elseif ($copyToTargetDirectory -and -not (Test-Path $dx12Dll)) {
+        Write-Host "  Skipped DX12 DLL copy: DLL not found: $dx12Dll" -ForegroundColor Yellow
+    } else {
+        Write-Host "  Skipped DX12 DLL copy: CopyToTargetDirectory=false" -ForegroundColor Gray
+    }
 
+    if ($launchGame) {
         $startArgs = @{
             FilePath = $dx12Exe
         }
@@ -201,11 +219,9 @@ if ($Platform -eq 'x64') {
         }
         Start-Process @startArgs
         $workingDirectoryText = if ($dx12WorkingDirectory) { $dx12WorkingDirectory } else { "<empty>" }
-        Write-Host "  Launched DX12 test game [$selectedGameId]: $dx12Exe $dx12LaunchArguments (WorkingDirectory=$workingDirectoryText)" -ForegroundColor Gray
-    } elseif (-not (Test-Path $dx12TestDir)) {
-        Write-Host "  Skipped DX12 test DLL copy: directory not found: $dx12TestDir" -ForegroundColor Yellow
+        Write-Host "  Launched DX12 target [$selectedGameId]: $dx12Exe $dx12LaunchArguments (WorkingDirectory=$workingDirectoryText)" -ForegroundColor Gray
     } else {
-        Write-Host "  Skipped DX12 test DLL copy: DLL not found: $dx12Dll" -ForegroundColor Yellow
+        Write-Host "  Skipped DX12 launch: LaunchGame=false" -ForegroundColor Gray
     }
 }
 
