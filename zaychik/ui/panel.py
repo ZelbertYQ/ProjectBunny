@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 
 import bpy
 from bpy.types import Panel, UIList
@@ -43,6 +44,31 @@ def _compact_kind(value: str) -> str:
         "Texture/SRV": "SRV",
         "Resource": "Res",
     }.get(value, value)
+
+
+def _compact_resource_bind(item: ZAYCHIK_PG_trace_resource_item) -> str:
+    slot = item.slot or ""
+    register = item.register or ""
+    kind = _compact_kind(item.kind)
+
+    if slot == "ib" or kind == "IB":
+        return "IB"
+    if slot.startswith("vb"):
+        return slot.upper()
+
+    root_match = re.search(r"root\s*(\d+)", register)
+    if kind == "CBV":
+        if root_match:
+            return f"CBV{root_match.group(1)}"
+        cb_match = re.search(r"cbv:root\s*(\d+)", slot, re.IGNORECASE)
+        if cb_match:
+            return f"CBV{cb_match.group(1)}"
+        return "CBV"
+    if root_match:
+        return f"{kind}{root_match.group(1)}"
+    if register:
+        return f"{kind} {_compact_text(register, 8)}"
+    return kind if kind else _compact_text(slot, 10)
 
 
 def _compact_format(value: str) -> str:
@@ -161,20 +187,16 @@ class ZAYCHIK_UL_trace_resource_list(UIList):
     ) -> None:
         del context, data, icon, active_data, active_propname, index, flt_flag
         row = layout.row(align=True)
-        row.label(text=_compact_text(item.slot, 12), icon="OUTLINER_DATA_MESH")
-        split = row.split(factor=0.08, align=True)
-        split.label(text=_compact_kind(item.kind))
-        split = split.split(factor=0.16, align=True)
-        split.label(text=_compact_text(item.register, 10))
-        split = split.split(factor=0.13, align=True)
+        row.label(text=_compact_resource_bind(item), icon="OUTLINER_DATA_MESH")
+        split = row.split(factor=0.17, align=True)
         split.label(text=item.hash[:8] if item.hash else "-")
-        split = split.split(factor=0.12, align=True)
+        split = split.split(factor=0.14, align=True)
         split.label(text=str(item.bytes))
-        split = split.split(factor=0.16, align=True)
+        split = split.split(factor=0.18, align=True)
         split.label(text=str(item.offset))
-        split = split.split(factor=0.09, align=True)
+        split = split.split(factor=0.11, align=True)
         split.label(text=str(item.stride))
-        split = split.split(factor=0.28, align=True)
+        split = split.split(factor=0.32, align=True)
         split.label(text=_compact_format(item.fmt_name))
         split.label(text=_compact_text(item.skin_source, 10))
 
@@ -247,20 +269,16 @@ class FrameAnalysisPanelUI:
     @staticmethod
     def draw_resource_header(layout: bpy.types.UILayout) -> None:
         row = layout.row(align=True)
-        row.label(text="Slot")
-        split = row.split(factor=0.08, align=True)
-        split.label(text="Kind")
-        split = split.split(factor=0.16, align=True)
-        split.label(text="Bind")
-        split = split.split(factor=0.13, align=True)
+        row.label(text="Bind")
+        split = row.split(factor=0.17, align=True)
         split.label(text="Hash")
-        split = split.split(factor=0.12, align=True)
+        split = split.split(factor=0.14, align=True)
         split.label(text="Bytes")
-        split = split.split(factor=0.16, align=True)
+        split = split.split(factor=0.18, align=True)
         split.label(text="Offset")
-        split = split.split(factor=0.09, align=True)
+        split = split.split(factor=0.11, align=True)
         split.label(text="Stride")
-        split = split.split(factor=0.28, align=True)
+        split = split.split(factor=0.32, align=True)
         split.label(text="Format")
         split.label(text="Source")
 
