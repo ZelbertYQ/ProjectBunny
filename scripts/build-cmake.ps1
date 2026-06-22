@@ -7,7 +7,9 @@ param(
     [string]$Configuration = 'Debug',
 
     [ValidateSet('x64','Win32')]
-    [string]$Platform = 'x64'
+    [string]$Platform = 'x64',
+
+    [string]$GameId = ''
 )
 
 $root = Split-Path -Parent $PSScriptRoot
@@ -110,16 +112,48 @@ foreach ($f in $files) {
 }
 
 if ($Platform -eq 'x64') {
-    $dx12GameRoot = "C:\SteamLibrary\steamapps\common\StellarBladeDemo"
-    if (-not (Test-Path $dx12GameRoot)) {
-        Write-Host "  Warning: DX12 test game root not found at $dx12GameRoot. Skipping DX12 test DLL copy and launch." -ForegroundColor Yellow
+    $buildConfigPath = Join-Path $root "build_config.json"
+    if (-not (Test-Path $buildConfigPath)) {
+        Write-Host "  Warning: build_config.json not found. Skipping DX12 test DLL copy and launch." -ForegroundColor Yellow
         return
     }
-    $dx12TestDir = Join-Path $dx12GameRoot "SB\Binaries\Win64"
-    $dx12Exe = Join-Path $dx12GameRoot "SB.exe"
+
+    try {
+        $buildConfig = Get-Content -Path $buildConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    } catch {
+        Write-Host "  Warning: Could not parse build_config.json. Skipping DX12 test DLL copy and launch." -ForegroundColor Yellow
+        Write-Host "  $($_.Exception.Message)" -ForegroundColor Yellow
+        return
+    }
+
+    $selectedGameId = if ($GameId) { $GameId } else { [string]$buildConfig.GameId }
+    if (-not $selectedGameId) {
+        Write-Host "  Warning: No GameId specified in build_config.json. Skipping DX12 test DLL copy and launch." -ForegroundColor Yellow
+        return
+    }
+
+    $gameConfig = $buildConfig.Games | Where-Object { [string]$_.GameId -eq $selectedGameId } | Select-Object -First 1
+    if (-not $gameConfig) {
+        Write-Host "  Warning: GameId '$selectedGameId' not found in build_config.json. Skipping DX12 test DLL copy and launch." -ForegroundColor Yellow
+        return
+    }
+
+    $dx12Exe = [string]$gameConfig.TargetExe
+    $dx12LaunchArguments = [string]$gameConfig.LaunchArguments
+    if (-not $dx12Exe) {
+        Write-Host "  Warning: GameId '$selectedGameId' has no TargetExe. Skipping DX12 test DLL copy and launch." -ForegroundColor Yellow
+        return
+    }
+    if (-not (Test-Path $dx12Exe)) {
+        Write-Host "  Skipped DX12 test DLL copy: executable not found: $dx12Exe" -ForegroundColor Yellow
+        return
+    }
+
+    $dx12TestDir = Split-Path -Parent $dx12Exe
     $dx12Dll = "$outDir\d3d12.dll"
-    if ((Test-Path $dx12Dll) -and (Test-Path $dx12Exe) -and (Test-Path $dx12TestDir)) {
-        $dx12Processes = Get-Process -Name "SB-Win64-Shipping" -ErrorAction SilentlyContinue
+    if ((Test-Path $dx12Dll) -and (Test-Path $dx12TestDir)) {
+        $dx12ProcessName = [System.IO.Path]::GetFileNameWithoutExtension($dx12Exe)
+        $dx12Processes = Get-Process -Name $dx12ProcessName -ErrorAction SilentlyContinue
         if ($dx12Processes) {
             Write-Host "  Stopping running DX12 test game before DLL copy..." -ForegroundColor Gray
             $dx12Processes | Stop-Process -Force
@@ -149,13 +183,19 @@ if ($Platform -eq 'x64') {
         Copy-Item $dx12Dll "$dx12TestDir\d3d12.dll" -Force
         Write-Host "  Copied DX12 test DLL: $dx12TestDir\d3d12.dll" -ForegroundColor Gray
 
-        $dx12SteamUri = "steam://run/3564860"
-        Start-Process $dx12SteamUri
-        Write-Host "  Launched DX12 test game via Steam: $dx12SteamUri" -ForegroundColor Gray
-    } elseif (-not (Test-Path $dx12Exe)) {
-        Write-Host "  Skipped DX12 test DLL copy: executable not found: $dx12Exe" -ForegroundColor Yellow
+        $startArgs = @{
+            FilePath = $dx12Exe
+            WorkingDirectory = $dx12TestDir
+        }
+        if ($dx12LaunchArguments) {
+            $startArgs.ArgumentList = $dx12LaunchArguments
+        }
+        Start-Process @startArgs
+        Write-Host "  Launched DX12 test game [$selectedGameId]: $dx12Exe $dx12LaunchArguments" -ForegroundColor Gray
     } elseif (-not (Test-Path $dx12TestDir)) {
         Write-Host "  Skipped DX12 test DLL copy: directory not found: $dx12TestDir" -ForegroundColor Yellow
+    } else {
+        Write-Host "  Skipped DX12 test DLL copy: DLL not found: $dx12Dll" -ForegroundColor Yellow
     }
 }
 

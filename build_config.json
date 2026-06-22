@@ -1,0 +1,15 @@
+{
+  "GameId": "002",
+  "Games": [
+    {
+      "GameId": "001",
+      "TargetExe": "C:\\SteamLibrary\\steamapps\\common\\StellarBladeDemo\\SB\\Binaries\\Win64\\SB-Win64-Shipping.exe",
+      "LaunchArguments": ""
+    },
+    {
+      "GameId": "002",
+      "TargetExe": "D:\\Softs\\miHoYo Launcher\\games\\ZenlessZoneZero Game\\ZenlessZoneZero.exe",
+      "LaunchArguments": "-d3d12"
+    }
+  ]
+}
