@@ -24,7 +24,7 @@
       "TargetExe": "",
       "WorkingDirectory": "",
       "LaunchArguments": "",
-      "CopyToTargetDirectoryPath": "",
+      "CopyToTargetDirectoryPath": "D:\\Dev\\ssmt4\\src-tauri\\resources\\DX12\\",
       "CopyToTargetDirectory": true,
       "LaunchGame": false,
       "Notice": "此配置用于编译后自动复制d3d12.dll到目标目录"

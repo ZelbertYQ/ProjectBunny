@@ -147,13 +147,17 @@ if ($Platform -eq 'x64') {
     $copyToTargetDirectoryPath = [string]$gameConfig.CopyToTargetDirectoryPath
     $hasLaunchGame = $null -ne $gameConfig.PSObject.Properties["LaunchGame"]
     $launchGame = if ($hasLaunchGame) { [bool]$gameConfig.LaunchGame } else { $true }
-    if (-not $dx12Exe) {
-        Write-Host "  Warning: GameId '$selectedGameId' has no TargetExe. Skipping DX12 post-build actions." -ForegroundColor Yellow
+
+    if (-not $dx12Exe -and -not $copyToTargetDirectoryPath) {
+        Write-Host "  Warning: GameId '$selectedGameId' has neither TargetExe nor CopyToTargetDirectoryPath. Skipping DX12 post-build actions." -ForegroundColor Yellow
         return
     }
-    if (-not (Test-Path $dx12Exe)) {
-        Write-Host "  Skipped DX12 post-build actions: executable not found: $dx12Exe" -ForegroundColor Yellow
-        return
+
+    if ($dx12Exe -and -not (Test-Path $dx12Exe)) {
+        Write-Host "  Skipped DX12 launch: executable not found: $dx12Exe" -ForegroundColor Yellow
+        $launchGame = $false
+    } elseif (-not $dx12Exe) {
+        $launchGame = $false
     }
 
     if ($dx12WorkingDirectory -and -not (Test-Path $dx12WorkingDirectory)) {
@@ -169,12 +173,14 @@ if ($Platform -eq 'x64') {
     $dx12TestDir = if ($copyToTargetDirectoryPath) { $copyToTargetDirectoryPath } else { Split-Path -Parent $dx12Exe }
     $dx12Dll = "$outDir\d3d12.dll"
     if ($copyToTargetDirectory -and (Test-Path $dx12Dll) -and (Test-Path $dx12TestDir)) {
-        $dx12ProcessName = [System.IO.Path]::GetFileNameWithoutExtension($dx12Exe)
-        $dx12Processes = Get-Process -Name $dx12ProcessName -ErrorAction SilentlyContinue
-        if ($dx12Processes) {
-            Write-Host "  Stopping running DX12 target before DLL copy..." -ForegroundColor Gray
-            $dx12Processes | Stop-Process -Force
-            Start-Sleep -Seconds 1
+        if ($dx12Exe) {
+            $dx12ProcessName = [System.IO.Path]::GetFileNameWithoutExtension($dx12Exe)
+            $dx12Processes = Get-Process -Name $dx12ProcessName -ErrorAction SilentlyContinue
+            if ($dx12Processes) {
+                Write-Host "  Stopping running DX12 target before DLL copy..." -ForegroundColor Gray
+                $dx12Processes | Stop-Process -Force
+                Start-Sleep -Seconds 1
+            }
         }
 
         $dx12CleanupPaths = @(
