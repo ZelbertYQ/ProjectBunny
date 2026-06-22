@@ -4,7 +4,7 @@ import os
 import json
 import re
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import ClassVar, Dict, List, Optional, Tuple
 
 
 @dataclass
@@ -53,6 +53,8 @@ class TraceResult:
 
 class TraceBrowser:
     """Parse ProjectBunny DX12 FrameAnalysis log.jsonl into command-list traces."""
+
+    _CACHE: ClassVar[Dict[Tuple[str, int, int], TraceResult]] = {}
 
     _DX11_NAME_RE = re.compile(
         r"^(?P<draw>\d+)-(?P<slot>(?:ib|vb\d+|[a-z]{2}-cb\d+|[a-z]{2}-t\d+|[a-z]{2}-u\d+|o\d+))"
@@ -296,6 +298,19 @@ class TraceBrowser:
 
     @classmethod
     def parse_result(cls, dump_dir: str) -> TraceResult:
+        log_path = os.path.join(dump_dir, "log.jsonl")
+        if os.path.isfile(log_path):
+            stat = os.stat(log_path)
+            key = (os.path.normpath(dump_dir), stat.st_mtime_ns, stat.st_size)
+            cached = cls._CACHE.get(key)
+            if cached is not None:
+                return cached
+            dx12 = cls._parse_dx12(dump_dir)
+            if dx12.command_lists:
+                cls._CACHE.clear()
+                cls._CACHE[key] = dx12
+                return dx12
+
         dx12 = cls._parse_dx12(dump_dir)
         if dx12.command_lists:
             return dx12

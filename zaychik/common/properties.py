@@ -19,6 +19,29 @@ def on_frameanalysis_index_changed(self: PropertyGroup, context: bpy.types.Conte
     ConfigManager.save_config(self)
 
 
+def on_trace_command_list_index_changed(
+    self: PropertyGroup,
+    context: bpy.types.Context,
+) -> None:
+    del self
+    try:
+        from ..ui.operators import FrameAnalysisUI
+
+        FrameAnalysisUI.load_selected_command_list(context)
+    except Exception:
+        pass
+
+
+def on_trace_draw_index_changed(self: PropertyGroup, context: bpy.types.Context) -> None:
+    del self
+    try:
+        from ..ui.operators import FrameAnalysisUI
+
+        FrameAnalysisUI.load_selected_draw_resources(context)
+    except Exception:
+        pass
+
+
 class ZAYCHIK_PG_frameanalysis_item(PropertyGroup):
     name: StringProperty(name="Name")
     path: StringProperty(name="Path")
@@ -133,9 +156,17 @@ class ZAYCHIK_PG_settings(PropertyGroup):
         update=on_frameanalysis_index_changed,
     ) # type: ignore
     trace_draw_items: CollectionProperty(type=ZAYCHIK_PG_trace_draw_item) # type: ignore
-    trace_draw_index: IntProperty(name="Draw Index", default=0) # type: ignore
+    trace_draw_index: IntProperty(
+        name="Draw Index",
+        default=0,
+        update=on_trace_draw_index_changed,
+    ) # type: ignore
     trace_command_list_items: CollectionProperty(type=ZAYCHIK_PG_trace_command_list_item) # type: ignore
-    trace_command_list_index: IntProperty(name="CommandList Index", default=0) # type: ignore
+    trace_command_list_index: IntProperty(
+        name="CommandList Index",
+        default=0,
+        update=on_trace_command_list_index_changed,
+    ) # type: ignore
     trace_resource_items: CollectionProperty(type=ZAYCHIK_PG_trace_resource_item) # type: ignore
     trace_resource_index: IntProperty(name="Resource Index", default=0) # type: ignore
 

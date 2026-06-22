@@ -14,8 +14,6 @@ from ..common.properties import (
 from .operators import (
     FrameAnalysisUI,
     ZAYCHIK_OT_import_dx12_dump,
-    ZAYCHIK_OT_load_trace_command_list,
-    ZAYCHIK_OT_load_trace_draw_resources,
     ZAYCHIK_OT_open_trace_metadata,
     ZAYCHIK_OT_open_trace_resource,
     ZAYCHIK_OT_refresh_frameanalysis_list,
@@ -136,13 +134,30 @@ class ZAYCHIK_PT_sidebar(Panel):
         layout.prop(settings, "vertex_layout_preset")
         layout.operator(ZAYCHIK_OT_import_dx12_dump.bl_idname, icon="IMPORT")
 
-        trace_box = layout.box()
-        trace_box.label(text="Trace Browser", icon="VIEWZOOM")
-        row = trace_box.row(align=True)
-        row.operator(ZAYCHIK_OT_scan_trace_browser.bl_idname, icon="FILE_REFRESH")
-        row.operator(ZAYCHIK_OT_load_trace_command_list.bl_idname, icon="DISCLOSURE_TRI_RIGHT")
+        box = layout.box()
+        box.label(text="Status")
+        box.label(text=settings.last_status)
 
-        trace_box.template_list(
+        selected_path = FrameAnalysisUI.selected_path(context)
+        if selected_path:
+            box.label(text=os.path.basename(selected_path))
+
+
+class ZAYCHIK_PT_frameanalysis(Panel):
+    bl_label = "FrameAnalysis"
+    bl_idname = "ZAYCHIK_PT_frameanalysis"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "Zaychik"
+
+    def draw(self, context: bpy.types.Context) -> None:
+        layout = self.layout
+        settings = context.scene.zaychik_settings
+
+        layout.operator(ZAYCHIK_OT_scan_trace_browser.bl_idname, icon="FILE_REFRESH")
+
+        layout.label(text="CommandLists")
+        layout.template_list(
             ZAYCHIK_UL_trace_command_list.bl_idname,
             "",
             settings,
@@ -151,12 +166,9 @@ class ZAYCHIK_PT_sidebar(Panel):
             "trace_command_list_index",
             rows=4,
         )
-        trace_box.operator(
-            ZAYCHIK_OT_load_trace_draw_resources.bl_idname,
-            icon="TRACKING_FORWARDS_SINGLE",
-        )
 
-        trace_box.template_list(
+        layout.label(text="Draw / Dispatch")
+        layout.template_list(
             ZAYCHIK_UL_trace_draw_list.bl_idname,
             "",
             settings,
@@ -165,7 +177,9 @@ class ZAYCHIK_PT_sidebar(Panel):
             "trace_draw_index",
             rows=5,
         )
-        trace_box.template_list(
+
+        layout.label(text="Resources")
+        layout.template_list(
             ZAYCHIK_UL_trace_resource_list.bl_idname,
             "",
             settings,
@@ -178,23 +192,15 @@ class ZAYCHIK_PT_sidebar(Panel):
         resource = FrameAnalysisUI.selected_trace_resource(context)
         if resource:
             if resource.summary:
-                summary_box = trace_box.box()
+                summary_box = layout.box()
                 summary_box.label(text="Metadata")
                 for chunk in resource.summary.split("; ")[:4]:
                     summary_box.label(text=chunk[:96])
 
-            row = trace_box.row(align=True)
+            row = layout.row(align=True)
             row.operator(ZAYCHIK_OT_open_trace_resource.bl_idname, icon="FILE")
             row.operator(ZAYCHIK_OT_reveal_trace_resource.bl_idname, icon="FILE_FOLDER")
             row.operator(ZAYCHIK_OT_open_trace_metadata.bl_idname, icon="TEXT")
-
-        box = layout.box()
-        box.label(text="Status")
-        box.label(text=settings.last_status)
-
-        selected_path = FrameAnalysisUI.selected_path(context)
-        if selected_path:
-            box.label(text=os.path.basename(selected_path))
 
 
 CLASSES = (
@@ -203,6 +209,7 @@ CLASSES = (
     ZAYCHIK_UL_trace_draw_list,
     ZAYCHIK_UL_trace_resource_list,
     ZAYCHIK_PT_sidebar,
+    ZAYCHIK_PT_frameanalysis,
 )
 
 

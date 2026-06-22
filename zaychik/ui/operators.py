@@ -167,6 +167,47 @@ class FrameAnalysisUI:
         return settings.trace_command_list_items[index].cmdlist
 
     @staticmethod
+    def load_selected_command_list(context: Context) -> bool:
+        settings = context.scene.zaychik_settings
+        dump_dir = FrameAnalysisUI.selected_path(context)
+        cmdlist = FrameAnalysisUI.selected_trace_command_list(context)
+        if not dump_dir or not cmdlist:
+            return False
+
+        command_list = TraceBrowser.find_command_list(
+            Paths.normalize(bpy.path.abspath(dump_dir).strip()),
+            cmdlist,
+        )
+        if command_list is None:
+            settings.trace_draw_items.clear()
+            settings.trace_resource_items.clear()
+            return False
+
+        FrameAnalysisUI.populate_trace_draws(context, command_list.draws)
+        if command_list.draws:
+            FrameAnalysisUI.populate_trace_resources(context, command_list.draws[0].resources)
+        return True
+
+    @staticmethod
+    def load_selected_draw_resources(context: Context) -> bool:
+        settings = context.scene.zaychik_settings
+        dump_dir = FrameAnalysisUI.selected_path(context)
+        draw_number = FrameAnalysisUI.selected_trace_draw_number(context)
+        if not dump_dir or draw_number is None:
+            return False
+
+        draw = TraceBrowser.find_draw(
+            Paths.normalize(bpy.path.abspath(dump_dir).strip()),
+            draw_number,
+        )
+        if draw is None:
+            settings.trace_resource_items.clear()
+            return False
+
+        FrameAnalysisUI.populate_trace_resources(context, draw.resources)
+        return True
+
+    @staticmethod
     def open_path(path: str) -> None:
         if not path:
             raise FileNotFoundError("No path selected")
@@ -310,8 +351,8 @@ class ZAYCHIK_OT_import_dx12_dump(Operator):
 
 class ZAYCHIK_OT_scan_trace_browser(Operator):
     bl_idname = "zaychik.scan_trace_browser"
-    bl_label = "Scan Draw Resources"
-    bl_description = "Scan 3Dmigoto/DX11 FrameAnalysis files and group resources by draw"
+    bl_label = "Scan FrameAnalysis"
+    bl_description = "Scan DX12 log.jsonl and build CommandList -> Draw -> Resource relationships"
 
     def execute(self, context: Context) -> set[str]:
         settings = context.scene.zaychik_settings
@@ -322,11 +363,7 @@ class ZAYCHIK_OT_scan_trace_browser(Operator):
 
         result = TraceBrowser.parse_result(Paths.normalize(bpy.path.abspath(dump_dir).strip()))
         FrameAnalysisUI.populate_trace_command_lists(context, result.command_lists)
-        if result.command_lists:
-            first = result.command_lists[0]
-            FrameAnalysisUI.populate_trace_draws(context, first.draws)
-            if first.draws:
-                FrameAnalysisUI.populate_trace_resources(context, first.draws[0].resources)
+        FrameAnalysisUI.load_selected_command_list(context)
 
         draw_count = sum(len(command_list.draws) for command_list in result.command_lists)
         settings.last_status = (
@@ -361,8 +398,7 @@ class ZAYCHIK_OT_load_trace_command_list(Operator):
             return {"CANCELLED"}
 
         FrameAnalysisUI.populate_trace_draws(context, command_list.draws)
-        if command_list.draws:
-            FrameAnalysisUI.populate_trace_resources(context, command_list.draws[0].resources)
+        FrameAnalysisUI.load_selected_draw_resources(context)
         settings.last_status = (
             f"Loaded {len(command_list.draws)} draw/dispatch call(s) for {cmdlist}"
         )
@@ -383,17 +419,11 @@ class ZAYCHIK_OT_load_trace_draw_resources(Operator):
             self.report({"ERROR"}, "Please scan and select a draw/dispatch call first")
             return {"CANCELLED"}
 
-        draw = TraceBrowser.find_draw(
-            Paths.normalize(bpy.path.abspath(dump_dir).strip()),
-            draw_number,
-        )
-        if draw is None:
+        if not FrameAnalysisUI.load_selected_draw_resources(context):
             self.report({"WARNING"}, "Selected draw was not found in the dump")
-            settings.trace_resource_items.clear()
             return {"CANCELLED"}
 
-        FrameAnalysisUI.populate_trace_resources(context, draw.resources)
-        settings.last_status = f"Loaded {len(draw.resources)} resource(s) for draw {draw.draw:06d}"
+        settings.last_status = f"Loaded resource(s) for draw {draw_number:06d}"
         self.report({"INFO"}, settings.last_status)
         return {"FINISHED"}
 
