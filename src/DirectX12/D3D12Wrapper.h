@@ -7,4 +7,6 @@
 void DX12Initialize(HINSTANCE module);
 void DX12Shutdown();
 void DX12InstallDXGIHooks();
+HMODULE DX12LoadRealD3D12();
+void DX12UnloadRealD3D12();
 

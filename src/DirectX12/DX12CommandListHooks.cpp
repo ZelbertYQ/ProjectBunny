@@ -242,6 +242,60 @@ struct ThreadLocalCommandListOriginal
 };
 
 static thread_local ThreadLocalCommandListOriginal tCommandListOriginals[64];
+static thread_local ThreadLocalCommandListOriginal tCommandQueueOriginals[32];
+
+template <typename T>
+static T GetVTableOriginal(void *object, UINT slot, T fallback, const char *name)
+{
+	if (object) {
+		void **vtable = *reinterpret_cast<void***>(object);
+		if (vtable) {
+			void *target = vtable[slot];
+			void *original = DX12GetOriginalFunction(target);
+			if (original)
+				return reinterpret_cast<T>(original);
+		}
+	}
+
+	if (fallback)
+		return fallback;
+
+	DX12LogJsonFunc(name ? name : "D3D12::Unknown",
+		"\"event\":\"MissingOriginal\",\"this\":\"%p\",\"slot\":%u",
+		object, slot);
+	return nullptr;
+}
+
+template <typename T>
+static T GetCommandQueueOriginal(ID3D12CommandQueue *queue, UINT slot, T fallback, const char *name)
+{
+	if (queue) {
+		void **vtable = *reinterpret_cast<void***>(queue);
+		if (vtable) {
+			void *target = vtable[slot];
+			if (slot < ARRAYSIZE(tCommandQueueOriginals) &&
+				tCommandQueueOriginals[slot].target == target &&
+				tCommandQueueOriginals[slot].original)
+				return reinterpret_cast<T>(tCommandQueueOriginals[slot].original);
+
+			void *original = DX12GetOriginalFunction(target);
+			if (slot < ARRAYSIZE(tCommandQueueOriginals) && original) {
+				tCommandQueueOriginals[slot].target = target;
+				tCommandQueueOriginals[slot].original = original;
+			}
+			if (original)
+				return reinterpret_cast<T>(original);
+		}
+	}
+
+	if (fallback)
+		return fallback;
+
+	DX12LogJsonFunc(name ? name : "ID3D12CommandQueue::Unknown",
+		"\"event\":\"MissingOriginal\",\"this\":\"%p\",\"slot\":%u",
+		queue, slot);
+	return nullptr;
+}
 
 template <typename T>
 static T GetCommandListOriginal(
@@ -277,6 +331,9 @@ static T GetCommandListOriginal(
 
 #define DX12_CL_ORIG(commandList, slot, type, name) \
 	GetCommandListOriginal<type>(commandList, slot, gOrig##name, "ID3D12GraphicsCommandList::" #name)
+
+#define DX12_QUEUE_ORIG(queue, slot, type, name) \
+	GetCommandQueueOriginal<type>(queue, slot, gOrigQueue##name, "ID3D12CommandQueue::" #name)
 
 static void RegisterCommandList(IUnknown *commandList, ID3D12PipelineState *initialState)
 {
@@ -369,9 +426,12 @@ static void STDMETHODCALLTYPE HookedQueueUpdateTileMappings(
 	LogDX12Call("ID3D12CommandQueue::UpdateTileMappings", queue,
 		" resource=%p regions=%u heap=%p ranges=%u flags=0x%x",
 		resource, numResourceRegions, heap, numRanges, static_cast<UINT>(flags));
-	gOrigQueueUpdateTileMappings(queue, resource, numResourceRegions,
-		resourceRegionStartCoordinates, resourceRegionSizes, heap, numRanges,
-		rangeFlags, heapRangeStartOffsets, rangeTileCounts, flags);
+	PFN_QUEUE_UPDATE_TILE_MAPPINGS original =
+		DX12_QUEUE_ORIG(queue, 8, PFN_QUEUE_UPDATE_TILE_MAPPINGS, UpdateTileMappings);
+	if (original)
+		original(queue, resource, numResourceRegions,
+			resourceRegionStartCoordinates, resourceRegionSizes, heap, numRanges,
+			rangeFlags, heapRangeStartOffsets, rangeTileCounts, flags);
 }
 
 static void STDMETHODCALLTYPE HookedQueueCopyTileMappings(
@@ -382,8 +442,11 @@ static void STDMETHODCALLTYPE HookedQueueCopyTileMappings(
 {
 	LogDX12Call("ID3D12CommandQueue::CopyTileMappings", queue,
 		" dst=%p src=%p flags=0x%x", dstResource, srcResource, static_cast<UINT>(flags));
-	gOrigQueueCopyTileMappings(queue, dstResource, dstRegionStartCoordinate,
-		srcResource, srcRegionStartCoordinate, regionSize, flags);
+	PFN_QUEUE_COPY_TILE_MAPPINGS original =
+		DX12_QUEUE_ORIG(queue, 9, PFN_QUEUE_COPY_TILE_MAPPINGS, CopyTileMappings);
+	if (original)
+		original(queue, dstResource, dstRegionStartCoordinate,
+			srcResource, srcRegionStartCoordinate, regionSize, flags);
 }
 
 static void STDMETHODCALLTYPE HookedQueueExecuteCommandLists(
@@ -392,27 +455,39 @@ static void STDMETHODCALLTYPE HookedQueueExecuteCommandLists(
 	LogDX12Call("ID3D12CommandQueue::ExecuteCommandLists", queue, " count=%u", numCommandLists);
 	for (UINT i = 0; commandLists && i < numCommandLists; ++i)
 		RegisterCommandList(commandLists[i], nullptr);
-	gOrigQueueExecuteCommandLists(queue, numCommandLists, commandLists);
+	PFN_QUEUE_EXECUTE_COMMAND_LISTS original =
+		DX12_QUEUE_ORIG(queue, 10, PFN_QUEUE_EXECUTE_COMMAND_LISTS, ExecuteCommandLists);
+	if (original)
+		original(queue, numCommandLists, commandLists);
 }
 
 static void STDMETHODCALLTYPE HookedQueueSetMarker(
 	ID3D12CommandQueue *queue, UINT metadata, const void *data, UINT size)
 {
 	LogDX12Call("ID3D12CommandQueue::SetMarker", queue, " metadata=%u size=%u", metadata, size);
-	gOrigQueueSetMarker(queue, metadata, data, size);
+	PFN_QUEUE_SET_MARKER original =
+		DX12_QUEUE_ORIG(queue, 11, PFN_QUEUE_SET_MARKER, SetMarker);
+	if (original)
+		original(queue, metadata, data, size);
 }
 
 static void STDMETHODCALLTYPE HookedQueueBeginEvent(
 	ID3D12CommandQueue *queue, UINT metadata, const void *data, UINT size)
 {
 	LogDX12Call("ID3D12CommandQueue::BeginEvent", queue, " metadata=%u size=%u", metadata, size);
-	gOrigQueueBeginEvent(queue, metadata, data, size);
+	PFN_QUEUE_BEGIN_EVENT original =
+		DX12_QUEUE_ORIG(queue, 12, PFN_QUEUE_BEGIN_EVENT, BeginEvent);
+	if (original)
+		original(queue, metadata, data, size);
 }
 
 static void STDMETHODCALLTYPE HookedQueueEndEvent(ID3D12CommandQueue *queue)
 {
 	LogDX12Call("ID3D12CommandQueue::EndEvent", queue);
-	gOrigQueueEndEvent(queue);
+	PFN_QUEUE_END_EVENT original =
+		DX12_QUEUE_ORIG(queue, 13, PFN_QUEUE_END_EVENT, EndEvent);
+	if (original)
+		original(queue);
 }
 
 static HRESULT STDMETHODCALLTYPE HookedQueueSignal(
@@ -420,7 +495,9 @@ static HRESULT STDMETHODCALLTYPE HookedQueueSignal(
 {
 	LogDX12Call("ID3D12CommandQueue::Signal", queue, " fence=%p value=%llu",
 		fence, static_cast<unsigned long long>(value));
-	return gOrigQueueSignal(queue, fence, value);
+	PFN_QUEUE_SIGNAL original =
+		DX12_QUEUE_ORIG(queue, 14, PFN_QUEUE_SIGNAL, Signal);
+	return original ? original(queue, fence, value) : E_FAIL;
 }
 
 static HRESULT STDMETHODCALLTYPE HookedQueueWait(
@@ -428,21 +505,27 @@ static HRESULT STDMETHODCALLTYPE HookedQueueWait(
 {
 	LogDX12Call("ID3D12CommandQueue::Wait", queue, " fence=%p value=%llu",
 		fence, static_cast<unsigned long long>(value));
-	return gOrigQueueWait(queue, fence, value);
+	PFN_QUEUE_WAIT original =
+		DX12_QUEUE_ORIG(queue, 15, PFN_QUEUE_WAIT, Wait);
+	return original ? original(queue, fence, value) : E_FAIL;
 }
 
 static HRESULT STDMETHODCALLTYPE HookedQueueGetTimestampFrequency(
 	ID3D12CommandQueue *queue, UINT64 *frequency)
 {
 	LogDX12Call("ID3D12CommandQueue::GetTimestampFrequency", queue);
-	return gOrigQueueGetTimestampFrequency(queue, frequency);
+	PFN_QUEUE_GET_TIMESTAMP_FREQUENCY original =
+		DX12_QUEUE_ORIG(queue, 16, PFN_QUEUE_GET_TIMESTAMP_FREQUENCY, GetTimestampFrequency);
+	return original ? original(queue, frequency) : E_FAIL;
 }
 
 static HRESULT STDMETHODCALLTYPE HookedQueueGetClockCalibration(
 	ID3D12CommandQueue *queue, UINT64 *gpuTimestamp, UINT64 *cpuTimestamp)
 {
 	LogDX12Call("ID3D12CommandQueue::GetClockCalibration", queue);
-	return gOrigQueueGetClockCalibration(queue, gpuTimestamp, cpuTimestamp);
+	PFN_QUEUE_GET_CLOCK_CALIBRATION original =
+		DX12_QUEUE_ORIG(queue, 17, PFN_QUEUE_GET_CLOCK_CALIBRATION, GetClockCalibration);
+	return original ? original(queue, gpuTimestamp, cpuTimestamp) : E_FAIL;
 }
 
 static HRESULT STDMETHODCALLTYPE HookedCloseCommandList(ID3D12GraphicsCommandList *commandList)

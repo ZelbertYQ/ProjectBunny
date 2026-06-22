@@ -39,6 +39,7 @@ add_subdirectory(3rdparty/crc32c-hw-1.0.5)
 add_subdirectory(3rdparty/DirectXTK)
 
 # ---- 子项目 ----
+add_subdirectory(src/Core)
 add_subdirectory(src/BinaryDecompiler)
 add_subdirectory(src/D3D_Shaders)
 add_subdirectory(src/D3DCompiler_46)

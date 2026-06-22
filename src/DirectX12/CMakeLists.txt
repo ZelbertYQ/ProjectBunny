@@ -14,6 +14,7 @@ add_library(DirectX12 SHARED
     DX12Overlay.cpp
     DX12ResourceDump.cpp
     DX12ResourceTracker.cpp
+    DX12Runtime.cpp
     DX12ShaderDump.cpp
     DX12State.cpp
     DXGIHooks.cpp
@@ -28,6 +29,7 @@ target_include_directories(DirectX12 PRIVATE
 )
 
 target_link_libraries(DirectX12 PRIVATE
+    BunnyCore
     Nektra::NktHookLib
     crc32c
     dxgi.lib

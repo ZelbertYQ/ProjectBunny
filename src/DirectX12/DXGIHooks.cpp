@@ -255,7 +255,7 @@ static HRESULT STDMETHODCALLTYPE HookedCreateSwapChainForComposition(
 static HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain *swapChain, UINT syncInterval, UINT flags)
 {
 	LONG trace = InterlockedIncrement(&gPresentTraceCount);
-	if (trace <= 8) {
+	if (trace <= 64 || (trace % 300) == 0) {
 		DX12LogJsonFunc("IDXGISwapChain::PresentEnter",
 			"\"swapchain\":\"%p\",\"sync\":%u,\"flags\":\"0x%x\"", swapChain, syncInterval, flags);
 	}
@@ -267,7 +267,7 @@ static HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain *swapChain, UINT s
 		return DXGI_ERROR_INVALID_CALL;
 	HRESULT hr = original(swapChain, syncInterval, flags);
 	DX12IncrementPresentCount();
-	if (trace <= 8) {
+	if (trace <= 64 || (trace % 300) == 0) {
 		DX12LogJsonFunc("IDXGISwapChain::PresentLeave",
 			"\"swapchain\":\"%p\",\"hr\":\"0x%lx\",\"present\":%ld",
 			swapChain, hr, DX12GetPresentCount());
@@ -297,7 +297,7 @@ static HRESULT STDMETHODCALLTYPE HookedPresent1(
 	IDXGISwapChain1 *swapChain, UINT syncInterval, UINT flags, const DXGI_PRESENT_PARAMETERS *presentParameters)
 {
 	LONG trace = InterlockedIncrement(&gPresentTraceCount);
-	if (trace <= 8) {
+	if (trace <= 64 || (trace % 300) == 0) {
 		DX12LogJsonFunc("IDXGISwapChain1::Present1Enter",
 			"\"swapchain\":\"%p\",\"sync\":%u,\"flags\":\"0x%x\"", swapChain, syncInterval, flags);
 	}
@@ -309,7 +309,7 @@ static HRESULT STDMETHODCALLTYPE HookedPresent1(
 		return DXGI_ERROR_INVALID_CALL;
 	HRESULT hr = original(swapChain, syncInterval, flags, presentParameters);
 	DX12IncrementPresentCount();
-	if (trace <= 8) {
+	if (trace <= 64 || (trace % 300) == 0) {
 		DX12LogJsonFunc("IDXGISwapChain1::Present1Leave",
 			"\"swapchain\":\"%p\",\"hr\":\"0x%lx\",\"present\":%ld",
 			swapChain, hr, DX12GetPresentCount());

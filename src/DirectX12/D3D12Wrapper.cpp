@@ -3,14 +3,90 @@
 #include <Shlwapi.h>
 
 #include "DX12DeviceHooks.h"
-#include "DX12Overlay.h"
+#include "DX12Runtime.h"
 #include "DX12State.h"
 #include "DXGIHooks.h"
+#include "util_min.h"
 
 static HMODULE gRealD3D12 = nullptr;
-static bool gInitialized = false;
 
 static HMODULE LoadRealD3D12();
+
+static bool VerifyIntendedTarget(HINSTANCE module)
+{
+	wchar_t ourPath[MAX_PATH], exePath[MAX_PATH];
+	wchar_t *ourBase = nullptr, *exeBase = nullptr;
+	HANDLE file = INVALID_HANDLE_VALUE;
+	char *buffer = nullptr;
+	DWORD fileSize = 0, readSize = 0;
+	const char *section = nullptr;
+	char target[MAX_PATH];
+	wchar_t targetW[MAX_PATH];
+	size_t targetLen = 0, exeLen = 0;
+	bool result = false;
+
+	if (!GetModuleFileNameW(module, ourPath, MAX_PATH))
+		return false;
+	if (!GetModuleFileNameW(nullptr, exePath, MAX_PATH))
+		return false;
+
+	ourBase = wcsrchr(ourPath, L'\\');
+	exeBase = wcsrchr(exePath, L'\\');
+	if (!ourBase || !exeBase)
+		return false;
+
+	*(ourBase++) = L'\0';
+	*(exeBase++) = L'\0';
+
+	if (!_wcsicmp(ourPath, exePath))
+		return true;
+	if (wcsstr(ourPath, exePath))
+		return true;
+
+	*(exeBase - 1) = L'\\';
+	wcsncat_s(ourPath, MAX_PATH, L"\\d3dx.ini", _TRUNCATE);
+
+	file = CreateFileW(ourPath, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+	if (file == INVALID_HANDLE_VALUE)
+		return false;
+
+	fileSize = GetFileSize(file, nullptr);
+	buffer = new char[fileSize + 1];
+	if (!buffer)
+		goto out_close;
+
+	if (!ReadFile(file, buffer, fileSize, &readSize, nullptr) || fileSize != readSize)
+		goto out_free;
+	buffer[fileSize] = '\0';
+
+	section = find_ini_section_lite(buffer, "loader");
+	if (!section)
+		goto out_free;
+	if (!find_ini_setting_lite(section, "target", target, MAX_PATH))
+		goto out_free;
+	if (!MultiByteToWideChar(CP_UTF8, 0, target, -1, targetW, MAX_PATH))
+		goto out_free;
+
+	targetLen = wcslen(targetW);
+	exeLen = wcslen(exePath);
+	if (exeLen < targetLen)
+		goto out_free;
+	if (targetW[0] != L'\\' && exeLen > targetLen && exePath[exeLen - targetLen - 1] != L'\\')
+		goto out_free;
+
+	result = !_wcsicmp(exePath + exeLen - targetLen, targetW);
+	if (result) {
+		HMODULE handle = nullptr;
+		GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+			reinterpret_cast<LPCWSTR>(VerifyIntendedTarget), &handle);
+	}
+
+out_free:
+	delete [] buffer;
+out_close:
+	CloseHandle(file);
+	return result;
+}
 
 typedef HRESULT(WINAPI *PFN_D3D12_CREATE_DEVICE_LOCAL)(
 	IUnknown*, D3D_FEATURE_LEVEL, REFIID, void**);
@@ -126,50 +202,28 @@ static HMODULE LoadRealD3D12()
 	return gRealD3D12;
 }
 
-static DWORD WINAPI DX12WorkerThread(void*)
-{
-	DX12Log("DX12 worker thread started\n");
-	LoadRealD3D12();
-
-	for (int i = 0; i < 200; ++i) {
-		DX12InstallDXGIHooks();
-		Sleep(50);
-	}
-
-	return 0;
-}
-
 void DX12Initialize(HINSTANCE module)
 {
-	if (gInitialized)
-		return;
-	gInitialized = true;
-
-	DX12SetModule(module);
-	DX12OpenLogFile();
-	DX12Log("\n*** 3DMigoto DX12 proxy initialized - frame analysis logging ready ***\n");
-
-	HANDLE thread = CreateThread(nullptr, 0, DX12WorkerThread, nullptr, 0, nullptr);
-	if (thread)
-		CloseHandle(thread);
-
-	HANDLE overlayThread = CreateThread(nullptr, 0, DX12OverlayThread, nullptr, 0, nullptr);
-	if (overlayThread)
-		CloseHandle(overlayThread);
+	BunnyDX12RuntimeInitialize(module, DX12LoadRealD3D12);
 }
 
 void DX12Shutdown()
 {
-	DX12Log("*** 3DMigoto DX12 proxy shutting down ***\n");
-	DX12CloseOverlayWindow();
-	DX12UnhookAll();
+	BunnyDX12RuntimeShutdown();
+	DX12UnloadRealD3D12();
+}
 
+HMODULE DX12LoadRealD3D12()
+{
+	return LoadRealD3D12();
+}
+
+void DX12UnloadRealD3D12()
+{
 	if (gRealD3D12) {
 		FreeLibrary(gRealD3D12);
 		gRealD3D12 = nullptr;
 	}
-
-	DX12CloseLogFile();
 }
 
 extern "C" HRESULT WINAPI D3D12CreateDevice(
@@ -336,11 +390,18 @@ extern "C" UINT_PTR WINAPI GetBehaviorValue(
 	return CallRealD3D12Proc("GetBehaviorValue", a1, a2, a3, a4, a5, a6, a7, a8);
 }
 
+extern "C" LRESULT CALLBACK CBTProc(_In_ int nCode, _In_ WPARAM wParam, _In_ LPARAM lParam)
+{
+	return CallNextHookEx(nullptr, nCode, wParam, lParam);
+}
+
 BOOL WINAPI DllMain(HINSTANCE module, DWORD reason, LPVOID)
 {
 	switch (reason) {
 	case DLL_PROCESS_ATTACH:
 		DisableThreadLibraryCalls(module);
+		if (!VerifyIntendedTarget(module))
+			return FALSE;
 		DX12Initialize(module);
 		break;
 	case DLL_PROCESS_DETACH:

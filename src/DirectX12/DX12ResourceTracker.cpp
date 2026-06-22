@@ -103,6 +103,25 @@ static PFN_CREATE_COMMITTED_RESOURCE3 gOrigCreateCommittedResource3 = nullptr;
 static PFN_CREATE_PLACED_RESOURCE2 gOrigCreatePlacedResource2 = nullptr;
 static PFN_CREATE_RESERVED_RESOURCE2 gOrigCreateReservedResource2 = nullptr;
 
+template <typename T>
+static T GetDeviceOriginal(void *device, UINT slot, T fallback, const char *name)
+{
+	if (device) {
+		void **vtable = *reinterpret_cast<void***>(device);
+		if (vtable) {
+			void *original = DX12GetOriginalFunction(vtable[slot]);
+			if (original)
+				return reinterpret_cast<T>(original);
+		}
+	}
+	if (fallback)
+		return fallback;
+	DX12LogJsonFunc(name ? name : "ID3D12Device::Unknown",
+		"\"event\":\"MissingOriginal\",\"this\":\"%p\",\"slot\":%u",
+		device, slot);
+	return nullptr;
+}
+
 struct RootSignatureRecord
 {
 	ID3D12RootSignature *rootSignature = nullptr;
@@ -844,7 +863,9 @@ static void RecordDescriptorCopyRange(
 static HRESULT STDMETHODCALLTYPE HookedCreateDescriptorHeap(
 	ID3D12Device *device, const D3D12_DESCRIPTOR_HEAP_DESC *desc, REFIID riid, void **heap)
 {
-	HRESULT hr = gOrigCreateDescriptorHeap(device, desc, riid, heap);
+	auto original = GetDeviceOriginal(
+		device, 14, gOrigCreateDescriptorHeap, "ID3D12Device::CreateDescriptorHeap");
+	HRESULT hr = original ? original(device, desc, riid, heap) : E_FAIL;
 	if (SUCCEEDED(hr) && desc && heap && *heap) {
 		ID3D12DescriptorHeap *descriptorHeap = nullptr;
 		if (SUCCEEDED(static_cast<IUnknown*>(*heap)->QueryInterface(IID_PPV_ARGS(&descriptorHeap)))) {
@@ -868,7 +889,9 @@ static HRESULT STDMETHODCALLTYPE HookedCreateRootSignature(
 	ID3D12Device *device, UINT nodeMask, const void *blob, SIZE_T blobLength,
 	REFIID riid, void **rootSignature)
 {
-	HRESULT hr = gOrigCreateRootSignature(device, nodeMask, blob, blobLength, riid, rootSignature);
+	auto original = GetDeviceOriginal(
+		device, 16, gOrigCreateRootSignature, "ID3D12Device::CreateRootSignature");
+	HRESULT hr = original ? original(device, nodeMask, blob, blobLength, riid, rootSignature) : E_FAIL;
 	if (SUCCEEDED(hr) && blob && blobLength && rootSignature && *rootSignature) {
 		RootSignatureRecord record;
 		record.rootSignature = static_cast<ID3D12RootSignature*>(*rootSignature);
@@ -888,7 +911,11 @@ static void STDMETHODCALLTYPE HookedCreateConstantBufferView(
 	ID3D12Device *device, const D3D12_CONSTANT_BUFFER_VIEW_DESC *desc,
 	D3D12_CPU_DESCRIPTOR_HANDLE destDescriptor)
 {
-	gOrigCreateConstantBufferView(device, desc, destDescriptor);
+	auto original = GetDeviceOriginal(
+		device, 17, gOrigCreateConstantBufferView, "ID3D12Device::CreateConstantBufferView");
+	if (!original)
+		return;
+	original(device, desc, destDescriptor);
 	if (desc) {
 		DescriptorRecord record;
 		record.kind = "CBV";
@@ -906,7 +933,11 @@ static void STDMETHODCALLTYPE HookedCreateShaderResourceView(
 	ID3D12Device *device, ID3D12Resource *resource,
 	const D3D12_SHADER_RESOURCE_VIEW_DESC *desc, D3D12_CPU_DESCRIPTOR_HANDLE destDescriptor)
 {
-	gOrigCreateShaderResourceView(device, resource, desc, destDescriptor);
+	auto original = GetDeviceOriginal(
+		device, 18, gOrigCreateShaderResourceView, "ID3D12Device::CreateShaderResourceView");
+	if (!original)
+		return;
+	original(device, resource, desc, destDescriptor);
 	DescriptorRecord record;
 	record.kind = "SRV";
 	record.cpuHandle = destDescriptor.ptr;
@@ -923,7 +954,11 @@ static void STDMETHODCALLTYPE HookedCreateUnorderedAccessView(
 	ID3D12Device *device, ID3D12Resource *resource, ID3D12Resource *counterResource,
 	const D3D12_UNORDERED_ACCESS_VIEW_DESC *desc, D3D12_CPU_DESCRIPTOR_HANDLE destDescriptor)
 {
-	gOrigCreateUnorderedAccessView(device, resource, counterResource, desc, destDescriptor);
+	auto original = GetDeviceOriginal(
+		device, 19, gOrigCreateUnorderedAccessView, "ID3D12Device::CreateUnorderedAccessView");
+	if (!original)
+		return;
+	original(device, resource, counterResource, desc, destDescriptor);
 	DescriptorRecord record;
 	record.kind = "UAV";
 	record.cpuHandle = destDescriptor.ptr;
@@ -941,7 +976,11 @@ static void STDMETHODCALLTYPE HookedCreateRenderTargetView(
 	ID3D12Device *device, ID3D12Resource *resource,
 	const D3D12_RENDER_TARGET_VIEW_DESC *desc, D3D12_CPU_DESCRIPTOR_HANDLE destDescriptor)
 {
-	gOrigCreateRenderTargetView(device, resource, desc, destDescriptor);
+	auto original = GetDeviceOriginal(
+		device, 20, gOrigCreateRenderTargetView, "ID3D12Device::CreateRenderTargetView");
+	if (!original)
+		return;
+	original(device, resource, desc, destDescriptor);
 	DescriptorRecord record;
 	record.kind = "RTV";
 	record.cpuHandle = destDescriptor.ptr;
@@ -957,7 +996,11 @@ static void STDMETHODCALLTYPE HookedCreateDepthStencilView(
 	ID3D12Device *device, ID3D12Resource *resource,
 	const D3D12_DEPTH_STENCIL_VIEW_DESC *desc, D3D12_CPU_DESCRIPTOR_HANDLE destDescriptor)
 {
-	gOrigCreateDepthStencilView(device, resource, desc, destDescriptor);
+	auto original = GetDeviceOriginal(
+		device, 21, gOrigCreateDepthStencilView, "ID3D12Device::CreateDepthStencilView");
+	if (!original)
+		return;
+	original(device, resource, desc, destDescriptor);
 	DescriptorRecord record;
 	record.kind = "DSV";
 	record.cpuHandle = destDescriptor.ptr;
@@ -973,7 +1016,11 @@ static void STDMETHODCALLTYPE HookedCreateSampler(
 	ID3D12Device *device, const D3D12_SAMPLER_DESC *desc,
 	D3D12_CPU_DESCRIPTOR_HANDLE destDescriptor)
 {
-	gOrigCreateSampler(device, desc, destDescriptor);
+	auto original = GetDeviceOriginal(
+		device, 22, gOrigCreateSampler, "ID3D12Device::CreateSampler");
+	if (!original)
+		return;
+	original(device, desc, destDescriptor);
 	if (desc) {
 		DescriptorRecord record;
 		record.kind = "Sampler";
@@ -991,7 +1038,11 @@ static void STDMETHODCALLTYPE HookedCopyDescriptors(
 	const D3D12_CPU_DESCRIPTOR_HANDLE *srcDescriptorRangeStarts,
 	const UINT *srcDescriptorRangeSizes, D3D12_DESCRIPTOR_HEAP_TYPE descriptorHeapsType)
 {
-	gOrigCopyDescriptors(device, numDestDescriptorRanges, destDescriptorRangeStarts,
+	auto original = GetDeviceOriginal(
+		device, 23, gOrigCopyDescriptors, "ID3D12Device::CopyDescriptors");
+	if (!original)
+		return;
+	original(device, numDestDescriptorRanges, destDescriptorRangeStarts,
 		destDescriptorRangeSizes, numSrcDescriptorRanges, srcDescriptorRangeStarts,
 		srcDescriptorRangeSizes, descriptorHeapsType);
 
@@ -1034,7 +1085,11 @@ static void STDMETHODCALLTYPE HookedCopyDescriptorsSimple(
 	ID3D12Device *device, UINT numDescriptors, D3D12_CPU_DESCRIPTOR_HANDLE destDescriptorRangeStart,
 	D3D12_CPU_DESCRIPTOR_HANDLE srcDescriptorRangeStart, D3D12_DESCRIPTOR_HEAP_TYPE descriptorHeapsType)
 {
-	gOrigCopyDescriptorsSimple(device, numDescriptors, destDescriptorRangeStart,
+	auto original = GetDeviceOriginal(
+		device, 24, gOrigCopyDescriptorsSimple, "ID3D12Device::CopyDescriptorsSimple");
+	if (!original)
+		return;
+	original(device, numDescriptors, destDescriptorRangeStart,
 		srcDescriptorRangeStart, descriptorHeapsType);
 	RecordDescriptorCopyRange(device, descriptorHeapsType, destDescriptorRangeStart,
 		srcDescriptorRangeStart, numDescriptors);
@@ -1046,7 +1101,11 @@ static HRESULT STDMETHODCALLTYPE HookedCreateCommittedResource(
 	D3D12_RESOURCE_STATES initialState, const D3D12_CLEAR_VALUE *optimizedClearValue,
 	REFIID riid, void **resource)
 {
-	HRESULT hr = gOrigCreateCommittedResource(device, heapProperties, heapFlags, desc,
+	auto original = GetDeviceOriginal(
+		device, 27, gOrigCreateCommittedResource, "ID3D12Device::CreateCommittedResource");
+	if (!original)
+		return E_FAIL;
+	HRESULT hr = original(device, heapProperties, heapFlags, desc,
 		initialState, optimizedClearValue, riid, resource);
 	if (SUCCEEDED(hr) && resource && *resource) {
 		ID3D12Resource *d3dResource = nullptr;
@@ -1063,7 +1122,11 @@ static HRESULT STDMETHODCALLTYPE HookedCreatePlacedResource(
 	const D3D12_RESOURCE_DESC *desc, D3D12_RESOURCE_STATES initialState,
 	const D3D12_CLEAR_VALUE *optimizedClearValue, REFIID riid, void **resource)
 {
-	HRESULT hr = gOrigCreatePlacedResource(device, heap, heapOffset, desc,
+	auto original = GetDeviceOriginal(
+		device, 29, gOrigCreatePlacedResource, "ID3D12Device::CreatePlacedResource");
+	if (!original)
+		return E_FAIL;
+	HRESULT hr = original(device, heap, heapOffset, desc,
 		initialState, optimizedClearValue, riid, resource);
 	if (SUCCEEDED(hr) && resource && *resource) {
 		ID3D12Resource *d3dResource = nullptr;
@@ -1080,7 +1143,11 @@ static HRESULT STDMETHODCALLTYPE HookedCreateReservedResource(
 	D3D12_RESOURCE_STATES initialState, const D3D12_CLEAR_VALUE *optimizedClearValue,
 	REFIID riid, void **resource)
 {
-	HRESULT hr = gOrigCreateReservedResource(device, desc, initialState,
+	auto original = GetDeviceOriginal(
+		device, 30, gOrigCreateReservedResource, "ID3D12Device::CreateReservedResource");
+	if (!original)
+		return E_FAIL;
+	HRESULT hr = original(device, desc, initialState,
 		optimizedClearValue, riid, resource);
 	if (SUCCEEDED(hr) && resource && *resource) {
 		ID3D12Resource *d3dResource = nullptr;
@@ -1098,7 +1165,11 @@ static HRESULT STDMETHODCALLTYPE HookedCreateCommittedResource1(
 	D3D12_RESOURCE_STATES initialState, const D3D12_CLEAR_VALUE *optimizedClearValue,
 	ID3D12ProtectedResourceSession *protectedSession, REFIID riid, void **resource)
 {
-	HRESULT hr = gOrigCreateCommittedResource1(device, heapProperties, heapFlags, desc,
+	auto original = GetDeviceOriginal(
+		device, 53, gOrigCreateCommittedResource1, "ID3D12Device4::CreateCommittedResource1");
+	if (!original)
+		return E_FAIL;
+	HRESULT hr = original(device, heapProperties, heapFlags, desc,
 		initialState, optimizedClearValue, protectedSession, riid, resource);
 	if (SUCCEEDED(hr) && resource && *resource) {
 		ID3D12Resource *d3dResource = nullptr;
@@ -1115,7 +1186,11 @@ static HRESULT STDMETHODCALLTYPE HookedCreateReservedResource1(
 	D3D12_RESOURCE_STATES initialState, const D3D12_CLEAR_VALUE *optimizedClearValue,
 	ID3D12ProtectedResourceSession *protectedSession, REFIID riid, void **resource)
 {
-	HRESULT hr = gOrigCreateReservedResource1(device, desc, initialState,
+	auto original = GetDeviceOriginal(
+		device, 55, gOrigCreateReservedResource1, "ID3D12Device4::CreateReservedResource1");
+	if (!original)
+		return E_FAIL;
+	HRESULT hr = original(device, desc, initialState,
 		optimizedClearValue, protectedSession, riid, resource);
 	if (SUCCEEDED(hr) && resource && *resource) {
 		ID3D12Resource *d3dResource = nullptr;
@@ -1133,7 +1208,11 @@ static HRESULT STDMETHODCALLTYPE HookedCreateCommittedResource2(
 	D3D12_RESOURCE_STATES initialState, const D3D12_CLEAR_VALUE *optimizedClearValue,
 	ID3D12ProtectedResourceSession *protectedSession, REFIID riid, void **resource)
 {
-	HRESULT hr = gOrigCreateCommittedResource2(device, heapProperties, heapFlags, desc,
+	auto original = GetDeviceOriginal(
+		device, 69, gOrigCreateCommittedResource2, "ID3D12Device8::CreateCommittedResource2");
+	if (!original)
+		return E_FAIL;
+	HRESULT hr = original(device, heapProperties, heapFlags, desc,
 		initialState, optimizedClearValue, protectedSession, riid, resource);
 	if (SUCCEEDED(hr) && resource && *resource) {
 		ID3D12Resource *d3dResource = nullptr;
@@ -1151,7 +1230,11 @@ static HRESULT STDMETHODCALLTYPE HookedCreatePlacedResource1(
 	const D3D12_RESOURCE_DESC1 *desc, D3D12_RESOURCE_STATES initialState,
 	const D3D12_CLEAR_VALUE *optimizedClearValue, REFIID riid, void **resource)
 {
-	HRESULT hr = gOrigCreatePlacedResource1(device, heap, heapOffset, desc,
+	auto original = GetDeviceOriginal(
+		device, 70, gOrigCreatePlacedResource1, "ID3D12Device8::CreatePlacedResource1");
+	if (!original)
+		return E_FAIL;
+	HRESULT hr = original(device, heap, heapOffset, desc,
 		initialState, optimizedClearValue, riid, resource);
 	if (SUCCEEDED(hr) && resource && *resource) {
 		ID3D12Resource *d3dResource = nullptr;
@@ -1171,7 +1254,11 @@ static HRESULT STDMETHODCALLTYPE HookedCreateCommittedResource3(
 	ID3D12ProtectedResourceSession *protectedSession, UINT32 numCastableFormats,
 	const DXGI_FORMAT *castableFormats, REFIID riid, void **resource)
 {
-	HRESULT hr = gOrigCreateCommittedResource3(device, heapProperties, heapFlags, desc,
+	auto original = GetDeviceOriginal(
+		device, 76, gOrigCreateCommittedResource3, "ID3D12Device10::CreateCommittedResource3");
+	if (!original)
+		return E_FAIL;
+	HRESULT hr = original(device, heapProperties, heapFlags, desc,
 		initialLayout, optimizedClearValue, protectedSession, numCastableFormats,
 		castableFormats, riid, resource);
 	if (SUCCEEDED(hr) && resource && *resource) {
@@ -1192,7 +1279,11 @@ static HRESULT STDMETHODCALLTYPE HookedCreatePlacedResource2(
 	const D3D12_CLEAR_VALUE *optimizedClearValue, UINT32 numCastableFormats,
 	const DXGI_FORMAT *castableFormats, REFIID riid, void **resource)
 {
-	HRESULT hr = gOrigCreatePlacedResource2(device, heap, heapOffset, desc,
+	auto original = GetDeviceOriginal(
+		device, 77, gOrigCreatePlacedResource2, "ID3D12Device10::CreatePlacedResource2");
+	if (!original)
+		return E_FAIL;
+	HRESULT hr = original(device, heap, heapOffset, desc,
 		initialLayout, optimizedClearValue, numCastableFormats, castableFormats,
 		riid, resource);
 	if (SUCCEEDED(hr) && resource && *resource) {
@@ -1213,7 +1304,11 @@ static HRESULT STDMETHODCALLTYPE HookedCreateReservedResource2(
 	ID3D12ProtectedResourceSession *protectedSession, UINT32 numCastableFormats,
 	const DXGI_FORMAT *castableFormats, REFIID riid, void **resource)
 {
-	HRESULT hr = gOrigCreateReservedResource2(device, desc, initialLayout,
+	auto original = GetDeviceOriginal(
+		device, 78, gOrigCreateReservedResource2, "ID3D12Device10::CreateReservedResource2");
+	if (!original)
+		return E_FAIL;
+	HRESULT hr = original(device, desc, initialLayout,
 		optimizedClearValue, protectedSession, numCastableFormats, castableFormats,
 		riid, resource);
 	if (SUCCEEDED(hr) && resource && *resource) {

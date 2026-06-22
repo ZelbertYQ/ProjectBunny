@@ -20,3 +20,4 @@ EXPORTS
 	D3D12SerializeRootSignature @115
 	D3D12SerializeVersionedRootSignature @116
 	GetBehaviorValue @117
+	CBTProc
