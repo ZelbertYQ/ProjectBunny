@@ -321,6 +321,56 @@ void DX12BindingSetVertexBuffers(
 	ReleaseSRWLockExclusive(&gBindingLock);
 }
 
+bool DX12BindingGetCurrentIaState(
+	ID3D12GraphicsCommandList *commandList, DX12CurrentIaState *state)
+{
+	if (!commandList || !state)
+		return false;
+
+	*state = DX12CurrentIaState();
+	CommandListBindingState snapshot;
+	bool found = false;
+
+	AcquireSRWLockShared(&gBindingLock);
+	auto it = gCommandLists.find(commandList);
+	if (it != gCommandLists.end()) {
+		snapshot = it->second;
+		found = true;
+	}
+	ReleaseSRWLockShared(&gBindingLock);
+
+	if (!found)
+		return false;
+
+	for (UINT slot = 0; slot < MaxVertexBufferSlots; ++slot) {
+		if (!snapshot.vertexBufferValid[slot])
+			continue;
+		const D3D12_VERTEX_BUFFER_VIEW &view = snapshot.vertexBuffers[slot];
+		DX12CurrentIaBuffer buffer;
+		buffer.role = "VB";
+		buffer.gpuVa = view.BufferLocation;
+		buffer.size = view.SizeInBytes;
+		buffer.stride = view.StrideInBytes;
+		buffer.slot = slot;
+		buffer.resolved = DX12ResolveBufferResourceByGpuVa(
+			buffer.gpuVa, buffer.size, &buffer.resource);
+		state->vertexBuffers.push_back(buffer);
+	}
+
+	if (snapshot.indexBufferValid && snapshot.indexBuffer.BufferLocation &&
+		snapshot.indexBuffer.SizeInBytes) {
+		state->hasIndexBuffer = true;
+		state->indexBuffer.role = "IB";
+		state->indexBuffer.gpuVa = snapshot.indexBuffer.BufferLocation;
+		state->indexBuffer.size = snapshot.indexBuffer.SizeInBytes;
+		state->indexBuffer.format = static_cast<UINT>(snapshot.indexBuffer.Format);
+		state->indexBuffer.resolved = DX12ResolveBufferResourceByGpuVa(
+			state->indexBuffer.gpuVa, state->indexBuffer.size, &state->indexBuffer.resource);
+	}
+
+	return true;
+}
+
 void DX12BindingRecordDrawInstanced(
 	ID3D12GraphicsCommandList *commandList, UINT vertexCountPerInstance,
 	UINT instanceCount, UINT startVertexLocation, UINT startInstanceLocation)
@@ -671,6 +721,7 @@ struct FlatBufferRow
 	UINT stride = 0;
 	UINT slot = 0;
 	UINT format = 0;
+	uint32_t huntHash = 0;
 	bool resolved = false;
 	DX12BufferResourceSummary resource = {};
 };
@@ -690,17 +741,12 @@ struct BufferProducer
 	UINT64 end = 0;
 };
 
-static std::string MakeBufferKey(
-	const char *role, UINT64 gpuVa, UINT64 size, UINT stride, UINT slot, UINT format)
+static std::string MakeBufferKey(const char *role, uint32_t huntHash)
 {
 	char key[128];
-	sprintf_s(key, "%s|%llx|%llu|%u|%u|%u",
+	sprintf_s(key, "%s|%08x",
 		role ? role : "",
-		static_cast<unsigned long long>(gpuVa),
-		static_cast<unsigned long long>(size),
-		stride,
-		slot,
-		format);
+		huntHash);
 	return key;
 }
 
@@ -720,7 +766,11 @@ static const FlatBufferRow *GetOrAddBufferRow(
 	if (!rows || !rowByKey || gpuVa == 0 || size == 0)
 		return nullptr;
 
-	std::string key = MakeBufferKey(role, gpuVa, size, stride, slot, format);
+	DX12BufferResourceSummary resource;
+	const bool resolved = DX12ResolveBufferResourceByGpuVa(gpuVa, size, &resource);
+	const uint32_t huntHash = DX12HashBufferResourceView(
+		resolved ? &resource : nullptr, gpuVa, size);
+	std::string key = MakeBufferKey(role, huntHash);
 	auto found = rowByKey->find(key);
 	if (found != rowByKey->end() && found->second < rows->size())
 		return &(*rows)[found->second];
@@ -739,7 +789,9 @@ static const FlatBufferRow *GetOrAddBufferRow(
 	row.stride = stride;
 	row.slot = slot;
 	row.format = format;
-	row.resolved = DX12ResolveBufferResourceByGpuVa(gpuVa, size, &row.resource);
+	row.huntHash = huntHash;
+	row.resolved = resolved;
+	row.resource = resource;
 	(*rowByKey)[key] = rows->size();
 	rows->push_back(row);
 	return &rows->back();
@@ -822,6 +874,8 @@ static void AddFrameIaBufferRow(
 	row.slot = slot;
 	row.format = format;
 	row.resolved = DX12ResolveBufferResourceByGpuVa(gpuVa, size, &row.resource);
+	row.huntHash = DX12HashBufferResourceView(
+		row.resolved ? &row.resource : nullptr, gpuVa, size);
 	rows->push_back(row);
 }
 
@@ -998,6 +1052,7 @@ static DX12FrameIaBufferBinding FrameIaBufferFromFlatRow(const FlatBufferRow &ro
 	buffer.stride = row.stride;
 	buffer.slot = row.slot;
 	buffer.format = row.format;
+	buffer.huntHash = row.huntHash;
 	buffer.resolved = row.resolved;
 	buffer.resource = row.resource;
 	return buffer;
@@ -1153,7 +1208,7 @@ static void WriteFlatFrameAnalysisFiles(
 		DX12GetCurrentFrameResourceBindings(&resourceBindings);
 		ClassifyIaBufferSkinning(&buffers, resourceBindings);
 		fprintf(bufferFile,
-			"buffer_id,role,resource,file,gpu_va,resource_gpu_va,offset,size,stride,slot,format,"
+			"buffer_id,role,hunt_hash,resource,file,gpu_va,resource_gpu_va,offset,size,stride,slot,format,"
 			"resolved,current_state,has_current_state,heap_type,resource_size,skin_source,"
 			"producer_event,producer_draw,producer_dispatch,producer_pso,producer_bind,"
 			"producer_root,producer_reg\n");
@@ -1163,9 +1218,10 @@ static void WriteFlatFrameAnalysisFiles(
 			wchar_t fileName[MAX_PATH];
 			DX12BuildIaBufferFileName(iaBuffer, fileName, ARRAYSIZE(fileName));
 			fprintf(bufferFile,
-				"%s,%s,%p,%S,0x%llx,0x%llx,%llu,%llu,%u,%u,%u,%u,0x%x,%u,%u,%llu,%s,%llu,%llu,%llu,%llu,%s,%u,%u\n",
+				"%s,%s,%08x,%p,%S,0x%llx,0x%llx,%llu,%llu,%u,%u,%u,%u,0x%x,%u,%u,%llu,%s,%llu,%llu,%llu,%llu,%s,%u,%u\n",
 				row.id.c_str(),
 				row.role.c_str(),
+				row.huntHash,
 				row.resolved ? row.resource.resource : nullptr,
 				fileName,
 				static_cast<unsigned long long>(row.gpuVa),

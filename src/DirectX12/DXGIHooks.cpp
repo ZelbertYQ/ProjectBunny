@@ -8,6 +8,7 @@
 #include "DX12HookManager.h"
 #include "DX12Input.h"
 #include "DX12Overlay.h"
+#include "DX12ShaderHunt.h"
 #include "DX12ShaderDump.h"
 #include "DX12State.h"
 
@@ -267,6 +268,8 @@ static HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain *swapChain, UINT s
 		return DXGI_ERROR_INVALID_CALL;
 	HRESULT hr = original(swapChain, syncInterval, flags);
 	DX12IncrementPresentCount();
+	if (DX12HuntShouldDrawOverlay() && !DX12GetOverlayWindow())
+		DX12DrawSwapChainText(swapChain);
 	if (trace <= 64 || (trace % 300) == 0) {
 		DX12LogJsonFunc("IDXGISwapChain::PresentLeave",
 			"\"swapchain\":\"%p\",\"hr\":\"0x%lx\",\"present\":%ld",
@@ -309,6 +312,8 @@ static HRESULT STDMETHODCALLTYPE HookedPresent1(
 		return DXGI_ERROR_INVALID_CALL;
 	HRESULT hr = original(swapChain, syncInterval, flags, presentParameters);
 	DX12IncrementPresentCount();
+	if (DX12HuntShouldDrawOverlay() && !DX12GetOverlayWindow())
+		DX12DrawSwapChainText(swapChain);
 	if (trace <= 64 || (trace % 300) == 0) {
 		DX12LogJsonFunc("IDXGISwapChain1::Present1Leave",
 			"\"swapchain\":\"%p\",\"hr\":\"0x%lx\",\"present\":%ld",

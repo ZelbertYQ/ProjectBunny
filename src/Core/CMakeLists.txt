@@ -3,7 +3,10 @@
 # ============================================================
 add_library(BunnyCore STATIC
     IniDocument.cpp
+    MigotoIniLoader.cpp
     MigotoConfig.cpp
+    MigotoShaderOverride.cpp
+    MigotoTextureOverride.cpp
     ${CMAKE_SOURCE_DIR}/src/common/ini_parser_lite.cpp
 )
 

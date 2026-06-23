@@ -1,6 +1,7 @@
 #include "DX12Runtime.h"
 
 #include "DX12Overlay.h"
+#include "DX12ModRuntime.h"
 #include "DX12State.h"
 #include "DXGIHooks.h"
 #include "MigotoConfig.h"
@@ -37,12 +38,16 @@ void BunnyDX12RuntimeInitialize(HINSTANCE module, DX12LoadRealD3D12Fn loadRealD3
 
 	std::wstring configPath = Bunny::FindDefaultConfigPath(module);
 	gConfigLoaded = gConfig.Load(configPath.c_str());
+	bool startOverlay = false;
 	if (gConfigLoaded) {
+		startOverlay = gConfig.Runtime().enableOverlay && !gConfig.Runtime().dx12SafeMode;
 		DX12LogJsonFunc("DX12Config",
-			"\"path\":\"%S\",\"safeMode\":%s,\"overlay\":%s",
+			"\"path\":\"%S\",\"safeMode\":%s,\"overlay\":%s,\"overlayStarted\":%s",
 			gConfig.Path().c_str(),
 			gConfig.Runtime().dx12SafeMode ? "true" : "false",
-			gConfig.Runtime().enableOverlay ? "true" : "false");
+			gConfig.Runtime().enableOverlay ? "true" : "false",
+			startOverlay ? "true" : "false");
+		DX12ModRuntimeLoad(gConfig.Path().c_str());
 	} else {
 		DX12LogJsonFunc("DX12Config",
 			"\"path\":\"%S\",\"status\":\"missing_or_invalid\",\"error\":\"%S\"",
@@ -53,7 +58,7 @@ void BunnyDX12RuntimeInitialize(HINSTANCE module, DX12LoadRealD3D12Fn loadRealD3
 	if (thread)
 		CloseHandle(thread);
 
-	if (!gConfigLoaded || gConfig.Runtime().enableOverlay) {
+	if (startOverlay) {
 		HANDLE overlayThread = CreateThread(nullptr, 0, DX12OverlayThread, nullptr, 0, nullptr);
 		if (overlayThread)
 			CloseHandle(overlayThread);

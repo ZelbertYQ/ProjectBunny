@@ -4,12 +4,15 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <unordered_map>
 
 #include "DX12BindingTracker.h"
 #include "DX12FrameAnalysis.h"
 #include "DX12HookManager.h"
+#include "DX12ModRuntime.h"
 #include "DX12ResourceTracker.h"
 #include "DX12ShaderDump.h"
+#include "DX12ShaderHunt.h"
 #include "DX12State.h"
 
 typedef HRESULT(STDMETHODCALLTYPE *PFN_CREATE_COMMAND_QUEUE)(
@@ -194,6 +197,8 @@ static PFN_COMMAND_LIST_SET_MARKER gOrigCommandListSetMarker = nullptr;
 static PFN_COMMAND_LIST_BEGIN_EVENT gOrigCommandListBeginEvent = nullptr;
 static PFN_COMMAND_LIST_END_EVENT gOrigCommandListEndEvent = nullptr;
 static PFN_EXECUTE_INDIRECT gOrigExecuteIndirect = nullptr;
+static SRWLOCK gCommandListStateLock = SRWLOCK_INIT;
+static std::unordered_map<ID3D12GraphicsCommandList*, ID3D12PipelineState*> gActivePipelineStates;
 
 static void LogDX12Call(const char *name, const void *object, const char *fmt = nullptr, ...)
 {
@@ -205,6 +210,38 @@ static void LogDX12Call(const char *name, const void *object, const char *fmt = 
 static bool ShouldTrackBindings()
 {
 	return DX12FrameAnalysisIsCapturing() || DX12ShaderDumpIsCapturingFrame();
+}
+
+static void RememberActivePipelineState(
+	ID3D12GraphicsCommandList *commandList, ID3D12PipelineState *pipelineState)
+{
+	if (!commandList)
+		return;
+	AcquireSRWLockExclusive(&gCommandListStateLock);
+	gActivePipelineStates[commandList] = pipelineState;
+	ReleaseSRWLockExclusive(&gCommandListStateLock);
+}
+
+static ID3D12PipelineState *GetActivePipelineState(ID3D12GraphicsCommandList *commandList)
+{
+	if (!commandList)
+		return nullptr;
+	AcquireSRWLockShared(&gCommandListStateLock);
+	auto it = gActivePipelineStates.find(commandList);
+	ID3D12PipelineState *pipelineState =
+		it == gActivePipelineStates.end() ? nullptr : it->second;
+	ReleaseSRWLockShared(&gCommandListStateLock);
+	return pipelineState;
+}
+
+static bool ShouldSkipIaForMod(ID3D12GraphicsCommandList *commandList)
+{
+	uint32_t ibHash = 0;
+	uint32_t vbHashes[32] = {};
+	size_t vbHashCount = 0;
+	if (!DX12HuntGetIaHashes(commandList, &ibHash, vbHashes, ARRAYSIZE(vbHashes), &vbHashCount))
+		return false;
+	return DX12ModShouldSkipIa(ibHash, vbHashes, vbHashCount);
 }
 
 static void FormatVertexBufferViews(
@@ -543,6 +580,8 @@ static HRESULT STDMETHODCALLTYPE HookedResetCommandList(
 		" allocator=%p initialPso=%p", allocator, initialState);
 	if (ShouldTrackBindings())
 		DX12BindingResetCommandList(commandList, initialState);
+	RememberActivePipelineState(commandList, initialState);
+	DX12HuntResetCommandList(commandList, initialState);
 	PFN_RESET_COMMAND_LIST original = DX12_CL_ORIG(commandList, 10, PFN_RESET_COMMAND_LIST, ResetCommandList);
 	return original ? original(commandList, allocator, initialState) : E_FAIL;
 }
@@ -568,6 +607,18 @@ static void STDMETHODCALLTYPE HookedDrawInstanced(
 	if (ShouldTrackBindings())
 		DX12BindingRecordDrawInstanced(commandList, vertexCountPerInstance, instanceCount,
 			startVertexLocation, startInstanceLocation);
+	DX12HuntRecordDraw(commandList);
+	if (DX12ModShouldSkipPipelineState(GetActivePipelineState(commandList), false)) {
+		DX12LogJsonFunc("DX12DrawSkipped", "\"kind\":\"DrawInstanced\",\"reason\":\"mod_shader_skip\"");
+		return;
+	}
+	if (ShouldSkipIaForMod(commandList)) {
+		DX12LogJsonFunc("DX12DrawSkipped", "\"kind\":\"DrawInstanced\",\"reason\":\"mod_texture_skip\"");
+		return;
+	}
+	if (DX12HuntShouldSkipDraw(commandList)) {
+		return;
+	}
 	PFN_DRAW_INSTANCED original = DX12_CL_ORIG(commandList, 12, PFN_DRAW_INSTANCED, DrawInstanced);
 	if (original)
 		original(commandList, vertexCountPerInstance, instanceCount,
@@ -585,6 +636,18 @@ static void STDMETHODCALLTYPE HookedDrawIndexedInstanced(
 	if (ShouldTrackBindings())
 		DX12BindingRecordDrawIndexedInstanced(commandList, indexCountPerInstance, instanceCount,
 			startIndexLocation, baseVertexLocation, startInstanceLocation);
+	DX12HuntRecordDraw(commandList);
+	if (DX12ModShouldSkipPipelineState(GetActivePipelineState(commandList), false)) {
+		DX12LogJsonFunc("DX12DrawSkipped", "\"kind\":\"DrawIndexedInstanced\",\"reason\":\"mod_shader_skip\"");
+		return;
+	}
+	if (ShouldSkipIaForMod(commandList)) {
+		DX12LogJsonFunc("DX12DrawSkipped", "\"kind\":\"DrawIndexedInstanced\",\"reason\":\"mod_texture_skip\"");
+		return;
+	}
+	if (DX12HuntShouldSkipDraw(commandList)) {
+		return;
+	}
 	PFN_DRAW_INDEXED_INSTANCED original =
 		DX12_CL_ORIG(commandList, 13, PFN_DRAW_INDEXED_INSTANCED, DrawIndexedInstanced);
 	if (original)
@@ -600,6 +663,14 @@ static void STDMETHODCALLTYPE HookedDispatch(
 		" groups=%u,%u,%u", threadGroupCountX, threadGroupCountY, threadGroupCountZ);
 	if (ShouldTrackBindings())
 		DX12BindingRecordDispatch(commandList, threadGroupCountX, threadGroupCountY, threadGroupCountZ);
+	DX12HuntRecordDispatch(commandList);
+	if (DX12ModShouldSkipPipelineState(GetActivePipelineState(commandList), true)) {
+		DX12LogJsonFunc("DX12DispatchSkipped", "\"reason\":\"mod_shader_skip\"");
+		return;
+	}
+	if (DX12HuntShouldSkipDispatch(commandList)) {
+		return;
+	}
 	PFN_DISPATCH original = DX12_CL_ORIG(commandList, 14, PFN_DISPATCH, Dispatch);
 	if (original)
 		original(commandList, threadGroupCountX, threadGroupCountY, threadGroupCountZ);
@@ -699,14 +770,21 @@ static void STDMETHODCALLTYPE HookedOMSetStencilRef(ID3D12GraphicsCommandList *c
 static void STDMETHODCALLTYPE HookedSetPipelineState(
 	ID3D12GraphicsCommandList *commandList, ID3D12PipelineState *pipelineState)
 {
-	LogDX12Call("ID3D12GraphicsCommandList::SetPipelineState", commandList, " pso=%p", pipelineState);
+	ID3D12PipelineState *activePipelineState =
+		DX12ModGetReplacementPipelineState(pipelineState);
+	if (!activePipelineState)
+		activePipelineState = pipelineState;
+	LogDX12Call("ID3D12GraphicsCommandList::SetPipelineState", commandList,
+		" pso=%p active=%p", pipelineState, activePipelineState);
 	if (ShouldTrackBindings()) {
-		DX12BindingSetPipelineState(commandList, pipelineState);
+		DX12BindingSetPipelineState(commandList, activePipelineState);
 		DX12BindingRecordStateEvent(commandList, "set_pso");
 	}
+	RememberActivePipelineState(commandList, activePipelineState);
+	DX12HuntSetPipelineState(commandList, activePipelineState);
 	PFN_SET_PIPELINE_STATE original = DX12_CL_ORIG(commandList, 25, PFN_SET_PIPELINE_STATE, SetPipelineState);
 	if (original)
-		original(commandList, pipelineState);
+		original(commandList, activePipelineState);
 }
 
 static void STDMETHODCALLTYPE HookedResourceBarrier(
@@ -962,6 +1040,7 @@ static void STDMETHODCALLTYPE HookedIASetIndexBuffer(
 		view ? static_cast<UINT>(view->Format) : 0);
 	if (ShouldTrackBindings())
 		DX12BindingSetIndexBuffer(commandList, view);
+	DX12HuntSetIndexBuffer(commandList, view);
 	PFN_IA_SET_INDEX_BUFFER original = DX12_CL_ORIG(commandList, 43, PFN_IA_SET_INDEX_BUFFER, IASetIndexBuffer);
 	if (original)
 		original(commandList, view);
@@ -977,6 +1056,7 @@ static void STDMETHODCALLTYPE HookedIASetVertexBuffers(
 		" start=%u count=%u views=%s", startSlot, count, viewsText);
 	if (ShouldTrackBindings())
 		DX12BindingSetVertexBuffers(commandList, startSlot, count, views);
+	DX12HuntSetVertexBuffers(commandList, startSlot, count, views);
 	PFN_IA_SET_VERTEX_BUFFERS original =
 		DX12_CL_ORIG(commandList, 44, PFN_IA_SET_VERTEX_BUFFERS, IASetVertexBuffers);
 	if (original)
@@ -1174,56 +1254,16 @@ void DX12HookCommandList(IUnknown *commandList)
 		return;
 
 	DX12VTableHook commandListHooks[] = {
-		{9, reinterpret_cast<void**>(&gOrigCloseCommandList),
-			HookedCloseCommandList, "ID3D12GraphicsCommandList::Close"},
 		{10, reinterpret_cast<void**>(&gOrigResetCommandList),
 			HookedResetCommandList, "ID3D12GraphicsCommandList::Reset"},
-		{11, reinterpret_cast<void**>(&gOrigClearState),
-			HookedClearState, "ID3D12GraphicsCommandList::ClearState"},
 		{12, reinterpret_cast<void**>(&gOrigDrawInstanced),
 			HookedDrawInstanced, "ID3D12GraphicsCommandList::DrawInstanced"},
 		{13, reinterpret_cast<void**>(&gOrigDrawIndexedInstanced),
 			HookedDrawIndexedInstanced, "ID3D12GraphicsCommandList::DrawIndexedInstanced"},
 		{14, reinterpret_cast<void**>(&gOrigDispatch),
 			HookedDispatch, "ID3D12GraphicsCommandList::Dispatch"},
-		{20, reinterpret_cast<void**>(&gOrigIASetPrimitiveTopology),
-			HookedIASetPrimitiveTopology, "ID3D12GraphicsCommandList::IASetPrimitiveTopology"},
 		{25, reinterpret_cast<void**>(&gOrigSetPipelineState),
 			HookedSetPipelineState, "ID3D12GraphicsCommandList::SetPipelineState"},
-		{26, reinterpret_cast<void**>(&gOrigResourceBarrier),
-			HookedResourceBarrier, "ID3D12GraphicsCommandList::ResourceBarrier"},
-		{27, reinterpret_cast<void**>(&gOrigExecuteBundle),
-			HookedExecuteBundle, "ID3D12GraphicsCommandList::ExecuteBundle"},
-		{28, reinterpret_cast<void**>(&gOrigSetDescriptorHeaps),
-			HookedSetDescriptorHeaps, "ID3D12GraphicsCommandList::SetDescriptorHeaps"},
-		{29, reinterpret_cast<void**>(&gOrigSetComputeRootSignature),
-			HookedSetComputeRootSignature, "ID3D12GraphicsCommandList::SetComputeRootSignature"},
-		{30, reinterpret_cast<void**>(&gOrigSetGraphicsRootSignature),
-			HookedSetGraphicsRootSignature, "ID3D12GraphicsCommandList::SetGraphicsRootSignature"},
-		{31, reinterpret_cast<void**>(&gOrigSetComputeRootDescriptorTable),
-			HookedSetComputeRootDescriptorTable, "ID3D12GraphicsCommandList::SetComputeRootDescriptorTable"},
-		{32, reinterpret_cast<void**>(&gOrigSetGraphicsRootDescriptorTable),
-			HookedSetGraphicsRootDescriptorTable, "ID3D12GraphicsCommandList::SetGraphicsRootDescriptorTable"},
-		{33, reinterpret_cast<void**>(&gOrigSetComputeRoot32BitConstant),
-			HookedSetComputeRoot32BitConstant, "ID3D12GraphicsCommandList::SetComputeRoot32BitConstant"},
-		{34, reinterpret_cast<void**>(&gOrigSetGraphicsRoot32BitConstant),
-			HookedSetGraphicsRoot32BitConstant, "ID3D12GraphicsCommandList::SetGraphicsRoot32BitConstant"},
-		{35, reinterpret_cast<void**>(&gOrigSetComputeRoot32BitConstants),
-			HookedSetComputeRoot32BitConstants, "ID3D12GraphicsCommandList::SetComputeRoot32BitConstants"},
-		{36, reinterpret_cast<void**>(&gOrigSetGraphicsRoot32BitConstants),
-			HookedSetGraphicsRoot32BitConstants, "ID3D12GraphicsCommandList::SetGraphicsRoot32BitConstants"},
-		{37, reinterpret_cast<void**>(&gOrigSetComputeRootConstantBufferView),
-			HookedSetComputeRootConstantBufferView, "ID3D12GraphicsCommandList::SetComputeRootConstantBufferView"},
-		{38, reinterpret_cast<void**>(&gOrigSetGraphicsRootConstantBufferView),
-			HookedSetGraphicsRootConstantBufferView, "ID3D12GraphicsCommandList::SetGraphicsRootConstantBufferView"},
-		{39, reinterpret_cast<void**>(&gOrigSetComputeRootShaderResourceView),
-			HookedSetComputeRootShaderResourceView, "ID3D12GraphicsCommandList::SetComputeRootShaderResourceView"},
-		{40, reinterpret_cast<void**>(&gOrigSetGraphicsRootShaderResourceView),
-			HookedSetGraphicsRootShaderResourceView, "ID3D12GraphicsCommandList::SetGraphicsRootShaderResourceView"},
-		{41, reinterpret_cast<void**>(&gOrigSetComputeRootUnorderedAccessView),
-			HookedSetComputeRootUnorderedAccessView, "ID3D12GraphicsCommandList::SetComputeRootUnorderedAccessView"},
-		{42, reinterpret_cast<void**>(&gOrigSetGraphicsRootUnorderedAccessView),
-			HookedSetGraphicsRootUnorderedAccessView, "ID3D12GraphicsCommandList::SetGraphicsRootUnorderedAccessView"},
 		{43, reinterpret_cast<void**>(&gOrigIASetIndexBuffer),
 			HookedIASetIndexBuffer, "ID3D12GraphicsCommandList::IASetIndexBuffer"},
 		{44, reinterpret_cast<void**>(&gOrigIASetVertexBuffers),

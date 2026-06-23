@@ -219,6 +219,29 @@ static UINT64 Fnv1a64(const void *data, size_t size)
 	return hash;
 }
 
+static uint32_t Fnv1a32Append(uint32_t hash, const void *data, size_t size)
+{
+	const uint8_t *bytes = static_cast<const uint8_t*>(data);
+	for (size_t i = 0; i < size; ++i) {
+		hash ^= bytes[i];
+		hash *= 16777619u;
+	}
+	return hash;
+}
+
+static uint32_t Fnv1a32(const void *data, size_t size)
+{
+	return Fnv1a32Append(2166136261u, data, size);
+}
+
+static constexpr uint32_t MakeTrackerFourCC(char a, char b, char c, char d)
+{
+	return static_cast<uint32_t>(static_cast<uint8_t>(a)) |
+		(static_cast<uint32_t>(static_cast<uint8_t>(b)) << 8) |
+		(static_cast<uint32_t>(static_cast<uint8_t>(c)) << 16) |
+		(static_cast<uint32_t>(static_cast<uint8_t>(d)) << 24);
+}
+
 static const char *DescriptorHeapTypeName(D3D12_DESCRIPTOR_HEAP_TYPE type)
 {
 	switch (type) {
@@ -1528,6 +1551,29 @@ bool DX12ResolveBufferResourceByGpuVa(
 	}
 	ReleaseSRWLockShared(&gResourceLock);
 	return resolved;
+}
+
+uint32_t DX12HashBufferResourceView(
+	const DX12BufferResourceSummary *summary, UINT64 fallbackGpuVirtualAddress,
+	UINT64 fallbackSize)
+{
+	uint32_t hash = 2166136261u;
+	const uint32_t tag = MakeTrackerFourCC('D', 'X', 'B', 'V');
+	hash = Fnv1a32Append(hash, &tag, sizeof(tag));
+
+	if (summary && summary->hasResourceDesc) {
+		D3D12_RESOURCE_DESC desc = summary->resourceDesc;
+		desc.Alignment = 0;
+		hash = Fnv1a32Append(hash, &desc, sizeof(desc));
+		if (summary->hasResourceHeapType)
+			hash = Fnv1a32Append(hash, &summary->resourceHeapType, sizeof(summary->resourceHeapType));
+	} else {
+		hash = Fnv1a32Append(hash, &fallbackSize, sizeof(fallbackSize));
+	}
+
+	if (!hash)
+		hash = Fnv1a32(&fallbackGpuVirtualAddress, sizeof(fallbackGpuVirtualAddress));
+	return hash;
 }
 
 static void FillDescriptorSummary(DX12DescriptorSummary *summary, const DescriptorRecord &record)

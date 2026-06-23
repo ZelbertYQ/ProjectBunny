@@ -2,6 +2,7 @@
 
 #include <Windows.h>
 #include <d3d12.h>
+#include <stdint.h>
 
 #include <string>
 #include <vector>
@@ -112,6 +113,9 @@ void DX12RecordPsoRootSignature(
 void DX12RecordResourceBarrier(UINT numBarriers, const D3D12_RESOURCE_BARRIER *barriers);
 bool DX12ResolveBufferResourceByGpuVa(
 	UINT64 gpuVirtualAddress, UINT64 size, DX12BufferResourceSummary *summary);
+uint32_t DX12HashBufferResourceView(
+	const DX12BufferResourceSummary *summary, UINT64 fallbackGpuVirtualAddress,
+	UINT64 fallbackSize);
 bool DX12GetRootSignatureSummary(
 	ID3D12RootSignature *rootSignature, DX12RootSignatureSummary *summary);
 bool DX12GetPsoRootSignature(UINT64 psoIndex, ID3D12RootSignature **rootSignature);

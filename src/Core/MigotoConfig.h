@@ -22,7 +22,7 @@ struct LoaderConfig {
 struct RuntimeConfig {
 	bool dx12ProxyMode = true;
 	bool dx12SafeMode = true;
-	bool enableOverlay = true;
+	bool enableOverlay = false;
 	std::wstring configPath;
 };
 

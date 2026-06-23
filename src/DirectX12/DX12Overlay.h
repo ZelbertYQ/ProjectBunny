@@ -4,6 +4,7 @@
 #include <dxgi1_4.h>
 
 DWORD WINAPI DX12OverlayThread(void*);
+void DX12EnsureOverlayWindow();
 void DX12DrawSwapChainText(IDXGISwapChain *swapChain);
 void DX12CloseOverlayWindow();
 

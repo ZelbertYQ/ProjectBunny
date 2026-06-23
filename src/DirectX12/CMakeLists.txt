@@ -11,11 +11,13 @@ add_library(DirectX12 SHARED
     DX12HookManager.cpp
     DX12Input.cpp
     DX12Json.cpp
+    DX12ModRuntime.cpp
     DX12Overlay.cpp
     DX12ResourceDump.cpp
     DX12ResourceTracker.cpp
     DX12Runtime.cpp
     DX12ShaderDump.cpp
+    DX12ShaderHunt.cpp
     DX12State.cpp
     DXGIHooks.cpp
 )

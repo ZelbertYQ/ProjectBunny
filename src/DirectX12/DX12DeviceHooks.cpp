@@ -2,8 +2,11 @@
 
 #include <d3d12.h>
 
+#include <vector>
+
 #include "DX12CommandListHooks.h"
 #include "DX12HookManager.h"
+#include "DX12ModRuntime.h"
 #include "DX12ResourceTracker.h"
 #include "DX12ShaderDump.h"
 #include "DX12State.h"
@@ -21,6 +24,24 @@ static PFN_CREATE_GRAPHICS_PIPELINE_STATE gOrigCreateGraphicsPipelineState = nul
 static PFN_CREATE_COMPUTE_PIPELINE_STATE gOrigCreateComputePipelineState = nullptr;
 static PFN_CREATE_PIPELINE_STATE gOrigCreatePipelineState = nullptr;
 static PFN_DEVICE_FACTORY_CREATE_DEVICE gOrigDeviceFactoryCreateDevice = nullptr;
+
+struct DX12GraphicsPsoReplacement
+{
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC desc = {};
+	D3D12_SHADER_BYTECODE vs = {};
+	D3D12_SHADER_BYTECODE ps = {};
+	std::vector<unsigned char> vsBytes;
+	std::vector<unsigned char> psBytes;
+	bool changed = false;
+};
+
+struct DX12ComputePsoReplacement
+{
+	D3D12_COMPUTE_PIPELINE_STATE_DESC desc = {};
+	D3D12_SHADER_BYTECODE cs = {};
+	std::vector<unsigned char> csBytes;
+	bool changed = false;
+};
 
 template <typename T>
 static T GetDeviceOriginal(void *object, UINT slot, T fallback, const char *name)
@@ -45,12 +66,31 @@ static HRESULT STDMETHODCALLTYPE HookedCreateGraphicsPipelineState(
 	ID3D12Device *device, const D3D12_GRAPHICS_PIPELINE_STATE_DESC *desc,
 	REFIID riid, void **pipelineState)
 {
-	auto original = GetDeviceOriginal(
-		device, 10, gOrigCreateGraphicsPipelineState, "ID3D12Device::CreateGraphicsPipelineState");
-	HRESULT hr = original ? original(device, desc, riid, pipelineState) : E_FAIL;
-	if (SUCCEEDED(hr) && desc)
+	DX12GraphicsPsoReplacement replacement;
+	const D3D12_GRAPHICS_PIPELINE_STATE_DESC *activeDesc = desc;
+	if (desc) {
+		replacement.desc = *desc;
+		if (DX12ModReplaceShaderBytecode("vs", desc->VS, &replacement.vs, &replacement.vsBytes)) {
+			replacement.desc.VS = replacement.vs;
+			replacement.changed = true;
+		}
+		if (DX12ModReplaceShaderBytecode("ps", desc->PS, &replacement.ps, &replacement.psBytes)) {
+			replacement.desc.PS = replacement.ps;
+			replacement.changed = true;
+		}
+		if (replacement.changed)
+			activeDesc = &replacement.desc;
+	}
+
+	HRESULT hr = DX12CreateGraphicsPipelineStateOriginal(device, activeDesc, riid, pipelineState);
+	if (SUCCEEDED(hr) && activeDesc) {
+		ID3D12PipelineState *created =
+			pipelineState ? static_cast<ID3D12PipelineState*>(*pipelineState) : nullptr;
+		if (desc)
+			DX12ModRecordGraphicsPipelineState(device, created, desc);
 		DX12RecordGraphicsPipelineState(
-			pipelineState ? static_cast<ID3D12PipelineState*>(*pipelineState) : nullptr, desc);
+			created, activeDesc);
+	}
 	return hr;
 }
 
@@ -58,13 +98,45 @@ static HRESULT STDMETHODCALLTYPE HookedCreateComputePipelineState(
 	ID3D12Device *device, const D3D12_COMPUTE_PIPELINE_STATE_DESC *desc,
 	REFIID riid, void **pipelineState)
 {
+	DX12ComputePsoReplacement replacement;
+	const D3D12_COMPUTE_PIPELINE_STATE_DESC *activeDesc = desc;
+	if (desc) {
+		replacement.desc = *desc;
+		if (DX12ModReplaceShaderBytecode("cs", desc->CS, &replacement.cs, &replacement.csBytes)) {
+			replacement.desc.CS = replacement.cs;
+			replacement.changed = true;
+			activeDesc = &replacement.desc;
+		}
+	}
+
+	HRESULT hr = DX12CreateComputePipelineStateOriginal(device, activeDesc, riid, pipelineState);
+	if (SUCCEEDED(hr) && activeDesc) {
+		ID3D12PipelineState *created =
+			pipelineState ? static_cast<ID3D12PipelineState*>(*pipelineState) : nullptr;
+		if (desc)
+			DX12ModRecordComputePipelineState(device, created, desc);
+		DX12RecordComputePipelineState(
+			created, activeDesc);
+	}
+	return hr;
+}
+
+HRESULT DX12CreateGraphicsPipelineStateOriginal(
+	ID3D12Device *device, const D3D12_GRAPHICS_PIPELINE_STATE_DESC *desc,
+	REFIID riid, void **pipelineState)
+{
+	auto original = GetDeviceOriginal(
+		device, 10, gOrigCreateGraphicsPipelineState, "ID3D12Device::CreateGraphicsPipelineState");
+	return original ? original(device, desc, riid, pipelineState) : E_FAIL;
+}
+
+HRESULT DX12CreateComputePipelineStateOriginal(
+	ID3D12Device *device, const D3D12_COMPUTE_PIPELINE_STATE_DESC *desc,
+	REFIID riid, void **pipelineState)
+{
 	auto original = GetDeviceOriginal(
 		device, 11, gOrigCreateComputePipelineState, "ID3D12Device::CreateComputePipelineState");
-	HRESULT hr = original ? original(device, desc, riid, pipelineState) : E_FAIL;
-	if (SUCCEEDED(hr) && desc)
-		DX12RecordComputePipelineState(
-			pipelineState ? static_cast<ID3D12PipelineState*>(*pipelineState) : nullptr, desc);
-	return hr;
+	return original ? original(device, desc, riid, pipelineState) : E_FAIL;
 }
 
 static HRESULT STDMETHODCALLTYPE HookedCreatePipelineState(

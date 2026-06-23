@@ -68,6 +68,7 @@ void MigotoConfig::ReadRuntimeConfig()
 	ReadBool(mIni, L"DX12", L"overlay", &mRuntime.enableOverlay);
 	ReadBool(mIni, L"System", L"dx12_proxy_mode", &mRuntime.dx12ProxyMode);
 	ReadBool(mIni, L"System", L"dx12_safe_mode", &mRuntime.dx12SafeMode);
+	ReadBool(mIni, L"System", L"dx12_overlay", &mRuntime.enableOverlay);
 }
 
 std::wstring FindDefaultConfigPath(HINSTANCE module)

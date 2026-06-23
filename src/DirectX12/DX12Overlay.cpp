@@ -2,8 +2,17 @@
 
 #include "DX12State.h"
 
-static int DrawOverlayTextBlock(HDC dc, const wchar_t *text, int x, int y)
+static volatile LONG gOverlayStarting = 0;
+
+static int MeasureOverlayTextBlock(HDC dc, const wchar_t *text, int *width, int *lines)
 {
+	if (width)
+		*width = 0;
+	if (lines)
+		*lines = 0;
+	if (!text)
+		return 0;
+
 	int lineHeight = 0;
 	TEXTMETRICW metrics = {};
 	if (GetTextMetricsW(dc, &metrics))
@@ -12,7 +21,7 @@ static int DrawOverlayTextBlock(HDC dc, const wchar_t *text, int x, int y)
 		lineHeight = 18;
 
 	int maxWidth = 0;
-	int lines = 0;
+	int lineCount = 0;
 	const wchar_t *lineStart = text;
 	for (const wchar_t *p = text; ; ++p) {
 		if (*p == L'\n' || *p == L'\0') {
@@ -21,12 +30,27 @@ static int DrawOverlayTextBlock(HDC dc, const wchar_t *text, int x, int y)
 			GetTextExtentPoint32W(dc, lineStart, len, &size);
 			if (size.cx > maxWidth)
 				maxWidth = size.cx;
-			lines++;
+			lineCount++;
 			if (*p == L'\0')
 				break;
 			lineStart = p + 1;
 		}
 	}
+
+	if (width)
+		*width = maxWidth;
+	if (lines)
+		*lines = lineCount;
+	return lineHeight;
+}
+
+static int DrawOverlayTextBlock(HDC dc, const wchar_t *text, int x, int y)
+{
+	int maxWidth = 0;
+	int lines = 0;
+	int lineHeight = MeasureOverlayTextBlock(dc, text, &maxWidth, &lines);
+	if (!lineHeight)
+		return y;
 
 	RECT background = {
 		x - 4,
@@ -37,7 +61,7 @@ static int DrawOverlayTextBlock(HDC dc, const wchar_t *text, int x, int y)
 	FillRect(dc, &background, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
 
 	int drawY = y;
-	lineStart = text;
+	const wchar_t *lineStart = text;
 	for (const wchar_t *p = text; ; ++p) {
 		if (*p == L'\n' || *p == L'\0') {
 			int len = static_cast<int>(p - lineStart);
@@ -49,6 +73,20 @@ static int DrawOverlayTextBlock(HDC dc, const wchar_t *text, int x, int y)
 		}
 	}
 	return background.bottom;
+}
+
+static int DrawOverlayTextBlockCentered(HDC dc, const wchar_t *text, int clientWidth, int y)
+{
+	int maxWidth = 0;
+	int lines = 0;
+	int lineHeight = MeasureOverlayTextBlock(dc, text, &maxWidth, &lines);
+	if (!lineHeight)
+		return y;
+
+	int x = (clientWidth - maxWidth) / 2;
+	if (x < 8)
+		x = 8;
+	return DrawOverlayTextBlock(dc, text, x, y);
 }
 
 static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
@@ -69,18 +107,23 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARA
 		FillRect(dc, &client, transparentBrush);
 		DeleteObject(transparentBrush);
 
-		HFONT font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+		HFONT font = CreateFontW(
+			24, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+			DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+			CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
 		HGDIOBJ oldFont = font ? SelectObject(dc, font) : nullptr;
 
-		wchar_t text[512];
+		wchar_t text[1024];
 		DX12GetOverlayStatus(text, ARRAYSIZE(text));
 
 		SetBkMode(dc, TRANSPARENT);
 		SetTextColor(dc, RGB(0, 255, 0));
-		DrawOverlayTextBlock(dc, text, 16, 12);
+		DrawOverlayTextBlockCentered(dc, text, client.right - client.left, 16);
 
 		if (oldFont)
 			SelectObject(dc, oldFont);
+		if (font)
+			DeleteObject(font);
 		EndPaint(hwnd, &ps);
 		return 0;
 	}
@@ -89,6 +132,7 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARA
 		return 0;
 	case WM_DESTROY:
 		DX12SetOverlayWindow(nullptr);
+		PostQuitMessage(0);
 		return 0;
 	default:
 		return DefWindowProcW(hwnd, msg, wparam, lparam);
@@ -109,7 +153,7 @@ DWORD WINAPI DX12OverlayThread(void*)
 	int x = GetSystemMetrics(SM_XVIRTUALSCREEN);
 	int y = GetSystemMetrics(SM_YVIRTUALSCREEN);
 	int width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-	int height = 96;
+	int height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
 
 	HWND hwnd = CreateWindowExW(
 		WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
@@ -122,6 +166,7 @@ DWORD WINAPI DX12OverlayThread(void*)
 	if (!hwnd) {
 		DX12LogJsonFunc("OverlayWindowCreate",
 			"\"status\":\"failed\",\"error\":%lu", GetLastError());
+		InterlockedExchange(&gOverlayStarting, 0);
 		return 0;
 	}
 
@@ -134,6 +179,7 @@ DWORD WINAPI DX12OverlayThread(void*)
 
 	DX12LogJsonFunc("OverlayWindowCreate",
 		"\"status\":\"ok\",\"hwnd\":\"%p\"", hwnd);
+	InterlockedExchange(&gOverlayStarting, 0);
 
 	MSG msg;
 	while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
@@ -142,6 +188,26 @@ DWORD WINAPI DX12OverlayThread(void*)
 	}
 
 	return 0;
+}
+
+void DX12EnsureOverlayWindow()
+{
+	HWND hwnd = DX12GetOverlayWindow();
+	if (hwnd && IsWindow(hwnd))
+		return;
+
+	if (InterlockedCompareExchange(&gOverlayStarting, 1, 0) != 0)
+		return;
+
+	HANDLE thread = CreateThread(nullptr, 0, DX12OverlayThread, nullptr, 0, nullptr);
+	if (thread) {
+		CloseHandle(thread);
+		return;
+	}
+
+	InterlockedExchange(&gOverlayStarting, 0);
+	DX12LogJsonFunc("OverlayWindowCreate",
+		"\"status\":\"failed\",\"error\":%lu,\"reason\":\"create_thread\"", GetLastError());
 }
 
 void DX12DrawSwapChainText(IDXGISwapChain *swapChain)

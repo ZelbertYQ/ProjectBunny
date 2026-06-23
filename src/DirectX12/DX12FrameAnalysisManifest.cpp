@@ -291,6 +291,7 @@ void DX12FrameAnalysisManifestWriteIaBinding(
 	const wchar_t *filePath)
 {
 	char vs[32], ps[32], cs[32], hash[16];
+	char huntHash[16];
 	char producerCs[32];
 	FormatShaderHash(buffer.shaderInfo.vs, buffer.shaderInfo.hasVS, vs, ARRAYSIZE(vs));
 	FormatShaderHash(buffer.shaderInfo.ps, buffer.shaderInfo.hasPS, ps, ARRAYSIZE(ps));
@@ -298,10 +299,11 @@ void DX12FrameAnalysisManifestWriteIaBinding(
 	FormatShaderHash(buffer.producerShaderInfo.cs, buffer.producerShaderInfo.hasCS,
 		producerCs, ARRAYSIZE(producerCs));
 	FormatFileHash(filePath, hash, ARRAYSIZE(hash));
+	sprintf_s(huntHash, sizeof(huntHash), "%08x", buffer.huntHash);
 
 	char vsJson[64], psJson[64], csJson[64], producerCsJson[64];
 	char roleJson[32], dimJson[32], fmtNameJson[64], skinSourceJson[64];
-	char producerBindJson[64], hashJson[32], fileJson[512], resourceJson[32];
+	char producerBindJson[64], hashJson[32], huntHashJson[32], fileJson[512], resourceJson[32];
 	DX12JsonEscapeString(vsJson, sizeof(vsJson), vs);
 	DX12JsonEscapeString(psJson, sizeof(psJson), ps);
 	DX12JsonEscapeString(csJson, sizeof(csJson), cs);
@@ -314,6 +316,7 @@ void DX12FrameAnalysisManifestWriteIaBinding(
 	DX12JsonEscapeString(producerBindJson, sizeof(producerBindJson),
 		buffer.producerBindSpace.empty() ? "-" : buffer.producerBindSpace.c_str());
 	DX12JsonEscapeString(hashJson, sizeof(hashJson), hash);
+	DX12JsonEscapeString(huntHashJson, sizeof(huntHashJson), huntHash);
 	DX12JsonEscapeWString(fileJson, sizeof(fileJson), DedupedFileName(filePath));
 	sprintf_s(resourceJson, sizeof(resourceJson), "\"%p\"", buffer.resource.resource);
 
@@ -345,6 +348,7 @@ void DX12FrameAnalysisManifestWriteIaBinding(
 		"\"producer_root\":%u,"
 		"\"producer_reg\":%u,"
 		"\"file\":%s,"
+		"\"hunt_hash\":%s,"
 		"\"hash\":%s",
 		static_cast<unsigned long long>(buffer.eventSerial),
 		static_cast<unsigned long long>(buffer.psoIndex),
@@ -371,6 +375,7 @@ void DX12FrameAnalysisManifestWriteIaBinding(
 		buffer.producerRootParameterIndex,
 		buffer.producerShaderRegister,
 		fileJson,
+		huntHashJson,
 		hashJson);
 
 	DX12FrameAnalysisLogJsonFields(buffer2);

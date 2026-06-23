@@ -3,6 +3,8 @@
 #include <Windows.h>
 #include <d3d12.h>
 
+#include <stdint.h>
+
 #include <string>
 #include <vector>
 
@@ -58,8 +60,29 @@ struct DX12FrameIaBufferBinding
 	UINT stride = 0;
 	UINT slot = 0;
 	UINT format = 0;
+	uint32_t huntHash = 0;
 	bool resolved = false;
 	DX12BufferResourceSummary resource;
+};
+
+struct DX12CurrentIaBuffer
+{
+	std::string role;
+	UINT64 gpuVa = 0;
+	UINT64 size = 0;
+	UINT stride = 0;
+	UINT slot = 0;
+	UINT format = 0;
+	uint32_t huntHash = 0;
+	bool resolved = false;
+	DX12BufferResourceSummary resource;
+};
+
+struct DX12CurrentIaState
+{
+	std::vector<DX12CurrentIaBuffer> vertexBuffers;
+	DX12CurrentIaBuffer indexBuffer;
+	bool hasIndexBuffer = false;
 };
 
 void DX12BindingRegisterCommandList(ID3D12GraphicsCommandList *commandList);
@@ -94,6 +117,8 @@ void DX12BindingSetIndexBuffer(
 void DX12BindingSetVertexBuffers(
 	ID3D12GraphicsCommandList *commandList, UINT startSlot, UINT count,
 	const D3D12_VERTEX_BUFFER_VIEW *views);
+bool DX12BindingGetCurrentIaState(
+	ID3D12GraphicsCommandList *commandList, DX12CurrentIaState *state);
 void DX12BindingRecordDrawInstanced(
 	ID3D12GraphicsCommandList *commandList, UINT vertexCountPerInstance,
 	UINT instanceCount, UINT startVertexLocation, UINT startInstanceLocation);
