@@ -16,7 +16,7 @@ This project is used to refactor and improve the original 3Dmigoto project.
 
 # Development Environment
 
-- Windows 11 Pro
+- Windows SDK 10.0.26100.0 or newer for DirectX 12 builds
 - VSCode
 - C++ Extension Pack [VSCode extension]
 - C++ 14 Standard
