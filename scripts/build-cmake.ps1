@@ -145,6 +145,16 @@ if ($Platform -eq 'x64') {
     $hasCopyToTargetDirectory = $null -ne $gameConfig.PSObject.Properties["CopyToTargetDirectory"]
     $copyToTargetDirectory = if ($hasCopyToTargetDirectory) { [bool]$gameConfig.CopyToTargetDirectory } else { $true }
     $copyToTargetDirectoryPath = [string]$gameConfig.CopyToTargetDirectoryPath
+    $hasExtraCopyTargets = $null -ne $gameConfig.PSObject.Properties["ExtraCopyToTargetDirectoryPaths"]
+    $extraCopyTargets = @()
+    if ($hasExtraCopyTargets -and $null -ne $gameConfig.ExtraCopyToTargetDirectoryPaths) {
+        foreach ($item in $gameConfig.ExtraCopyToTargetDirectoryPaths) {
+            $pathText = [string]$item
+            if (-not [string]::IsNullOrWhiteSpace($pathText)) {
+                $extraCopyTargets += $pathText
+            }
+        }
+    }
     $hasLaunchGame = $null -ne $gameConfig.PSObject.Properties["LaunchGame"]
     $launchGame = if ($hasLaunchGame) { [bool]$gameConfig.LaunchGame } else { $true }
 
@@ -170,9 +180,17 @@ if ($Platform -eq 'x64') {
         return
     }
 
-    $dx12TestDir = if ($copyToTargetDirectoryPath) { $copyToTargetDirectoryPath } else { Split-Path -Parent $dx12Exe }
+    $dx12PrimaryCopyDir = if ($copyToTargetDirectoryPath) { $copyToTargetDirectoryPath } else { Split-Path -Parent $dx12Exe }
+    $dx12CopyTargets = @()
+    if ($copyToTargetDirectory -and -not [string]::IsNullOrWhiteSpace($dx12PrimaryCopyDir)) {
+        $dx12CopyTargets += $dx12PrimaryCopyDir
+    }
+    $dx12CopyTargets += $extraCopyTargets
+    $dx12CopyTargets = $dx12CopyTargets |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+        Select-Object -Unique
     $dx12Dll = "$outDir\d3d12.dll"
-    if ($copyToTargetDirectory -and (Test-Path $dx12Dll) -and (Test-Path $dx12TestDir)) {
+    if ($dx12CopyTargets.Count -gt 0 -and (Test-Path $dx12Dll)) {
         if ($dx12Exe) {
             $dx12ProcessName = [System.IO.Path]::GetFileNameWithoutExtension($dx12Exe)
             $dx12Processes = Get-Process -Name $dx12ProcessName -ErrorAction SilentlyContinue
@@ -183,31 +201,36 @@ if ($Platform -eq 'x64') {
             }
         }
 
-        $dx12CleanupPaths = @(
-            "$dx12TestDir\ShaderDumpDX12",
-            "$dx12TestDir\d3d12_log.jsonl",
-            "$dx12TestDir\d3d12_log.txt",
-            "$dx12TestDir\d3d12_hook.log"
-        )
-        $dx12CleanupPaths += Get-ChildItem -Path $dx12TestDir -Filter "d3d12_log.before_*.jsonl" -File -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
-        $dx12CleanupPaths += Get-ChildItem -Path $dx12TestDir -Filter "d3d12_log.before_*.txt" -File -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
-        foreach ($cleanupPath in $dx12CleanupPaths) {
-            if (Test-Path $cleanupPath) {
-                try {
-                    Remove-Item $cleanupPath -Recurse -Force -ErrorAction Stop
-                    Write-Host "  Removed old DX12 test artifact: $cleanupPath" -ForegroundColor Gray
-                } catch {
-                    Write-Host "  Could not remove old DX12 test artifact: $cleanupPath" -ForegroundColor Yellow
-                    Write-Host "  $($_.Exception.Message)" -ForegroundColor Yellow
+        foreach ($dx12TestDir in $dx12CopyTargets) {
+            if (-not (Test-Path $dx12TestDir)) {
+                Write-Host "  Skipped DX12 DLL copy: directory not found: $dx12TestDir" -ForegroundColor Yellow
+                continue
+            }
+
+            $dx12CleanupPaths = @(
+                "$dx12TestDir\ShaderDumpDX12",
+                "$dx12TestDir\d3d12_log.jsonl",
+                "$dx12TestDir\d3d12_log.txt",
+                "$dx12TestDir\d3d12_hook.log"
+            )
+            $dx12CleanupPaths += Get-ChildItem -Path $dx12TestDir -Filter "d3d12_log.before_*.jsonl" -File -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
+            $dx12CleanupPaths += Get-ChildItem -Path $dx12TestDir -Filter "d3d12_log.before_*.txt" -File -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
+            foreach ($cleanupPath in $dx12CleanupPaths) {
+                if (Test-Path $cleanupPath) {
+                    try {
+                        Remove-Item $cleanupPath -Recurse -Force -ErrorAction Stop
+                        Write-Host "  Removed old DX12 test artifact: $cleanupPath" -ForegroundColor Gray
+                    } catch {
+                        Write-Host "  Could not remove old DX12 test artifact: $cleanupPath" -ForegroundColor Yellow
+                        Write-Host "  $($_.Exception.Message)" -ForegroundColor Yellow
+                    }
                 }
             }
-        }
 
-        Copy-Item $dx12Dll "$dx12TestDir\d3d12.dll" -Force
-        Write-Host "  Copied DX12 DLL: $dx12TestDir\d3d12.dll" -ForegroundColor Gray
-    } elseif ($copyToTargetDirectory -and -not (Test-Path $dx12TestDir)) {
-        Write-Host "  Skipped DX12 DLL copy: directory not found: $dx12TestDir" -ForegroundColor Yellow
-    } elseif ($copyToTargetDirectory -and -not (Test-Path $dx12Dll)) {
+            Copy-Item $dx12Dll "$dx12TestDir\d3d12.dll" -Force
+            Write-Host "  Copied DX12 DLL: $dx12TestDir\d3d12.dll" -ForegroundColor Gray
+        }
+    } elseif (($copyToTargetDirectory -or $extraCopyTargets.Count -gt 0) -and -not (Test-Path $dx12Dll)) {
         Write-Host "  Skipped DX12 DLL copy: DLL not found: $dx12Dll" -ForegroundColor Yellow
     } else {
         Write-Host "  Skipped DX12 DLL copy: CopyToTargetDirectory=false" -ForegroundColor Gray

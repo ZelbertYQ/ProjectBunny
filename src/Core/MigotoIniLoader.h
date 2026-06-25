@@ -11,6 +11,7 @@ struct MigotoIniLoadResult
 {
 	IniDocument document;
 	std::vector<std::wstring> loadedFiles;
+	std::vector<std::wstring> errors;
 	std::vector<std::wstring> warnings;
 };
 

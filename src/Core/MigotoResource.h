@@ -13,8 +13,12 @@ struct ResourceConfig
 {
 	std::wstring section;
 	std::wstring name;
+	std::wstring originalSection;
+	std::wstring sourcePath;
 	std::wstring type;
 	std::wstring filename;
+	std::wstring sourceDir;
+	std::wstring iniNamespace;
 	std::wstring format;
 	std::wstring data;
 	uint32_t stride = 0;

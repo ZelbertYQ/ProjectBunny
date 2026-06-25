@@ -9,6 +9,19 @@ static bool StartsWithI(const std::wstring &value, const wchar_t *prefix)
 	return lower.rfind(lowerPrefix, 0) == 0;
 }
 
+static bool EqualsI(const std::wstring &value, const wchar_t *text)
+{
+	return ToLower(value) == ToLower(text);
+}
+
+static bool IsExplicitCommandListSection(const std::wstring &section)
+{
+	return StartsWithI(section, L"CommandList") ||
+		StartsWithI(section, L"BuiltInCommandList") ||
+		EqualsI(section, L"Present") ||
+		EqualsI(section, L"Constants");
+}
+
 static bool ParseVertexBufferTarget(const std::wstring &text, uint32_t *slot)
 {
 	if (!slot || text.size() < 3 || text[0] != L'v' || text[1] != L'b')
@@ -55,6 +68,132 @@ static void AppendRunList(const std::wstring &value, std::vector<std::wstring> *
 		lists->push_back(list);
 }
 
+static std::wstring ResolveCommandListReference(
+	const std::wstring &value, const std::wstring &iniNamespace)
+{
+	std::wstring ref = Trim(value);
+	if (ref.empty())
+		return L"";
+
+	// DX11 treats CommandList, BuiltInCommandList, Present, and Constants as
+	// command-list sections. Preserve explicit prefixes so run=BuiltInCommandList*
+	// does not get rewritten into the unrelated CommandList* namespace.
+	if (IsExplicitCommandListSection(ref))
+		return MakeNamespacedSectionName(ref, iniNamespace);
+	return ResolveNamespacedSectionReference(ref, L"CommandList", iniNamespace);
+}
+
+static std::wstring ResolveResourceReference(
+	const std::wstring &value, const std::wstring &iniNamespace)
+{
+	return ResolveNamespacedSectionReference(value, L"Resource", iniNamespace);
+}
+
+static bool ParseUInt(const std::wstring &text, uint32_t *value)
+{
+	if (!value)
+		return false;
+
+	std::wstring trimmed = Trim(text);
+	if (trimmed.empty())
+		return false;
+
+	wchar_t *end = nullptr;
+	unsigned long parsed = std::wcstoul(trimmed.c_str(), &end, 0);
+	if (!end || *Trim(end).c_str())
+		return false;
+
+	*value = static_cast<uint32_t>(parsed);
+	return true;
+}
+
+static bool ParseDrawArgs(
+	const std::wstring &value, uint32_t expectedArgs, CommandListAction *action)
+{
+	if (!action || expectedArgs > 5)
+		return false;
+
+	std::wstring text = value;
+	size_t start = 0;
+	uint32_t count = 0;
+	while (start <= text.size()) {
+		size_t comma = text.find(L',', start);
+		std::wstring token = comma == std::wstring::npos ?
+			text.substr(start) : text.substr(start, comma - start);
+		if (count >= expectedArgs)
+			return false;
+		uint32_t parsed = 0;
+		if (!ParseUInt(token, &parsed))
+			return false;
+		action->args[count++] = parsed;
+		if (comma == std::wstring::npos)
+			break;
+		start = comma + 1;
+	}
+
+	if (count != expectedArgs)
+		return false;
+	action->argCount = count;
+	return true;
+}
+
+bool ParseCommandListActionFromEntry(
+	const std::wstring &key, const std::wstring &value, CommandListAction *action)
+{
+	if (!action)
+		return false;
+
+	if (key == L"run") {
+		action->kind = CommandListActionKind::Run;
+		action->commandList = value;
+		return !action->commandList.empty();
+	}
+
+	if (key == L"checktextureoverride") {
+		action->kind = CommandListActionKind::CheckTextureOverride;
+		return ParseCommandListTarget(value, &action->target);
+	}
+
+	if (key == L"handling" && ToLower(value) == L"skip") {
+		action->kind = CommandListActionKind::HandlingSkip;
+		return true;
+	}
+
+	if (key == L"draw") {
+		if (ToLower(value) == L"from_caller") {
+			action->kind = CommandListActionKind::DrawFromCaller;
+			return true;
+		}
+		action->kind = CommandListActionKind::Draw;
+		return ParseDrawArgs(value, 2, action);
+	}
+
+	if (key == L"drawindexed") {
+		if (ToLower(value) == L"from_caller") {
+			action->kind = CommandListActionKind::DrawIndexedFromCaller;
+			return true;
+		}
+		action->kind = CommandListActionKind::DrawIndexed;
+		return ParseDrawArgs(value, 3, action);
+	}
+
+	if (key == L"dispatch") {
+		action->kind = CommandListActionKind::Dispatch;
+		return ParseDrawArgs(value, 3, action);
+	}
+
+	CommandListTarget target;
+	if (ParseCommandListTarget(key, &target)) {
+		action->kind = target.kind == CommandListTargetKind::IndexBuffer ?
+			CommandListActionKind::SetIndexBuffer :
+			CommandListActionKind::SetVertexBuffer;
+		action->target = target;
+		action->resource = value;
+		return !action->resource.empty();
+	}
+	return false;
+}
+
 void ParseCommandListLinksFromEntry(
 	const std::wstring &key, const std::wstring &value, CommandListLinks *links)
 {
@@ -76,6 +215,38 @@ void ParseCommandListLinksFromEntry(
 	}
 }
 
+static void ResolveCommandListVector(
+	std::vector<std::wstring> *lists, const std::wstring &iniNamespace)
+{
+	if (!lists)
+		return;
+	for (std::wstring &list : *lists)
+		list = ResolveCommandListReference(list, iniNamespace);
+}
+
+void ResolveCommandListLinks(
+	CommandListLinks *links, const std::wstring &iniNamespace)
+{
+	if (!links)
+		return;
+	ResolveCommandListVector(&links->pre, iniNamespace);
+	ResolveCommandListVector(&links->main, iniNamespace);
+	ResolveCommandListVector(&links->post, iniNamespace);
+}
+
+void ResolveCommandListActionReferences(
+	CommandListAction *action, const std::wstring &iniNamespace)
+{
+	if (!action)
+		return;
+	action->iniNamespace = iniNamespace;
+	if (action->kind == CommandListActionKind::Run)
+		action->commandList = ResolveCommandListReference(action->commandList, iniNamespace);
+	else if (action->kind == CommandListActionKind::SetIndexBuffer ||
+	         action->kind == CommandListActionKind::SetVertexBuffer)
+		action->resource = ResolveResourceReference(action->resource, iniNamespace);
+}
+
 void ParseCommandListSections(const IniDocument &ini, CommandListMap *commandLists)
 {
 	if (!commandLists)
@@ -83,11 +254,15 @@ void ParseCommandListSections(const IniDocument &ini, CommandListMap *commandLis
 
 	commandLists->clear();
 	for (const IniSection &section : ini.Sections()) {
-		if (!StartsWithI(section.name, L"CommandList"))
+		if (!IsExplicitCommandListSection(section.name))
 			continue;
 
 		CommandListConfig config;
 		config.section = section.name;
+		config.originalSection = section.originalName.empty() ? section.name : section.originalName;
+		config.sourcePath = section.sourcePath;
+		config.sourceDir = section.sourceDir;
+		config.iniNamespace = section.iniNamespace;
 
 		for (const IniEntry &entry : section.entries) {
 			if (!entry.hasEquals)
@@ -95,45 +270,17 @@ void ParseCommandListSections(const IniDocument &ini, CommandListMap *commandLis
 
 			std::wstring key = ToLower(Trim(entry.key));
 			std::wstring value = Trim(entry.value);
-			if (key == L"run") {
-				CommandListAction action;
-				action.kind = CommandListActionKind::Run;
-				action.commandList = value;
-				if (!action.commandList.empty())
-					config.actions.push_back(action);
-				continue;
-			}
-
-			if (key == L"checktextureoverride") {
-				CommandListAction action;
-				action.kind = CommandListActionKind::CheckTextureOverride;
-				if (ParseCommandListTarget(value, &action.target))
-					config.actions.push_back(action);
-				continue;
-			}
-
-			if (key == L"handling" && ToLower(value) == L"skip") {
-				CommandListAction action;
-				action.kind = CommandListActionKind::HandlingSkip;
+			CommandListAction action;
+			if (ParseCommandListActionFromEntry(key, value, &action)) {
+				ResolveCommandListActionReferences(&action, entry.iniNamespace);
 				config.actions.push_back(action);
-				continue;
-			}
-
-			CommandListTarget target;
-			if (ParseCommandListTarget(key, &target)) {
-				CommandListAction action;
-				action.kind = target.kind == CommandListTargetKind::IndexBuffer ?
-					CommandListActionKind::SetIndexBuffer :
-					CommandListActionKind::SetVertexBuffer;
-				action.target = target;
-				action.resource = value;
-				if (!action.resource.empty())
-					config.actions.push_back(action);
 				continue;
 			}
 		}
 
 		(*commandLists)[config.section] = config;
+		if (section.iniNamespace.empty())
+			(*commandLists)[config.originalSection] = config;
 	}
 }
 

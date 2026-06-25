@@ -85,13 +85,39 @@ struct DX12CurrentIaState
 	bool hasIndexBuffer = false;
 };
 
+struct DX12CurrentComputeUavBinding
+{
+	UINT rootParameterIndex = 0;
+	UINT rangeIndex = UINT_MAX;
+	UINT shaderRegister = UINT_MAX;
+	UINT registerSpace = 0;
+	UINT descriptorOffset = 0;
+	UINT descriptorIncrement = 0;
+	UINT tableCopyCount = 0;
+	SIZE_T tableCpuStart = 0;
+	D3D12_GPU_DESCRIPTOR_HANDLE tableGpuStart = {};
+	ID3D12DescriptorHeap *tableHeap = nullptr;
+	bool rootDescriptor = false;
+	UINT64 gpuVirtualAddress = 0;
+	DX12DescriptorSummary descriptor;
+	bool hasDescriptor = false;
+};
+
+struct DX12CurrentRootConstants
+{
+	UINT rootParameterIndex = 0;
+	UINT maxSet = 0;
+	UINT values[64] = {};
+	bool valueValid[64] = {};
+};
+
 void DX12BindingRegisterCommandList(ID3D12GraphicsCommandList *commandList);
 void DX12BindingResetCommandList(
 	ID3D12GraphicsCommandList *commandList, ID3D12PipelineState *initialState);
 void DX12BindingSetPipelineState(
 	ID3D12GraphicsCommandList *commandList, ID3D12PipelineState *pipelineState);
 void DX12BindingRecordStateEvent(ID3D12GraphicsCommandList *commandList, const char *kind);
-void DX12BindingSetDescriptorHeaps(
+bool DX12BindingSetDescriptorHeaps(
 	ID3D12GraphicsCommandList *commandList, UINT count,
 	ID3D12DescriptorHeap *const *heaps);
 void DX12BindingSetGraphicsRootDescriptorTable(
@@ -110,6 +136,18 @@ void DX12BindingSetGraphicsRootDescriptor(
 void DX12BindingSetComputeRootDescriptor(
 	ID3D12GraphicsCommandList *commandList, UINT rootParameterIndex,
 	D3D12_ROOT_PARAMETER_TYPE type, D3D12_GPU_VIRTUAL_ADDRESS address);
+void DX12BindingSetGraphicsRoot32BitConstant(
+	ID3D12GraphicsCommandList *commandList, UINT rootParameterIndex,
+	UINT destOffset, UINT value);
+void DX12BindingSetComputeRoot32BitConstant(
+	ID3D12GraphicsCommandList *commandList, UINT rootParameterIndex,
+	UINT destOffset, UINT value);
+void DX12BindingSetGraphicsRoot32BitConstants(
+	ID3D12GraphicsCommandList *commandList, UINT rootParameterIndex,
+	UINT destOffset, UINT count, const void *values);
+void DX12BindingSetComputeRoot32BitConstants(
+	ID3D12GraphicsCommandList *commandList, UINT rootParameterIndex,
+	UINT destOffset, UINT count, const void *values);
 void DX12BindingSetPrimitiveTopology(
 	ID3D12GraphicsCommandList *commandList, D3D12_PRIMITIVE_TOPOLOGY topology);
 void DX12BindingSetIndexBuffer(
@@ -119,6 +157,23 @@ void DX12BindingSetVertexBuffers(
 	const D3D12_VERTEX_BUFFER_VIEW *views);
 bool DX12BindingGetCurrentIaState(
 	ID3D12GraphicsCommandList *commandList, DX12CurrentIaState *state);
+bool DX12BindingGetCurrentComputeUavs(
+	ID3D12GraphicsCommandList *commandList,
+	std::vector<DX12CurrentComputeUavBinding> *uavs);
+bool DX12BindingGetCurrentComputeSrvs(
+	ID3D12GraphicsCommandList *commandList,
+	std::vector<DX12CurrentComputeUavBinding> *srvs);
+bool DX12BindingGetCurrentComputeCbvs(
+	ID3D12GraphicsCommandList *commandList,
+	std::vector<DX12CurrentComputeUavBinding> *cbvs);
+bool DX12BindingGetCurrentComputeRootConstants(
+	ID3D12GraphicsCommandList *commandList,
+	std::vector<DX12CurrentRootConstants> *constants);
+UINT64 DX12BindingGetComputeBindingSerial(ID3D12GraphicsCommandList *commandList);
+bool DX12BindingGetCurrentDescriptorHeaps(
+	ID3D12GraphicsCommandList *commandList,
+	ID3D12DescriptorHeap **cbvSrvUavHeap,
+	ID3D12DescriptorHeap **samplerHeap);
 void DX12BindingRecordDrawInstanced(
 	ID3D12GraphicsCommandList *commandList, UINT vertexCountPerInstance,
 	UINT instanceCount, UINT startVertexLocation, UINT startInstanceLocation);

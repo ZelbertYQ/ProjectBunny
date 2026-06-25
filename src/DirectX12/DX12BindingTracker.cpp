@@ -8,6 +8,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "DX12CommandListRuntime.h"
 #include "DX12FrameAnalysis.h"
 #include "DX12FrameAnalysisManifest.h"
 #include "DX12Json.h"
@@ -43,6 +44,15 @@ struct RootDescriptorState
 	D3D12_GPU_VIRTUAL_ADDRESS address = 0;
 };
 
+struct RootConstantsState
+{
+	bool valid = false;
+	UINT rootParameterIndex = 0;
+	UINT maxSet = 0;
+	UINT values[64] = {};
+	bool valueValid[64] = {};
+};
+
 struct CommandListBindingState
 {
 	ID3D12PipelineState *pipelineState = nullptr;
@@ -50,10 +60,13 @@ struct CommandListBindingState
 	ID3D12RootSignature *computeRootSignature = nullptr;
 	ID3D12DescriptorHeap *cbvSrvUavHeap = nullptr;
 	ID3D12DescriptorHeap *samplerHeap = nullptr;
+	UINT64 computeBindingSerial = 0;
 	RootTableState graphicsTables[MaxRootParameters] = {};
 	RootTableState computeTables[MaxRootParameters] = {};
 	RootDescriptorState graphicsRootDescriptors[MaxRootParameters] = {};
 	RootDescriptorState computeRootDescriptors[MaxRootParameters] = {};
+	RootConstantsState graphicsRootConstants[MaxRootParameters] = {};
+	RootConstantsState computeRootConstants[MaxRootParameters] = {};
 	D3D12_VERTEX_BUFFER_VIEW vertexBuffers[MaxVertexBufferSlots] = {};
 	bool vertexBufferValid[MaxVertexBufferSlots] = {};
 	D3D12_INDEX_BUFFER_VIEW indexBuffer = {};
@@ -80,6 +93,8 @@ struct BindingEvent
 	RootTableState computeTables[MaxRootParameters] = {};
 	RootDescriptorState graphicsRootDescriptors[MaxRootParameters] = {};
 	RootDescriptorState computeRootDescriptors[MaxRootParameters] = {};
+	RootConstantsState graphicsRootConstants[MaxRootParameters] = {};
+	RootConstantsState computeRootConstants[MaxRootParameters] = {};
 	D3D12_VERTEX_BUFFER_VIEW vertexBuffers[MaxVertexBufferSlots] = {};
 	bool vertexBufferValid[MaxVertexBufferSlots] = {};
 	D3D12_INDEX_BUFFER_VIEW indexBuffer = {};
@@ -97,13 +112,76 @@ struct BindingEvent
 	UINT threadGroupCountZ = 0;
 };
 
-static SRWLOCK gBindingLock = SRWLOCK_INIT;
-static std::unordered_map<ID3D12GraphicsCommandList*, CommandListBindingState> gCommandLists;
+// --- Lock strategy ---------------------------------------------------------
+//
+// Per Microsoft's D3D12 guidance, "multiple command lists can be recorded
+// concurrently"
+// (https://learn.microsoft.com/windows/win32/direct3d12/design-philosophy-of-command-queues-and-command-lists)
+// and "the majority of the CPU cost is associated with command list building"
+// (https://learn.microsoft.com/samples/microsoft/directx-graphics-samples/d3d12-multithreading-sample-win32/).
+//
+// Two distinct concerns previously shared ONE global lock:
+//   * gCommandLists  — per-command-list binding state, written on EVERY
+//                      vertex/index/descriptor/root binding call. With texture
+//                      overrides active this is the steady-state gameplay hot
+//                      path and was serializing all recording threads.
+//   * gEvents         — the frame-analysis event log, only touched when capture
+//                      (frame analysis / shader dump / hunt) is active, i.e.
+//                      NOT during normal gameplay.
+//
+// We split them:
+//   * gCommandLists is sharded by command-list pointer, so threads recording
+//     different lists never contend. A list is recorded by a single thread, so
+//     its own shard sees consistent state without cross-thread locking — the
+//     same property DX11 gets for free by storing state on the context object.
+//   * gEvents keeps a single dedicated lock; it is off the gameplay hot path.
+namespace {
+
+constexpr size_t kBindingShardCount = 64; // power of two for cheap masking
+
+struct BindingShard {
+	SRWLOCK lock = SRWLOCK_INIT;
+	std::unordered_map<ID3D12GraphicsCommandList*, CommandListBindingState> states;
+};
+
+BindingShard gBindingShards[kBindingShardCount];
+
+inline BindingShard &BindingShardFor(ID3D12GraphicsCommandList *commandList)
+{
+	uintptr_t key = reinterpret_cast<uintptr_t>(commandList);
+	key ^= key >> 7;
+	key *= 0x9e3779b97f4a7c15ull;
+	return gBindingShards[(key >> 17) & (kBindingShardCount - 1)];
+}
+
+} // namespace
+
+// Dedicated lock for the frame-analysis event log (off the gameplay hot path).
+static SRWLOCK gEventsLock = SRWLOCK_INIT;
 static std::vector<BindingEvent> gEvents;
 static UINT64 gEventSerial = 0;
 static UINT64 gGlobalDrawSerial = 0;
 static UINT64 gGlobalDispatchSerial = 0;
 static UINT64 gDroppedEvents = 0;
+static const DX12DescriptorHeapSummary *FindHeapForGpuHandle(
+	const std::vector<DX12DescriptorHeapSummary> &heaps,
+	const RootTableState &table,
+	UINT requiredType);
+static const DX12DescriptorHeapSummary *FindHeapForTableRange(
+	const std::vector<DX12DescriptorHeapSummary> &heaps,
+	const RootTableState &table,
+	const DX12RootDescriptorRangeSummary *range,
+	UINT fallbackHeapType);
+static const DX12DescriptorSummary *FindDescriptorByCpuHandle(
+	const std::unordered_map<SIZE_T, const DX12DescriptorSummary*> &descriptorsByCpuHandle,
+	SIZE_T cpuHandle);
+static void BuildDescriptorLookup(
+	const std::vector<DX12DescriptorSummary> &descriptors,
+	std::unordered_map<SIZE_T, const DX12DescriptorSummary*> *descriptorsByCpuHandle);
+static const DX12RootParameterSummary *FindRootParameter(
+	const DX12RootSignatureSummary &rootSignature, UINT rootParameterIndex);
+static bool GetRootSignatureForEvent(
+	const BindingEvent &event, bool compute, DX12RootSignatureSummary *summary);
 
 static void StoreEventLocked(
 	const char *kind, ID3D12GraphicsCommandList *commandList,
@@ -131,6 +209,8 @@ static void StoreEventLocked(
 	memcpy(event.computeTables, state.computeTables, sizeof(event.computeTables));
 	memcpy(event.graphicsRootDescriptors, state.graphicsRootDescriptors, sizeof(event.graphicsRootDescriptors));
 	memcpy(event.computeRootDescriptors, state.computeRootDescriptors, sizeof(event.computeRootDescriptors));
+	memcpy(event.graphicsRootConstants, state.graphicsRootConstants, sizeof(event.graphicsRootConstants));
+	memcpy(event.computeRootConstants, state.computeRootConstants, sizeof(event.computeRootConstants));
 	memcpy(event.vertexBuffers, state.vertexBuffers, sizeof(event.vertexBuffers));
 	memcpy(event.vertexBufferValid, state.vertexBufferValid, sizeof(event.vertexBufferValid));
 	event.indexBuffer = state.indexBuffer;
@@ -154,9 +234,10 @@ void DX12BindingRegisterCommandList(ID3D12GraphicsCommandList *commandList)
 	if (!commandList)
 		return;
 
-	AcquireSRWLockExclusive(&gBindingLock);
-	gCommandLists.try_emplace(commandList);
-	ReleaseSRWLockExclusive(&gBindingLock);
+	BindingShard &shard = BindingShardFor(commandList);
+	AcquireSRWLockExclusive(&shard.lock);
+	shard.states.try_emplace(commandList);
+	ReleaseSRWLockExclusive(&shard.lock);
 }
 
 void DX12BindingResetCommandList(
@@ -165,11 +246,12 @@ void DX12BindingResetCommandList(
 	if (!commandList)
 		return;
 
-	AcquireSRWLockExclusive(&gBindingLock);
-	CommandListBindingState &state = gCommandLists[commandList];
+	BindingShard &shard = BindingShardFor(commandList);
+	AcquireSRWLockExclusive(&shard.lock);
+	CommandListBindingState &state = shard.states[commandList];
 	state = CommandListBindingState();
 	state.pipelineState = initialState;
-	ReleaseSRWLockExclusive(&gBindingLock);
+	ReleaseSRWLockExclusive(&shard.lock);
 }
 
 void DX12BindingSetPipelineState(
@@ -178,9 +260,10 @@ void DX12BindingSetPipelineState(
 	if (!commandList)
 		return;
 
-	AcquireSRWLockExclusive(&gBindingLock);
-	gCommandLists[commandList].pipelineState = pipelineState;
-	ReleaseSRWLockExclusive(&gBindingLock);
+	BindingShard &shard = BindingShardFor(commandList);
+	AcquireSRWLockExclusive(&shard.lock);
+	shard.states[commandList].pipelineState = pipelineState;
+	ReleaseSRWLockExclusive(&shard.lock);
 }
 
 void DX12BindingSetGraphicsRootSignature(
@@ -189,9 +272,10 @@ void DX12BindingSetGraphicsRootSignature(
 	if (!commandList)
 		return;
 
-	AcquireSRWLockExclusive(&gBindingLock);
-	gCommandLists[commandList].graphicsRootSignature = rootSignature;
-	ReleaseSRWLockExclusive(&gBindingLock);
+	BindingShard &shard = BindingShardFor(commandList);
+	AcquireSRWLockExclusive(&shard.lock);
+	shard.states[commandList].graphicsRootSignature = rootSignature;
+	ReleaseSRWLockExclusive(&shard.lock);
 }
 
 void DX12BindingSetComputeRootSignature(
@@ -200,9 +284,18 @@ void DX12BindingSetComputeRootSignature(
 	if (!commandList)
 		return;
 
-	AcquireSRWLockExclusive(&gBindingLock);
-	gCommandLists[commandList].computeRootSignature = rootSignature;
-	ReleaseSRWLockExclusive(&gBindingLock);
+	BindingShard &shard = BindingShardFor(commandList);
+	AcquireSRWLockExclusive(&shard.lock);
+	CommandListBindingState &state = shard.states[commandList];
+	if (state.computeRootSignature != rootSignature) {
+		// A different compute root signature changes how subsequent descriptor
+		// tables, root descriptors, and root constants must be interpreted.
+		// Treat that as a binding-state change so dispatch probes do not reuse
+		// a stale "zero serial" view after the layout flips on the fast path.
+		state.computeRootSignature = rootSignature;
+		++state.computeBindingSerial;
+	}
+	ReleaseSRWLockExclusive(&shard.lock);
 }
 
 void DX12BindingRecordStateEvent(ID3D12GraphicsCommandList *commandList, const char *kind)
@@ -210,34 +303,61 @@ void DX12BindingRecordStateEvent(ID3D12GraphicsCommandList *commandList, const c
 	if (!commandList)
 		return;
 
-	AcquireSRWLockExclusive(&gBindingLock);
-	CommandListBindingState &state = gCommandLists[commandList];
-	StoreEventLocked(kind ? kind : "state", commandList, state);
-	ReleaseSRWLockExclusive(&gBindingLock);
+	// Snapshot the per-list state from its shard, then append the event under
+	// the dedicated events lock. This keeps the hot per-list shard lock and the
+	// (capture-only) events lock independent.
+	CommandListBindingState snapshot;
+	bool found = false;
+	BindingShard &shard = BindingShardFor(commandList);
+	AcquireSRWLockShared(&shard.lock);
+	auto it = shard.states.find(commandList);
+	if (it != shard.states.end()) {
+		snapshot = it->second;
+		found = true;
+	}
+	ReleaseSRWLockShared(&shard.lock);
+	if (!found)
+		return;
+
+	AcquireSRWLockExclusive(&gEventsLock);
+	StoreEventLocked(kind ? kind : "state", commandList, snapshot);
+	ReleaseSRWLockExclusive(&gEventsLock);
 }
 
-void DX12BindingSetDescriptorHeaps(
+bool DX12BindingSetDescriptorHeaps(
 	ID3D12GraphicsCommandList *commandList, UINT count,
 	ID3D12DescriptorHeap *const *heaps)
 {
 	if (!commandList)
-		return;
+		return false;
 
-	AcquireSRWLockExclusive(&gBindingLock);
-	CommandListBindingState &state = gCommandLists[commandList];
-	state.cbvSrvUavHeap = nullptr;
-	state.samplerHeap = nullptr;
+	ID3D12DescriptorHeap *cbvSrvUavHeap = nullptr;
+	ID3D12DescriptorHeap *samplerHeap = nullptr;
 	for (UINT i = 0; i < count && heaps; ++i) {
 		ID3D12DescriptorHeap *heap = heaps[i];
 		if (!heap)
 			continue;
 		D3D12_DESCRIPTOR_HEAP_DESC desc = heap->GetDesc();
 		if (desc.Type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)
-			state.cbvSrvUavHeap = heap;
+			cbvSrvUavHeap = heap;
 		else if (desc.Type == D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER)
-			state.samplerHeap = heap;
+			samplerHeap = heap;
 	}
-	ReleaseSRWLockExclusive(&gBindingLock);
+
+	BindingShard &shard = BindingShardFor(commandList);
+	AcquireSRWLockExclusive(&shard.lock);
+	CommandListBindingState &state = shard.states[commandList];
+	if (state.cbvSrvUavHeap == cbvSrvUavHeap && state.samplerHeap == samplerHeap) {
+		ReleaseSRWLockExclusive(&shard.lock);
+		return false;
+	}
+	// Skip redundant tracker churn for repeated heap pairs. The command-list
+	// API call still reaches D3D12; this only avoids CPU-side state rewrites.
+	state.cbvSrvUavHeap = cbvSrvUavHeap;
+	state.samplerHeap = samplerHeap;
+	++state.computeBindingSerial;
+	ReleaseSRWLockExclusive(&shard.lock);
+	return true;
 }
 
 void DX12BindingSetGraphicsRootDescriptorTable(
@@ -247,12 +367,13 @@ void DX12BindingSetGraphicsRootDescriptorTable(
 	if (!commandList || rootParameterIndex >= MaxRootParameters)
 		return;
 
-	AcquireSRWLockExclusive(&gBindingLock);
-	RootTableState &table = gCommandLists[commandList].graphicsTables[rootParameterIndex];
+	BindingShard &shard = BindingShardFor(commandList);
+	AcquireSRWLockExclusive(&shard.lock);
+	RootTableState &table = shard.states[commandList].graphicsTables[rootParameterIndex];
 	table.valid = true;
 	table.rootParameterIndex = rootParameterIndex;
 	table.baseDescriptor = baseDescriptor;
-	ReleaseSRWLockExclusive(&gBindingLock);
+	ReleaseSRWLockExclusive(&shard.lock);
 }
 
 void DX12BindingSetComputeRootDescriptorTable(
@@ -262,12 +383,14 @@ void DX12BindingSetComputeRootDescriptorTable(
 	if (!commandList || rootParameterIndex >= MaxRootParameters)
 		return;
 
-	AcquireSRWLockExclusive(&gBindingLock);
-	RootTableState &table = gCommandLists[commandList].computeTables[rootParameterIndex];
+	BindingShard &shard = BindingShardFor(commandList);
+	AcquireSRWLockExclusive(&shard.lock);
+	RootTableState &table = shard.states[commandList].computeTables[rootParameterIndex];
 	table.valid = true;
 	table.rootParameterIndex = rootParameterIndex;
 	table.baseDescriptor = baseDescriptor;
-	ReleaseSRWLockExclusive(&gBindingLock);
+	++shard.states[commandList].computeBindingSerial;
+	ReleaseSRWLockExclusive(&shard.lock);
 }
 
 void DX12BindingSetPrimitiveTopology(
@@ -276,9 +399,10 @@ void DX12BindingSetPrimitiveTopology(
 	if (!commandList)
 		return;
 
-	AcquireSRWLockExclusive(&gBindingLock);
-	gCommandLists[commandList].primitiveTopology = topology;
-	ReleaseSRWLockExclusive(&gBindingLock);
+	BindingShard &shard = BindingShardFor(commandList);
+	AcquireSRWLockExclusive(&shard.lock);
+	shard.states[commandList].primitiveTopology = topology;
+	ReleaseSRWLockExclusive(&shard.lock);
 }
 
 void DX12BindingSetIndexBuffer(
@@ -287,8 +411,9 @@ void DX12BindingSetIndexBuffer(
 	if (!commandList)
 		return;
 
-	AcquireSRWLockExclusive(&gBindingLock);
-	CommandListBindingState &state = gCommandLists[commandList];
+	BindingShard &shard = BindingShardFor(commandList);
+	AcquireSRWLockExclusive(&shard.lock);
+	CommandListBindingState &state = shard.states[commandList];
 	if (view) {
 		state.indexBuffer = *view;
 		state.indexBufferValid = true;
@@ -296,7 +421,7 @@ void DX12BindingSetIndexBuffer(
 		state.indexBuffer = {};
 		state.indexBufferValid = false;
 	}
-	ReleaseSRWLockExclusive(&gBindingLock);
+	ReleaseSRWLockExclusive(&shard.lock);
 }
 
 void DX12BindingSetVertexBuffers(
@@ -306,8 +431,9 @@ void DX12BindingSetVertexBuffers(
 	if (!commandList || startSlot >= MaxVertexBufferSlots)
 		return;
 
-	AcquireSRWLockExclusive(&gBindingLock);
-	CommandListBindingState &state = gCommandLists[commandList];
+	BindingShard &shard = BindingShardFor(commandList);
+	AcquireSRWLockExclusive(&shard.lock);
+	CommandListBindingState &state = shard.states[commandList];
 	for (UINT i = 0; i < count && startSlot + i < MaxVertexBufferSlots; ++i) {
 		const UINT slot = startSlot + i;
 		if (views) {
@@ -318,7 +444,7 @@ void DX12BindingSetVertexBuffers(
 			state.vertexBufferValid[slot] = false;
 		}
 	}
-	ReleaseSRWLockExclusive(&gBindingLock);
+	ReleaseSRWLockExclusive(&shard.lock);
 }
 
 bool DX12BindingGetCurrentIaState(
@@ -331,13 +457,14 @@ bool DX12BindingGetCurrentIaState(
 	CommandListBindingState snapshot;
 	bool found = false;
 
-	AcquireSRWLockShared(&gBindingLock);
-	auto it = gCommandLists.find(commandList);
-	if (it != gCommandLists.end()) {
+	BindingShard &shard = BindingShardFor(commandList);
+	AcquireSRWLockShared(&shard.lock);
+	auto it = shard.states.find(commandList);
+	if (it != shard.states.end()) {
 		snapshot = it->second;
 		found = true;
 	}
-	ReleaseSRWLockShared(&gBindingLock);
+	ReleaseSRWLockShared(&shard.lock);
 
 	if (!found)
 		return false;
@@ -371,6 +498,181 @@ bool DX12BindingGetCurrentIaState(
 	return true;
 }
 
+static bool GetCurrentComputeDescriptors(
+	ID3D12GraphicsCommandList *commandList,
+	D3D12_DESCRIPTOR_RANGE_TYPE rangeType,
+	const char *descriptorKind,
+	UINT descriptorViewDimension,
+	D3D12_ROOT_PARAMETER_TYPE rootDescriptorType,
+	std::vector<DX12CurrentComputeUavBinding> *uavs)
+{
+	if (!commandList || !uavs)
+		return false;
+
+	uavs->clear();
+	CommandListBindingState snapshot;
+	bool found = false;
+
+	BindingShard &shard = BindingShardFor(commandList);
+	AcquireSRWLockShared(&shard.lock);
+	auto it = shard.states.find(commandList);
+	if (it != shard.states.end()) {
+		snapshot = it->second;
+		found = true;
+	}
+	ReleaseSRWLockShared(&shard.lock);
+
+	if (!found)
+		return false;
+
+	BindingEvent event;
+	event.pipelineState = snapshot.pipelineState;
+	event.computeRootSignature = snapshot.computeRootSignature;
+	if (snapshot.pipelineState) {
+		DX12GetPipelineStateShaderInfo(snapshot.pipelineState, &event.shaderInfo);
+		ID3D12RootSignature *psoRootSignature = nullptr;
+		if (DX12GetPsoRootSignature(event.shaderInfo.psoIndex, &psoRootSignature) &&
+			!event.computeRootSignature)
+			event.computeRootSignature = psoRootSignature;
+	}
+
+	DX12RootSignatureSummary rootSignature;
+	const bool hasRootSignature = GetRootSignatureForEvent(event, true, &rootSignature);
+	for (UINT root = 0; root < MaxRootParameters; ++root) {
+		const RootTableState &table = snapshot.computeTables[root];
+		if (table.valid) {
+			const DX12RootParameterSummary *parameter =
+				hasRootSignature ? FindRootParameter(rootSignature, root) : nullptr;
+			if (parameter && parameter->parameterType == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE) {
+				for (const DX12RootDescriptorRangeSummary &range : parameter->ranges) {
+					if (range.rangeType != rangeType)
+						continue;
+					DX12DescriptorHeapSummary heap = {};
+					if (!DX12FindDescriptorHeapByGpuHandle(
+						table.baseDescriptor, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, &heap) ||
+						heap.increment == 0)
+						continue;
+					const UINT64 tableBaseIndex =
+						(table.baseDescriptor.ptr - heap.gpuStart) / heap.increment;
+					UINT count = range.numDescriptors == UINT_MAX ? 1 : range.numDescriptors;
+					count = min(count, MaxDescriptorsPerRangeDump);
+					for (UINT offset = 0; offset < count; ++offset) {
+						const UINT64 descriptorIndex =
+							tableBaseIndex + range.effectiveOffset + offset;
+						if (descriptorIndex >= heap.numDescriptors)
+							break;
+						const SIZE_T cpuHandle =
+							heap.cpuStart + static_cast<SIZE_T>(descriptorIndex) * heap.increment;
+						DX12DescriptorSummary descriptor = {};
+						if (!DX12FindDescriptorSummaryByCpuHandle(cpuHandle, &descriptor) ||
+							descriptor.kind != descriptorKind ||
+							(descriptorKind != "CBV" &&
+							 descriptor.viewDimension != descriptorViewDimension))
+							continue;
+						DX12CurrentComputeUavBinding binding;
+						binding.rootParameterIndex = root;
+						binding.rangeIndex = range.rangeIndex;
+						binding.shaderRegister = range.baseShaderRegister + offset;
+						binding.registerSpace = range.registerSpace;
+						binding.descriptorOffset = range.effectiveOffset + offset;
+						binding.descriptorIncrement = heap.increment;
+						binding.tableCopyCount = count;
+						binding.tableCpuStart =
+							heap.cpuStart + static_cast<SIZE_T>(tableBaseIndex) * heap.increment;
+						binding.tableGpuStart.ptr =
+							heap.gpuStart + tableBaseIndex * heap.increment;
+						binding.tableHeap = heap.heap;
+						binding.descriptor = descriptor;
+						binding.hasDescriptor = true;
+						uavs->push_back(std::move(binding));
+					}
+				}
+			} else {
+				DX12DescriptorHeapSummary heap = {};
+				if (DX12FindDescriptorHeapByGpuHandle(
+					table.baseDescriptor, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, &heap) &&
+					heap.increment) {
+					const UINT64 descriptorIndex =
+						(table.baseDescriptor.ptr - heap.gpuStart) / heap.increment;
+					const SIZE_T cpuHandle =
+						heap.cpuStart + static_cast<SIZE_T>(descriptorIndex) * heap.increment;
+					DX12DescriptorSummary descriptor = {};
+					if (DX12FindDescriptorSummaryByCpuHandle(cpuHandle, &descriptor) &&
+						descriptor.kind == descriptorKind &&
+						(descriptorKind == "CBV" ||
+						 descriptor.viewDimension == descriptorViewDimension)) {
+						DX12CurrentComputeUavBinding binding;
+						binding.rootParameterIndex = root;
+						binding.descriptorIncrement = heap.increment;
+						binding.tableCopyCount = 1;
+						binding.tableCpuStart = cpuHandle;
+						binding.tableGpuStart = table.baseDescriptor;
+						binding.tableHeap = heap.heap;
+						binding.descriptor = descriptor;
+						binding.hasDescriptor = true;
+						uavs->push_back(std::move(binding));
+					}
+				}
+			}
+		}
+
+		const RootDescriptorState &rootDescriptor = snapshot.computeRootDescriptors[root];
+		if (rootDescriptor.valid && rootDescriptor.type == rootDescriptorType) {
+			DX12CurrentComputeUavBinding binding;
+			binding.rootParameterIndex = root;
+			binding.rootDescriptor = true;
+			binding.gpuVirtualAddress = rootDescriptor.address;
+			uavs->push_back(std::move(binding));
+		}
+	}
+
+	return !uavs->empty();
+}
+
+bool DX12BindingGetCurrentComputeUavs(
+	ID3D12GraphicsCommandList *commandList,
+	std::vector<DX12CurrentComputeUavBinding> *uavs)
+{
+	return GetCurrentComputeDescriptors(
+		commandList, D3D12_DESCRIPTOR_RANGE_TYPE_UAV, "UAV",
+		D3D12_UAV_DIMENSION_BUFFER, D3D12_ROOT_PARAMETER_TYPE_UAV, uavs);
+}
+
+bool DX12BindingGetCurrentComputeSrvs(
+	ID3D12GraphicsCommandList *commandList,
+	std::vector<DX12CurrentComputeUavBinding> *srvs)
+{
+	return GetCurrentComputeDescriptors(
+		commandList, D3D12_DESCRIPTOR_RANGE_TYPE_SRV, "SRV",
+		D3D12_SRV_DIMENSION_BUFFER, D3D12_ROOT_PARAMETER_TYPE_SRV, srvs);
+}
+
+bool DX12BindingGetCurrentComputeCbvs(
+	ID3D12GraphicsCommandList *commandList,
+	std::vector<DX12CurrentComputeUavBinding> *cbvs)
+{
+	return GetCurrentComputeDescriptors(
+		commandList, D3D12_DESCRIPTOR_RANGE_TYPE_CBV, "CBV",
+		0, D3D12_ROOT_PARAMETER_TYPE_CBV, cbvs);
+}
+
+bool DX12BindingGetCurrentDescriptorHeaps(
+	ID3D12GraphicsCommandList *commandList,
+	ID3D12DescriptorHeap **cbvSrvUavHeap,
+	ID3D12DescriptorHeap **samplerHeap)
+{
+	// Descriptor-heap tracking moved to RuntimeState (TLS fast path, no
+	// BindingTracker dependency).  Texture overrides can query the current
+	// heaps without forcing the full binding-tracking machinery online.
+	return DX12CommandListRuntimeGetDescriptorHeaps(
+		commandList, cbvSrvUavHeap, samplerHeap);
+}
+
+// Records a draw/dispatch event for frame analysis. The per-list serial lives
+// in the command list's shard; the event log lives under gEventsLock. We bump
+// the serial + snapshot state under the shard lock, then append under the
+// events lock so the two locks stay independent. Only called when capture is
+// active (frame analysis / shader dump / hunt), never on the gameplay hot path.
 void DX12BindingRecordDrawInstanced(
 	ID3D12GraphicsCommandList *commandList, UINT vertexCountPerInstance,
 	UINT instanceCount, UINT startVertexLocation, UINT startInstanceLocation)
@@ -378,11 +680,18 @@ void DX12BindingRecordDrawInstanced(
 	if (!commandList)
 		return;
 
-	AcquireSRWLockExclusive(&gBindingLock);
-	CommandListBindingState &state = gCommandLists[commandList];
-	state.drawSerial = ++gGlobalDrawSerial;
+	CommandListBindingState snapshot;
+	BindingShard &shard = BindingShardFor(commandList);
+	AcquireSRWLockExclusive(&gEventsLock);
+	{
+		AcquireSRWLockExclusive(&shard.lock);
+		CommandListBindingState &state = shard.states[commandList];
+		state.drawSerial = ++gGlobalDrawSerial;
+		snapshot = state;
+		ReleaseSRWLockExclusive(&shard.lock);
+	}
 	const size_t before = gEvents.size();
-	StoreEventLocked("draw", commandList, state);
+	StoreEventLocked("draw", commandList, snapshot);
 	if (gEvents.size() > before) {
 		BindingEvent &event = gEvents.back();
 		event.vertexCountPerInstance = vertexCountPerInstance;
@@ -390,7 +699,7 @@ void DX12BindingRecordDrawInstanced(
 		event.startVertexLocation = startVertexLocation;
 		event.startInstanceLocation = startInstanceLocation;
 	}
-	ReleaseSRWLockExclusive(&gBindingLock);
+	ReleaseSRWLockExclusive(&gEventsLock);
 }
 
 void DX12BindingRecordDrawIndexedInstanced(
@@ -401,11 +710,18 @@ void DX12BindingRecordDrawIndexedInstanced(
 	if (!commandList)
 		return;
 
-	AcquireSRWLockExclusive(&gBindingLock);
-	CommandListBindingState &state = gCommandLists[commandList];
-	state.drawSerial = ++gGlobalDrawSerial;
+	CommandListBindingState snapshot;
+	BindingShard &shard = BindingShardFor(commandList);
+	AcquireSRWLockExclusive(&gEventsLock);
+	{
+		AcquireSRWLockExclusive(&shard.lock);
+		CommandListBindingState &state = shard.states[commandList];
+		state.drawSerial = ++gGlobalDrawSerial;
+		snapshot = state;
+		ReleaseSRWLockExclusive(&shard.lock);
+	}
 	const size_t before = gEvents.size();
-	StoreEventLocked("draw_indexed", commandList, state);
+	StoreEventLocked("draw_indexed", commandList, snapshot);
 	if (gEvents.size() > before) {
 		BindingEvent &event = gEvents.back();
 		event.indexCountPerInstance = indexCountPerInstance;
@@ -414,7 +730,7 @@ void DX12BindingRecordDrawIndexedInstanced(
 		event.baseVertexLocation = baseVertexLocation;
 		event.startInstanceLocation = startInstanceLocation;
 	}
-	ReleaseSRWLockExclusive(&gBindingLock);
+	ReleaseSRWLockExclusive(&gEventsLock);
 }
 
 void DX12BindingRecordDispatch(
@@ -424,29 +740,36 @@ void DX12BindingRecordDispatch(
 	if (!commandList)
 		return;
 
-	AcquireSRWLockExclusive(&gBindingLock);
-	CommandListBindingState &state = gCommandLists[commandList];
-	state.dispatchSerial = ++gGlobalDispatchSerial;
+	CommandListBindingState snapshot;
+	BindingShard &shard = BindingShardFor(commandList);
+	AcquireSRWLockExclusive(&gEventsLock);
+	{
+		AcquireSRWLockExclusive(&shard.lock);
+		CommandListBindingState &state = shard.states[commandList];
+		state.dispatchSerial = ++gGlobalDispatchSerial;
+		snapshot = state;
+		ReleaseSRWLockExclusive(&shard.lock);
+	}
 	const size_t before = gEvents.size();
-	StoreEventLocked("dispatch", commandList, state);
+	StoreEventLocked("dispatch", commandList, snapshot);
 	if (gEvents.size() > before) {
 		BindingEvent &event = gEvents.back();
 		event.threadGroupCountX = threadGroupCountX;
 		event.threadGroupCountY = threadGroupCountY;
 		event.threadGroupCountZ = threadGroupCountZ;
 	}
-	ReleaseSRWLockExclusive(&gBindingLock);
+	ReleaseSRWLockExclusive(&gEventsLock);
 }
 
 void DX12BindingBeginFrame()
 {
-	AcquireSRWLockExclusive(&gBindingLock);
+	AcquireSRWLockExclusive(&gEventsLock);
 	gEvents.clear();
 	gEventSerial = 0;
 	gGlobalDrawSerial = 0;
 	gGlobalDispatchSerial = 0;
 	gDroppedEvents = 0;
-	ReleaseSRWLockExclusive(&gBindingLock);
+	ReleaseSRWLockExclusive(&gEventsLock);
 }
 
 void DX12BindingSetGraphicsRootDescriptor(
@@ -456,13 +779,14 @@ void DX12BindingSetGraphicsRootDescriptor(
 	if (!commandList || rootParameterIndex >= MaxRootParameters)
 		return;
 
-	AcquireSRWLockExclusive(&gBindingLock);
-	RootDescriptorState &descriptor = gCommandLists[commandList].graphicsRootDescriptors[rootParameterIndex];
+	BindingShard &shard = BindingShardFor(commandList);
+	AcquireSRWLockExclusive(&shard.lock);
+	RootDescriptorState &descriptor = shard.states[commandList].graphicsRootDescriptors[rootParameterIndex];
 	descriptor.valid = address != 0;
 	descriptor.rootParameterIndex = rootParameterIndex;
 	descriptor.type = type;
 	descriptor.address = address;
-	ReleaseSRWLockExclusive(&gBindingLock);
+	ReleaseSRWLockExclusive(&shard.lock);
 }
 
 void DX12BindingSetComputeRootDescriptor(
@@ -472,13 +796,129 @@ void DX12BindingSetComputeRootDescriptor(
 	if (!commandList || rootParameterIndex >= MaxRootParameters)
 		return;
 
-	AcquireSRWLockExclusive(&gBindingLock);
-	RootDescriptorState &descriptor = gCommandLists[commandList].computeRootDescriptors[rootParameterIndex];
+	BindingShard &shard = BindingShardFor(commandList);
+	AcquireSRWLockExclusive(&shard.lock);
+	RootDescriptorState &descriptor = shard.states[commandList].computeRootDescriptors[rootParameterIndex];
 	descriptor.valid = address != 0;
 	descriptor.rootParameterIndex = rootParameterIndex;
 	descriptor.type = type;
 	descriptor.address = address;
-	ReleaseSRWLockExclusive(&gBindingLock);
+	++shard.states[commandList].computeBindingSerial;
+	ReleaseSRWLockExclusive(&shard.lock);
+}
+
+static void SetRootConstantsLocked(
+	RootConstantsState *constants, UINT rootParameterIndex,
+	UINT destOffset, UINT count, const void *values)
+{
+	if (!constants || !values || destOffset >= 64 || count == 0)
+		return;
+	const UINT *src = static_cast<const UINT*>(values);
+	const UINT copyCount = min(count, 64 - destOffset);
+	constants->valid = true;
+	constants->rootParameterIndex = rootParameterIndex;
+	for (UINT i = 0; i < copyCount; ++i) {
+		const UINT slot = destOffset + i;
+		constants->values[slot] = src[i];
+		constants->valueValid[slot] = true;
+		if (slot + 1 > constants->maxSet)
+			constants->maxSet = slot + 1;
+	}
+}
+
+void DX12BindingSetGraphicsRoot32BitConstant(
+	ID3D12GraphicsCommandList *commandList, UINT rootParameterIndex,
+	UINT destOffset, UINT value)
+{
+	DX12BindingSetGraphicsRoot32BitConstants(
+		commandList, rootParameterIndex, destOffset, 1, &value);
+}
+
+void DX12BindingSetComputeRoot32BitConstant(
+	ID3D12GraphicsCommandList *commandList, UINT rootParameterIndex,
+	UINT destOffset, UINT value)
+{
+	DX12BindingSetComputeRoot32BitConstants(
+		commandList, rootParameterIndex, destOffset, 1, &value);
+}
+
+void DX12BindingSetGraphicsRoot32BitConstants(
+	ID3D12GraphicsCommandList *commandList, UINT rootParameterIndex,
+	UINT destOffset, UINT count, const void *values)
+{
+	if (!commandList || rootParameterIndex >= MaxRootParameters)
+		return;
+
+	BindingShard &shard = BindingShardFor(commandList);
+	AcquireSRWLockExclusive(&shard.lock);
+	RootConstantsState &constants = shard.states[commandList].graphicsRootConstants[rootParameterIndex];
+	SetRootConstantsLocked(&constants, rootParameterIndex, destOffset, count, values);
+	ReleaseSRWLockExclusive(&shard.lock);
+}
+
+void DX12BindingSetComputeRoot32BitConstants(
+	ID3D12GraphicsCommandList *commandList, UINT rootParameterIndex,
+	UINT destOffset, UINT count, const void *values)
+{
+	if (!commandList || rootParameterIndex >= MaxRootParameters)
+		return;
+
+	BindingShard &shard = BindingShardFor(commandList);
+	AcquireSRWLockExclusive(&shard.lock);
+	RootConstantsState &constants = shard.states[commandList].computeRootConstants[rootParameterIndex];
+	SetRootConstantsLocked(&constants, rootParameterIndex, destOffset, count, values);
+	++shard.states[commandList].computeBindingSerial;
+	ReleaseSRWLockExclusive(&shard.lock);
+}
+
+bool DX12BindingGetCurrentComputeRootConstants(
+	ID3D12GraphicsCommandList *commandList,
+	std::vector<DX12CurrentRootConstants> *constants)
+{
+	if (!commandList || !constants)
+		return false;
+
+	constants->clear();
+	CommandListBindingState snapshot;
+	bool found = false;
+	BindingShard &shard = BindingShardFor(commandList);
+	AcquireSRWLockShared(&shard.lock);
+	auto it = shard.states.find(commandList);
+	if (it != shard.states.end()) {
+		snapshot = it->second;
+		found = true;
+	}
+	ReleaseSRWLockShared(&shard.lock);
+	if (!found)
+		return false;
+
+	for (UINT root = 0; root < MaxRootParameters; ++root) {
+		const RootConstantsState &source = snapshot.computeRootConstants[root];
+		if (!source.valid)
+			continue;
+		DX12CurrentRootConstants current;
+		current.rootParameterIndex = root;
+		current.maxSet = source.maxSet;
+		memcpy(current.values, source.values, sizeof(current.values));
+		memcpy(current.valueValid, source.valueValid, sizeof(current.valueValid));
+		constants->push_back(current);
+	}
+	return !constants->empty();
+}
+
+UINT64 DX12BindingGetComputeBindingSerial(ID3D12GraphicsCommandList *commandList)
+{
+	if (!commandList)
+		return 0;
+
+	UINT64 serial = 0;
+	BindingShard &shard = BindingShardFor(commandList);
+	AcquireSRWLockShared(&shard.lock);
+	auto it = shard.states.find(commandList);
+	if (it != shard.states.end())
+		serial = it->second.computeBindingSerial;
+	ReleaseSRWLockShared(&shard.lock);
+	return serial;
 }
 
 void DX12GetCurrentFrameShaderInfos(std::vector<DX12PsoShaderInfo> *shaderInfos)
@@ -488,7 +928,7 @@ void DX12GetCurrentFrameShaderInfos(std::vector<DX12PsoShaderInfo> *shaderInfos)
 
 	shaderInfos->clear();
 	std::unordered_set<UINT64> seen;
-	AcquireSRWLockShared(&gBindingLock);
+	AcquireSRWLockShared(&gEventsLock);
 	for (const BindingEvent &event : gEvents) {
 		if (!event.shaderInfo.psoIndex)
 			continue;
@@ -496,7 +936,7 @@ void DX12GetCurrentFrameShaderInfos(std::vector<DX12PsoShaderInfo> *shaderInfos)
 			continue;
 		shaderInfos->push_back(event.shaderInfo);
 	}
-	ReleaseSRWLockShared(&gBindingLock);
+	ReleaseSRWLockShared(&gEventsLock);
 }
 
 static void WriteShaderInfo(FILE *file, const DX12PsoShaderInfo &info)
@@ -586,12 +1026,21 @@ static const DX12DescriptorHeapSummary *FindHeapForGpuHandle(
 	const std::vector<DX12DescriptorHeapSummary> &heaps,
 	const RootTableState &table,
 	UINT requiredType);
+static const DX12DescriptorHeapSummary *FindHeapForTableRange(
+	const std::vector<DX12DescriptorHeapSummary> &heaps,
+	const RootTableState &table,
+	const DX12RootDescriptorRangeSummary *range,
+	UINT fallbackHeapType);
 static const DX12DescriptorSummary *FindDescriptorByCpuHandle(
 	const std::unordered_map<SIZE_T, const DX12DescriptorSummary*> &descriptorsByCpuHandle,
 	SIZE_T cpuHandle);
 static void BuildDescriptorLookup(
 	const std::vector<DX12DescriptorSummary> &descriptors,
 	std::unordered_map<SIZE_T, const DX12DescriptorSummary*> *descriptorsByCpuHandle);
+static const DX12RootParameterSummary *FindRootParameter(
+	const DX12RootSignatureSummary &rootSignature, UINT rootParameterIndex);
+static bool GetRootSignatureForEvent(
+	const BindingEvent &event, bool compute, DX12RootSignatureSummary *summary);
 
 static std::string ResourceRefsForEvent(
 	const BindingEvent &event,
@@ -1090,9 +1539,9 @@ void DX12GetCurrentFrameIaBuffers(std::vector<DX12FrameIaBufferBinding> *buffers
 		return;
 
 	std::vector<BindingEvent> events;
-	AcquireSRWLockShared(&gBindingLock);
+	AcquireSRWLockShared(&gEventsLock);
 	events = gEvents;
-	ReleaseSRWLockShared(&gBindingLock);
+	ReleaseSRWLockShared(&gEventsLock);
 
 	std::vector<FlatBufferRow> rows;
 	CollectFrameIaBuffersForEvents(events, &rows);
@@ -1735,9 +2184,9 @@ void DX12GetCurrentFrameResourceBindings(std::vector<DX12FrameResourceBinding> *
 		return;
 
 	std::vector<BindingEvent> events;
-	AcquireSRWLockShared(&gBindingLock);
+	AcquireSRWLockShared(&gEventsLock);
 	events = gEvents;
-	ReleaseSRWLockShared(&gBindingLock);
+	ReleaseSRWLockShared(&gEventsLock);
 	DX12FrameAnalysisLogJsonFunc("BindingResourcesSnapshot",
 		"\"events\":%zu", events.size());
 
@@ -1867,10 +2316,10 @@ void DX12DumpBindingTrace(const wchar_t *dir)
 
 	std::vector<BindingEvent> events;
 	UINT64 droppedEvents = 0;
-	AcquireSRWLockShared(&gBindingLock);
+	AcquireSRWLockShared(&gEventsLock);
 	events = gEvents;
 	droppedEvents = gDroppedEvents;
-	ReleaseSRWLockShared(&gBindingLock);
+	ReleaseSRWLockShared(&gEventsLock);
 
 	DX12FrameAnalysisLogJsonFunc("BindingTraceBegin",
 		"\"events\":%zu,\"dropped\":%llu,\"maxEvents\":%u",
@@ -1908,4 +2357,6 @@ void DX12DumpBindingTrace(const wchar_t *dir)
 	DX12FrameAnalysisLogJsonFunc("BindingTraceEnd",
 		"\"events\":%zu,\"dropped\":%llu",
 		events.size(), static_cast<unsigned long long>(droppedEvents));
+
+	WriteFlatFrameAnalysisFiles(dir, events, droppedEvents);
 }

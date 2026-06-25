@@ -3,6 +3,8 @@
 #include "DX12State.h"
 
 static volatile LONG gOverlayStarting = 0;
+static HWND gOverlayTargetWindow = nullptr;
+static RECT gOverlayTargetRect = {};
 
 static int MeasureOverlayTextBlock(HDC dc, const wchar_t *text, int *width, int *lines)
 {
@@ -95,6 +97,7 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARA
 	case WM_NCHITTEST:
 		return HTTRANSPARENT;
 	case WM_TIMER:
+		DX12ClearExpiredOverlayStatus();
 		InvalidateRect(hwnd, nullptr, TRUE);
 		return 0;
 	case WM_PAINT:
@@ -117,7 +120,7 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARA
 		DX12GetOverlayStatus(text, ARRAYSIZE(text));
 
 		SetBkMode(dc, TRANSPARENT);
-		SetTextColor(dc, RGB(0, 255, 0));
+		SetTextColor(dc, DX12GetOverlayStatusColor());
 		DrawOverlayTextBlockCentered(dc, text, client.right - client.left, 16);
 
 		if (oldFont)
@@ -152,15 +155,13 @@ DWORD WINAPI DX12OverlayThread(void*)
 
 	int x = GetSystemMetrics(SM_XVIRTUALSCREEN);
 	int y = GetSystemMetrics(SM_YVIRTUALSCREEN);
-	int width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-	int height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
 
 	HWND hwnd = CreateWindowExW(
 		WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
 		className,
 		L"3DMigoto DX12 Lightweight Overlay",
 		WS_POPUP,
-		x, y, width, height,
+		x, y, 1, 1,
 		nullptr, nullptr, DX12GetModule(), nullptr);
 
 	if (!hwnd) {
@@ -172,9 +173,9 @@ DWORD WINAPI DX12OverlayThread(void*)
 
 	DX12SetOverlayWindow(hwnd);
 	SetLayeredWindowAttributes(hwnd, RGB(1, 1, 1), 220, LWA_COLORKEY | LWA_ALPHA);
-	ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-	SetWindowPos(hwnd, HWND_TOPMOST, x, y, width, height,
-		SWP_NOACTIVATE | SWP_SHOWWINDOW);
+	ShowWindow(hwnd, SW_HIDE);
+	SetWindowPos(hwnd, HWND_TOPMOST, x, y, 1, 1,
+		SWP_NOACTIVATE | SWP_HIDEWINDOW);
 	SetTimer(hwnd, 1, 250, nullptr);
 
 	DX12LogJsonFunc("OverlayWindowCreate",
@@ -210,6 +211,55 @@ void DX12EnsureOverlayWindow()
 		"\"status\":\"failed\",\"error\":%lu,\"reason\":\"create_thread\"", GetLastError());
 }
 
+bool DX12UpdateOverlayWindowForSwapChain(IDXGISwapChain *swapChain)
+{
+	if (!swapChain)
+		return false;
+
+	HWND overlay = DX12GetOverlayWindow();
+	if (!overlay || !IsWindow(overlay))
+		return false;
+
+	DXGI_SWAP_CHAIN_DESC desc = {};
+	if (FAILED(swapChain->GetDesc(&desc)) || !desc.OutputWindow || !IsWindow(desc.OutputWindow))
+		return false;
+
+	RECT client = {};
+	if (!GetClientRect(desc.OutputWindow, &client))
+		return false;
+
+	POINT topLeft = { client.left, client.top };
+	POINT bottomRight = { client.right, client.bottom };
+	if (!ClientToScreen(desc.OutputWindow, &topLeft) ||
+	    !ClientToScreen(desc.OutputWindow, &bottomRight))
+		return false;
+
+	RECT target = {
+		topLeft.x,
+		topLeft.y,
+		bottomRight.x,
+		bottomRight.y
+	};
+	int width = target.right - target.left;
+	int height = target.bottom - target.top;
+	if (width <= 0 || height <= 0)
+		return false;
+
+	if (gOverlayTargetWindow != desc.OutputWindow ||
+	    !EqualRect(&gOverlayTargetRect, &target)) {
+		gOverlayTargetWindow = desc.OutputWindow;
+		gOverlayTargetRect = target;
+		DX12LogJsonFunc("OverlayWindowTarget",
+			"\"hwnd\":\"%p\",\"target\":\"%p\",\"x\":%ld,\"y\":%ld,\"width\":%d,\"height\":%d",
+			overlay, desc.OutputWindow, target.left, target.top, width, height);
+	}
+
+	SetWindowPos(overlay, HWND_TOPMOST, target.left, target.top, width, height,
+		SWP_NOACTIVATE | SWP_SHOWWINDOW);
+	InvalidateRect(overlay, nullptr, FALSE);
+	return true;
+}
+
 void DX12DrawSwapChainText(IDXGISwapChain *swapChain)
 {
 	if (!swapChain)
@@ -224,7 +274,7 @@ void DX12DrawSwapChainText(IDXGISwapChain *swapChain)
 		return;
 
 	int oldBkMode = SetBkMode(dc, TRANSPARENT);
-	COLORREF oldTextColor = SetTextColor(dc, RGB(0, 255, 0));
+	COLORREF oldTextColor = SetTextColor(dc, DX12GetOverlayStatusColor());
 	HFONT font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
 	HGDIOBJ oldFont = font ? SelectObject(dc, font) : nullptr;
 	wchar_t text[512];

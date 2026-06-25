@@ -1,5 +1,5 @@
 {
-  "GameId": "003",
+  "GameId": "004",
   "Games": [
     {
       "GameId": "001",
@@ -27,7 +27,20 @@
       "CopyToTargetDirectoryPath": "D:\\Dev\\ssmt4\\src-tauri\\resources\\DX12\\",
       "CopyToTargetDirectory": true,
       "LaunchGame": false,
-      "Notice": "此配置用于编译后自动复制d3d12.dll到目标目录"
+      "Notice": "此配置用于编译后自动复制 d3d12.dll 到本地 DX12 资源目录"
+    },
+    {
+      "GameId": "004",
+      "TargetExe": "",
+      "WorkingDirectory": "",
+      "LaunchArguments": "",
+      "CopyToTargetDirectoryPath": "D:\\Dev\\ssmt4\\src-tauri\\resources\\DX12\\",
+      "ExtraCopyToTargetDirectoryPaths": [
+        "D:\\SSMTCacheFolder\\3Dmigoto\\ZZMIDX12"
+      ],
+      "CopyToTargetDirectory": true,
+      "LaunchGame": false,
+      "Notice": "此配置用于编译后同时复制 d3d12.dll 到本地 DX12 资源目录和 ZZMIDX12 测试目录"
     }
   ]
 }

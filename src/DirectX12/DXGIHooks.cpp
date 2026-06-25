@@ -3,11 +3,14 @@
 #include <dxgi1_4.h>
 
 #include "DX12BindingTracker.h"
+#include "DX12CommandListRuntime.h"
 #include "DX12DeviceHooks.h"
 #include "DX12FrameAnalysis.h"
 #include "DX12HookManager.h"
 #include "DX12Input.h"
+#include "DX12ModRuntime.h"
 #include "DX12Overlay.h"
+#include "DX12Profiling.h"
 #include "DX12ShaderHunt.h"
 #include "DX12ShaderDump.h"
 #include "DX12State.h"
@@ -39,7 +42,6 @@ static PFN_PRESENT1 gOrigPresent1 = nullptr;
 static PFN_CREATE_DXGI_FACTORY gOrigCreateDXGIFactory = nullptr;
 static PFN_CREATE_DXGI_FACTORY gOrigCreateDXGIFactory1 = nullptr;
 static PFN_CREATE_DXGI_FACTORY2 gOrigCreateDXGIFactory2 = nullptr;
-static volatile LONG gPresentTraceCount = 0;
 
 static HRESULT WINAPI HookedCreateDXGIFactory(REFIID riid, void **factory);
 static HRESULT WINAPI HookedCreateDXGIFactory1(REFIID riid, void **factory);
@@ -59,26 +61,47 @@ static HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain *swapChain, UINT s
 static HRESULT STDMETHODCALLTYPE HookedPresent1(
 	IDXGISwapChain1 *swapChain, UINT syncInterval, UINT flags, const DXGI_PRESENT_PARAMETERS *presentParameters);
 
-static void *GetVTableSlot(void *object, size_t slot)
+template <typename T>
+static T GetDXGIOriginal(void *object, UINT slot, T fallback, const char *name)
 {
-	if (!object)
-		return nullptr;
-	void **vtable = *reinterpret_cast<void***>(object);
-	return vtable ? vtable[slot] : nullptr;
+	if (object) {
+		void **vtable = *reinterpret_cast<void***>(object);
+		if (vtable) {
+			void *target = vtable[slot];
+			void *original = DX12GetOriginalFunction(target);
+			if (original)
+				return reinterpret_cast<T>(original);
+		}
+	}
+
+	if (fallback)
+		return fallback;
+
+	DX12LogJsonFunc(name ? name : "DXGI::Unknown",
+		"\"event\":\"MissingOriginal\",\"this\":\"%p\",\"slot\":%u",
+		object, slot);
+	return nullptr;
 }
 
 static PFN_PRESENT GetPresentOriginal(IDXGISwapChain *swapChain)
 {
-	void *target = GetVTableSlot(swapChain, 8);
-	auto original = reinterpret_cast<PFN_PRESENT>(DX12GetOriginalFunction(target));
-	return original ? original : gOrigPresent;
+	return GetDXGIOriginal<PFN_PRESENT>(
+		swapChain, 8, gOrigPresent, "IDXGISwapChain::Present");
 }
 
 static PFN_PRESENT1 GetPresent1Original(IDXGISwapChain1 *swapChain)
 {
-	void *target = GetVTableSlot(swapChain, 22);
-	auto original = reinterpret_cast<PFN_PRESENT1>(DX12GetOriginalFunction(target));
-	return original ? original : gOrigPresent1;
+	return GetDXGIOriginal<PFN_PRESENT1>(
+		swapChain, 22, gOrigPresent1, "IDXGISwapChain1::Present1");
+}
+
+static void LogPresentStage(const char *api, const char *stage, IDXGISwapChain *swapChain, HRESULT hr = S_OK)
+{
+	// Early-present crashes often leave only buffered logs behind. Flush these
+	// low-volume stage markers so the next run shows the exact boundary reached.
+	DX12LogDebugJsonFuncFlush("DX12PresentStage",
+		"\"api\":\"%s\",\"stage\":\"%s\",\"present\":%ld,\"swapchain\":\"%p\",\"hr\":\"0x%lx\"",
+		api ? api : "", stage ? stage : "", DX12GetPresentCount(), swapChain, hr);
 }
 
 static void HookSwapChain(IDXGISwapChain *swapChain)
@@ -135,6 +158,32 @@ static void HookFactory(IUnknown *factory)
 		DX12InstallVTableHooks(factory2, factory2Hooks);
 		factory2->Release();
 	}
+}
+
+static PFN_CREATE_SWAP_CHAIN GetCreateSwapChainOriginal(IDXGIFactory *factory)
+{
+	return GetDXGIOriginal<PFN_CREATE_SWAP_CHAIN>(
+		factory, 10, gOrigCreateSwapChain, "IDXGIFactory::CreateSwapChain");
+}
+
+static PFN_CREATE_SWAP_CHAIN_FOR_HWND GetCreateSwapChainForHwndOriginal(IDXGIFactory2 *factory)
+{
+	return GetDXGIOriginal<PFN_CREATE_SWAP_CHAIN_FOR_HWND>(
+		factory, 15, gOrigCreateSwapChainForHwnd, "IDXGIFactory2::CreateSwapChainForHwnd");
+}
+
+static PFN_CREATE_SWAP_CHAIN_FOR_CORE_WINDOW GetCreateSwapChainForCoreWindowOriginal(IDXGIFactory2 *factory)
+{
+	return GetDXGIOriginal<PFN_CREATE_SWAP_CHAIN_FOR_CORE_WINDOW>(
+		factory, 16, gOrigCreateSwapChainForCoreWindow,
+		"IDXGIFactory2::CreateSwapChainForCoreWindow");
+}
+
+static PFN_CREATE_SWAP_CHAIN_FOR_COMPOSITION GetCreateSwapChainForCompositionOriginal(IDXGIFactory2 *factory)
+{
+	return GetDXGIOriginal<PFN_CREATE_SWAP_CHAIN_FOR_COMPOSITION>(
+		factory, 24, gOrigCreateSwapChainForComposition,
+		"IDXGIFactory2::CreateSwapChainForComposition");
 }
 
 static void HookDXGIFactoryVTables(HMODULE dxgi)
@@ -202,7 +251,8 @@ static HRESULT STDMETHODCALLTYPE HookedCreateSwapChain(
 	IDXGIFactory *factory, IUnknown *device, DXGI_SWAP_CHAIN_DESC *desc, IDXGISwapChain **swapChain)
 {
 	HookDeviceFromDXGIArgument(device);
-	HRESULT hr = gOrigCreateSwapChain(factory, device, desc, swapChain);
+	auto original = GetCreateSwapChainOriginal(factory);
+	HRESULT hr = original ? original(factory, device, desc, swapChain) : DXGI_ERROR_INVALID_CALL;
 	DX12LogJsonFunc("IDXGIFactory::CreateSwapChain",
 		"\"device\":\"%p\",\"hr\":\"0x%lx\",\"swapchain\":\"%p\"",
 		device, hr, swapChain ? *swapChain : nullptr);
@@ -216,7 +266,10 @@ static HRESULT STDMETHODCALLTYPE HookedCreateSwapChainForHwnd(
 	const DXGI_SWAP_CHAIN_FULLSCREEN_DESC *fullscreenDesc, IDXGIOutput *output, IDXGISwapChain1 **swapChain)
 {
 	HookDeviceFromDXGIArgument(device);
-	HRESULT hr = gOrigCreateSwapChainForHwnd(factory, device, window, desc, fullscreenDesc, output, swapChain);
+	auto original = GetCreateSwapChainForHwndOriginal(factory);
+	HRESULT hr = original ?
+		original(factory, device, window, desc, fullscreenDesc, output, swapChain) :
+		DXGI_ERROR_INVALID_CALL;
 	DX12LogJsonFunc("IDXGIFactory2::CreateSwapChainForHwnd",
 		"\"device\":\"%p\",\"hwnd\":\"%p\",\"hr\":\"0x%lx\",\"swapchain\":\"%p\"",
 		device, window, hr, swapChain ? *swapChain : nullptr);
@@ -230,7 +283,10 @@ static HRESULT STDMETHODCALLTYPE HookedCreateSwapChainForCoreWindow(
 	IDXGIOutput *output, IDXGISwapChain1 **swapChain)
 {
 	HookDeviceFromDXGIArgument(device);
-	HRESULT hr = gOrigCreateSwapChainForCoreWindow(factory, device, window, desc, output, swapChain);
+	auto original = GetCreateSwapChainForCoreWindowOriginal(factory);
+	HRESULT hr = original ?
+		original(factory, device, window, desc, output, swapChain) :
+		DXGI_ERROR_INVALID_CALL;
 	DX12LogJsonFunc("IDXGIFactory2::CreateSwapChainForCoreWindow",
 		"\"device\":\"%p\",\"hr\":\"0x%lx\",\"swapchain\":\"%p\"",
 		device, hr, swapChain ? *swapChain : nullptr);
@@ -244,7 +300,10 @@ static HRESULT STDMETHODCALLTYPE HookedCreateSwapChainForComposition(
 	IDXGIOutput *output, IDXGISwapChain1 **swapChain)
 {
 	HookDeviceFromDXGIArgument(device);
-	HRESULT hr = gOrigCreateSwapChainForComposition(factory, device, desc, output, swapChain);
+	auto original = GetCreateSwapChainForCompositionOriginal(factory);
+	HRESULT hr = original ?
+		original(factory, device, desc, output, swapChain) :
+		DXGI_ERROR_INVALID_CALL;
 	DX12LogJsonFunc("IDXGIFactory2::CreateSwapChainForComposition",
 		"\"device\":\"%p\",\"hr\":\"0x%lx\",\"swapchain\":\"%p\"",
 		device, hr, swapChain ? *swapChain : nullptr);
@@ -255,25 +314,37 @@ static HRESULT STDMETHODCALLTYPE HookedCreateSwapChainForComposition(
 
 static HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain *swapChain, UINT syncInterval, UINT flags)
 {
-	LONG trace = InterlockedIncrement(&gPresentTraceCount);
-	if (trace <= 64 || (trace % 300) == 0) {
-		DX12LogJsonFunc("IDXGISwapChain::PresentEnter",
-			"\"swapchain\":\"%p\",\"sync\":%u,\"flags\":\"0x%x\"", swapChain, syncInterval, flags);
-	}
+	DX12_PROFILE_SCOPE(Present);
 	DX12PollInput();
+	DX12Profiling::BeginFrame();
 	const bool dumpFrame = DX12FrameAnalysisEndCapture();
 	const bool dumpShaders = DX12ShaderDumpEndCapture();
 	PFN_PRESENT original = GetPresentOriginal(swapChain);
 	if (!original)
 		return DXGI_ERROR_INVALID_CALL;
+	LogPresentStage("Present", "beforeOriginal", swapChain);
 	HRESULT hr = original(swapChain, syncInterval, flags);
+	LogPresentStage("Present", "afterOriginal", swapChain, hr);
 	DX12IncrementPresentCount();
-	if (DX12HuntShouldDrawOverlay() && !DX12GetOverlayWindow())
-		DX12DrawSwapChainText(swapChain);
-	if (trace <= 64 || (trace % 300) == 0) {
-		DX12LogJsonFunc("IDXGISwapChain::PresentLeave",
-			"\"swapchain\":\"%p\",\"hr\":\"0x%lx\",\"present\":%ld",
-			swapChain, hr, DX12GetPresentCount());
+	DX12FlushLog();
+	LogPresentStage("Present", "beforeModBeginFrame", swapChain, hr);
+	DX12ModBeginFrame();
+
+	// Recalculate the hot-path skip-all flag once per frame.  When set, every
+	// recording hook (Draw, Dispatch, SetPipelineState, SetRoot*, IASet*, etc.)
+	// skips ALL tracking work and calls the original directly with a single
+	// branch.  This collapses the common "inject but idle" path to near-zero
+	// overhead.
+	DX12HotPathUpdate();
+	LogPresentStage("Present", "afterHotPathUpdate", swapChain, hr);
+
+	DX12CommandListRuntimeBumpTrackingGeneration();
+
+	if (DX12HuntShouldDrawOverlay()) {
+		if (DX12GetOverlayWindow())
+			DX12UpdateOverlayWindowForSwapChain(swapChain);
+		else
+			DX12DrawSwapChainText(swapChain);
 	}
 	if (dumpFrame) {
 		DX12FrameAnalysisLogJsonFunc("FrameCaptureEnd",
@@ -290,34 +361,52 @@ static HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain *swapChain, UINT s
 	} else if (DX12ShaderDumpIsCaptureRequested()) {
 		DX12BindingBeginFrame();
 		DX12ShaderDumpBeginCapture();
-	} else if (!DX12FrameAnalysisIsCapturing() && !DX12ShaderDumpIsCapturingFrame()) {
+	} else if (DX12FrameAnalysisIsCapturing() || DX12ShaderDumpIsCapturingFrame() ||
+	           DX12HuntIsEnabled() || DX12ModHasActiveTextureOverrides()) {
+		// Binding tracking is needed by an active subsystem — reset per-frame
+		// state.  When nothing is active we skip this entirely so the binding
+		// tracker stays idle and does not consume CPU every frame.
 		DX12BindingBeginFrame();
+		LogPresentStage("Present", "afterBindingBeginFrame", swapChain, hr);
 	}
+	// else: no capture, no hunt, no texture overrides — skip binding frame
+	//       reset to save CPU on the Present path.
+	DX12Profiling::EndFrame();
+	LogPresentStage("Present", "end", swapChain, hr);
 	return hr;
 }
 
 static HRESULT STDMETHODCALLTYPE HookedPresent1(
 	IDXGISwapChain1 *swapChain, UINT syncInterval, UINT flags, const DXGI_PRESENT_PARAMETERS *presentParameters)
 {
-	LONG trace = InterlockedIncrement(&gPresentTraceCount);
-	if (trace <= 64 || (trace % 300) == 0) {
-		DX12LogJsonFunc("IDXGISwapChain1::Present1Enter",
-			"\"swapchain\":\"%p\",\"sync\":%u,\"flags\":\"0x%x\"", swapChain, syncInterval, flags);
-	}
 	DX12PollInput();
+	DX12Profiling::BeginFrame();
 	const bool dumpFrame = DX12FrameAnalysisEndCapture();
 	const bool dumpShaders = DX12ShaderDumpEndCapture();
 	PFN_PRESENT1 original = GetPresent1Original(swapChain);
 	if (!original)
 		return DXGI_ERROR_INVALID_CALL;
+	LogPresentStage("Present1", "beforeOriginal", swapChain);
 	HRESULT hr = original(swapChain, syncInterval, flags, presentParameters);
+	LogPresentStage("Present1", "afterOriginal", swapChain, hr);
 	DX12IncrementPresentCount();
-	if (DX12HuntShouldDrawOverlay() && !DX12GetOverlayWindow())
-		DX12DrawSwapChainText(swapChain);
-	if (trace <= 64 || (trace % 300) == 0) {
-		DX12LogJsonFunc("IDXGISwapChain1::Present1Leave",
-			"\"swapchain\":\"%p\",\"hr\":\"0x%lx\",\"present\":%ld",
-			swapChain, hr, DX12GetPresentCount());
+	DX12FlushLog();
+	LogPresentStage("Present1", "beforeModBeginFrame", swapChain, hr);
+	DX12ModBeginFrame();
+
+	// Recalculate the hot-path skip-all flag once per frame.
+	DX12HotPathUpdate();
+	LogPresentStage("Present1", "afterHotPathUpdate", swapChain, hr);
+
+	// Bump the global tracking generation so every command list's cached
+	// tracking predicates are invalidated once per frame.
+	DX12CommandListRuntimeBumpTrackingGeneration();
+
+	if (DX12HuntShouldDrawOverlay()) {
+		if (DX12GetOverlayWindow())
+			DX12UpdateOverlayWindowForSwapChain(swapChain);
+		else
+			DX12DrawSwapChainText(swapChain);
 	}
 	if (dumpFrame) {
 		DX12FrameAnalysisLogJsonFunc("FrameCaptureEnd",
@@ -334,9 +423,18 @@ static HRESULT STDMETHODCALLTYPE HookedPresent1(
 	} else if (DX12ShaderDumpIsCaptureRequested()) {
 		DX12BindingBeginFrame();
 		DX12ShaderDumpBeginCapture();
-	} else if (!DX12FrameAnalysisIsCapturing() && !DX12ShaderDumpIsCapturingFrame()) {
+	} else if (DX12FrameAnalysisIsCapturing() || DX12ShaderDumpIsCapturingFrame() ||
+	           DX12HuntIsEnabled() || DX12ModHasActiveTextureOverrides()) {
+		// Binding tracking is needed by an active subsystem — reset per-frame
+		// state.  When nothing is active we skip this entirely so the binding
+		// tracker stays idle and does not consume CPU every frame.
 		DX12BindingBeginFrame();
+		LogPresentStage("Present1", "afterBindingBeginFrame", swapChain, hr);
 	}
+	// else: no capture, no hunt, no texture overrides — skip binding frame
+	//       reset to save CPU on the Present path.
+	DX12Profiling::EndFrame();
+	LogPresentStage("Present1", "end", swapChain, hr);
 	return hr;
 }
 

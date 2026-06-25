@@ -4,15 +4,23 @@
 add_library(DirectX12 SHARED
     D3D12Wrapper.cpp
     DX12BindingTracker.cpp
+    DX12CommandListCommandRecorder.cpp
+    DX12CommandListLifecycle.cpp
+    DX12CommandListStateCapture.cpp
+    DX12CommandListRuntime.cpp
     DX12CommandListHooks.cpp
     DX12DeviceHooks.cpp
+    DX12DispatchHookFlow.cpp
+    DX12DrawHookFlow.cpp
     DX12FrameAnalysis.cpp
     DX12FrameAnalysisManifest.cpp
     DX12HookManager.cpp
+    DX12IaReplacementExecutor.cpp
     DX12Input.cpp
     DX12Json.cpp
     DX12ModRuntime.cpp
     DX12Overlay.cpp
+    DX12Profiling.cpp
     DX12ResourceDump.cpp
     DX12ResourceTracker.cpp
     DX12Runtime.cpp

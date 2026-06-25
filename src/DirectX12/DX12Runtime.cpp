@@ -2,6 +2,7 @@
 
 #include "DX12Overlay.h"
 #include "DX12ModRuntime.h"
+#include "DX12Profiling.h"
 #include "DX12State.h"
 #include "DXGIHooks.h"
 #include "MigotoConfig.h"
@@ -34,6 +35,7 @@ void BunnyDX12RuntimeInitialize(HINSTANCE module, DX12LoadRealD3D12Fn loadRealD3
 
 	DX12SetModule(module);
 	DX12OpenLogFile();
+	DX12Profiling::Init();
 	DX12Log("\n*** 3DMigoto DX12 runtime initialized - frame analysis logging ready ***\n");
 
 	std::wstring configPath = Bunny::FindDefaultConfigPath(module);
@@ -41,13 +43,22 @@ void BunnyDX12RuntimeInitialize(HINSTANCE module, DX12LoadRealD3D12Fn loadRealD3
 	bool startOverlay = false;
 	if (gConfigLoaded) {
 		startOverlay = gConfig.Runtime().enableOverlay && !gConfig.Runtime().dx12SafeMode;
+		DX12ModSetSafeMode(gConfig.Runtime().dx12SafeMode);
 		DX12LogJsonFunc("DX12Config",
 			"\"path\":\"%S\",\"safeMode\":%s,\"overlay\":%s,\"overlayStarted\":%s",
 			gConfig.Path().c_str(),
 			gConfig.Runtime().dx12SafeMode ? "true" : "false",
 			gConfig.Runtime().enableOverlay ? "true" : "false",
 			startOverlay ? "true" : "false");
-		DX12ModRuntimeLoad(gConfig.Path().c_str());
+		std::wstring modStatus;
+		bool modWarnings = false;
+		bool modErrors = false;
+		if (!DX12ModRuntimeLoad(gConfig.Path().c_str(), &modStatus, &modWarnings, &modErrors))
+			DX12SetOverlayError(modStatus.c_str());
+		else if (modErrors)
+			DX12SetOverlayError(modStatus.c_str());
+		else if (modWarnings)
+			DX12SetOverlayWarning(modStatus.c_str());
 	} else {
 		DX12LogJsonFunc("DX12Config",
 			"\"path\":\"%S\",\"status\":\"missing_or_invalid\",\"error\":\"%S\"",

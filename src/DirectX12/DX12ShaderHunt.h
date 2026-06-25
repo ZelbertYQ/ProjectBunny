@@ -37,6 +37,8 @@ struct DX12IaHashState
 	std::vector<DX12IaBufferHash> vertexBuffers;
 };
 bool DX12HuntGetIaHashState(ID3D12GraphicsCommandList *commandList, DX12IaHashState *state);
+bool DX12HuntHashIndexBufferView(const D3D12_INDEX_BUFFER_VIEW *view, uint32_t *hash);
+bool DX12HuntHashVertexBufferView(UINT slot, const D3D12_VERTEX_BUFFER_VIEW *view, uint32_t *hash);
 
 void DX12HuntToggle();
 void DX12HuntPreviousVS();

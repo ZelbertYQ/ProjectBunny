@@ -13,6 +13,7 @@
 #include "DX12FrameAnalysis.h"
 #include "DX12HookManager.h"
 #include "DX12Json.h"
+#include "DX12ModRuntime.h"
 #include "DX12State.h"
 
 static void GetSummaryDirectory(const wchar_t *dir, wchar_t *path, size_t pathCount)
@@ -102,6 +103,15 @@ static PFN_CREATE_PLACED_RESOURCE1 gOrigCreatePlacedResource1 = nullptr;
 static PFN_CREATE_COMMITTED_RESOURCE3 gOrigCreateCommittedResource3 = nullptr;
 static PFN_CREATE_PLACED_RESOURCE2 gOrigCreatePlacedResource2 = nullptr;
 static PFN_CREATE_RESERVED_RESOURCE2 gOrigCreateReservedResource2 = nullptr;
+
+static void LogResourceHookCall(const char *api, const void *object)
+{
+	if (DX12IsInternalReplay())
+		return;
+	DX12LogDebugJsonFunc("DX12HookCall",
+		"\"api\":\"%s\",\"present\":%ld,\"this\":\"%p\"",
+		api ? api : "", DX12GetPresentCount(), object);
+}
 
 template <typename T>
 static T GetDeviceOriginal(void *device, UINT slot, T fallback, const char *name)
@@ -896,8 +906,11 @@ static void RecordDescriptorCopyRange(
 static HRESULT STDMETHODCALLTYPE HookedCreateDescriptorHeap(
 	ID3D12Device *device, const D3D12_DESCRIPTOR_HEAP_DESC *desc, REFIID riid, void **heap)
 {
+	LogResourceHookCall("ID3D12Device::CreateDescriptorHeap", device);
 	auto original = GetDeviceOriginal(
 		device, 14, gOrigCreateDescriptorHeap, "ID3D12Device::CreateDescriptorHeap");
+	if (DX12IsInternalReplay())
+		return original ? original(device, desc, riid, heap) : E_FAIL;
 	HRESULT hr = original ? original(device, desc, riid, heap) : E_FAIL;
 	if (SUCCEEDED(hr) && desc && heap && *heap) {
 		ID3D12DescriptorHeap *descriptorHeap = nullptr;
@@ -922,8 +935,11 @@ static HRESULT STDMETHODCALLTYPE HookedCreateRootSignature(
 	ID3D12Device *device, UINT nodeMask, const void *blob, SIZE_T blobLength,
 	REFIID riid, void **rootSignature)
 {
+	LogResourceHookCall("ID3D12Device::CreateRootSignature", device);
 	auto original = GetDeviceOriginal(
 		device, 16, gOrigCreateRootSignature, "ID3D12Device::CreateRootSignature");
+	if (DX12IsInternalReplay())
+		return original ? original(device, nodeMask, blob, blobLength, riid, rootSignature) : E_FAIL;
 	HRESULT hr = original ? original(device, nodeMask, blob, blobLength, riid, rootSignature) : E_FAIL;
 	if (SUCCEEDED(hr) && blob && blobLength && rootSignature && *rootSignature) {
 		RootSignatureRecord record;
@@ -944,10 +960,15 @@ static void STDMETHODCALLTYPE HookedCreateConstantBufferView(
 	ID3D12Device *device, const D3D12_CONSTANT_BUFFER_VIEW_DESC *desc,
 	D3D12_CPU_DESCRIPTOR_HANDLE destDescriptor)
 {
+	LogResourceHookCall("ID3D12Device::CreateConstantBufferView", device);
 	auto original = GetDeviceOriginal(
 		device, 17, gOrigCreateConstantBufferView, "ID3D12Device::CreateConstantBufferView");
 	if (!original)
 		return;
+	if (DX12IsInternalReplay()) {
+		original(device, desc, destDescriptor);
+		return;
+	}
 	original(device, desc, destDescriptor);
 	if (desc) {
 		DescriptorRecord record;
@@ -966,10 +987,15 @@ static void STDMETHODCALLTYPE HookedCreateShaderResourceView(
 	ID3D12Device *device, ID3D12Resource *resource,
 	const D3D12_SHADER_RESOURCE_VIEW_DESC *desc, D3D12_CPU_DESCRIPTOR_HANDLE destDescriptor)
 {
+	LogResourceHookCall("ID3D12Device::CreateShaderResourceView", device);
 	auto original = GetDeviceOriginal(
 		device, 18, gOrigCreateShaderResourceView, "ID3D12Device::CreateShaderResourceView");
 	if (!original)
 		return;
+	if (DX12IsInternalReplay()) {
+		original(device, resource, desc, destDescriptor);
+		return;
+	}
 	original(device, resource, desc, destDescriptor);
 	DescriptorRecord record;
 	record.kind = "SRV";
@@ -987,18 +1013,30 @@ static void STDMETHODCALLTYPE HookedCreateUnorderedAccessView(
 	ID3D12Device *device, ID3D12Resource *resource, ID3D12Resource *counterResource,
 	const D3D12_UNORDERED_ACCESS_VIEW_DESC *desc, D3D12_CPU_DESCRIPTOR_HANDLE destDescriptor)
 {
+	LogResourceHookCall("ID3D12Device::CreateUnorderedAccessView", device);
 	auto original = GetDeviceOriginal(
 		device, 19, gOrigCreateUnorderedAccessView, "ID3D12Device::CreateUnorderedAccessView");
 	if (!original)
 		return;
-	original(device, resource, counterResource, desc, destDescriptor);
+	if (DX12IsInternalReplay()) {
+		original(device, resource, counterResource, desc, destDescriptor);
+		return;
+	}
+	D3D12_UNORDERED_ACCESS_VIEW_DESC adjustedDesc = {};
+	const D3D12_UNORDERED_ACCESS_VIEW_DESC *descToUse = desc;
+	if (desc) {
+		adjustedDesc = *desc;
+		if (DX12ModAdjustUavDesc(resource, &adjustedDesc, "CreateUnorderedAccessView"))
+			descToUse = &adjustedDesc;
+	}
+	original(device, resource, counterResource, descToUse, destDescriptor);
 	DescriptorRecord record;
 	record.kind = "UAV";
 	record.cpuHandle = destDescriptor.ptr;
 	record.counterResource = counterResource;
 	FillResourceInfo(&record, resource);
-	if (desc) {
-		record.uav = *desc;
+	if (descToUse) {
+		record.uav = *descToUse;
 		record.hasDesc = true;
 		FillUavBufferView(&record);
 	}
@@ -1009,10 +1047,15 @@ static void STDMETHODCALLTYPE HookedCreateRenderTargetView(
 	ID3D12Device *device, ID3D12Resource *resource,
 	const D3D12_RENDER_TARGET_VIEW_DESC *desc, D3D12_CPU_DESCRIPTOR_HANDLE destDescriptor)
 {
+	LogResourceHookCall("ID3D12Device::CreateRenderTargetView", device);
 	auto original = GetDeviceOriginal(
 		device, 20, gOrigCreateRenderTargetView, "ID3D12Device::CreateRenderTargetView");
 	if (!original)
 		return;
+	if (DX12IsInternalReplay()) {
+		original(device, resource, desc, destDescriptor);
+		return;
+	}
 	original(device, resource, desc, destDescriptor);
 	DescriptorRecord record;
 	record.kind = "RTV";
@@ -1029,10 +1072,15 @@ static void STDMETHODCALLTYPE HookedCreateDepthStencilView(
 	ID3D12Device *device, ID3D12Resource *resource,
 	const D3D12_DEPTH_STENCIL_VIEW_DESC *desc, D3D12_CPU_DESCRIPTOR_HANDLE destDescriptor)
 {
+	LogResourceHookCall("ID3D12Device::CreateDepthStencilView", device);
 	auto original = GetDeviceOriginal(
 		device, 21, gOrigCreateDepthStencilView, "ID3D12Device::CreateDepthStencilView");
 	if (!original)
 		return;
+	if (DX12IsInternalReplay()) {
+		original(device, resource, desc, destDescriptor);
+		return;
+	}
 	original(device, resource, desc, destDescriptor);
 	DescriptorRecord record;
 	record.kind = "DSV";
@@ -1049,10 +1097,15 @@ static void STDMETHODCALLTYPE HookedCreateSampler(
 	ID3D12Device *device, const D3D12_SAMPLER_DESC *desc,
 	D3D12_CPU_DESCRIPTOR_HANDLE destDescriptor)
 {
+	LogResourceHookCall("ID3D12Device::CreateSampler", device);
 	auto original = GetDeviceOriginal(
 		device, 22, gOrigCreateSampler, "ID3D12Device::CreateSampler");
 	if (!original)
 		return;
+	if (DX12IsInternalReplay()) {
+		original(device, desc, destDescriptor);
+		return;
+	}
 	original(device, desc, destDescriptor);
 	if (desc) {
 		DescriptorRecord record;
@@ -1071,10 +1124,17 @@ static void STDMETHODCALLTYPE HookedCopyDescriptors(
 	const D3D12_CPU_DESCRIPTOR_HANDLE *srcDescriptorRangeStarts,
 	const UINT *srcDescriptorRangeSizes, D3D12_DESCRIPTOR_HEAP_TYPE descriptorHeapsType)
 {
+	LogResourceHookCall("ID3D12Device::CopyDescriptors", device);
 	auto original = GetDeviceOriginal(
 		device, 23, gOrigCopyDescriptors, "ID3D12Device::CopyDescriptors");
 	if (!original)
 		return;
+	if (DX12IsInternalReplay()) {
+		original(device, numDestDescriptorRanges, destDescriptorRangeStarts,
+			destDescriptorRangeSizes, numSrcDescriptorRanges, srcDescriptorRangeStarts,
+			srcDescriptorRangeSizes, descriptorHeapsType);
+		return;
+	}
 	original(device, numDestDescriptorRanges, destDescriptorRangeStarts,
 		destDescriptorRangeSizes, numSrcDescriptorRanges, srcDescriptorRangeStarts,
 		srcDescriptorRangeSizes, descriptorHeapsType);
@@ -1118,10 +1178,16 @@ static void STDMETHODCALLTYPE HookedCopyDescriptorsSimple(
 	ID3D12Device *device, UINT numDescriptors, D3D12_CPU_DESCRIPTOR_HANDLE destDescriptorRangeStart,
 	D3D12_CPU_DESCRIPTOR_HANDLE srcDescriptorRangeStart, D3D12_DESCRIPTOR_HEAP_TYPE descriptorHeapsType)
 {
+	LogResourceHookCall("ID3D12Device::CopyDescriptorsSimple", device);
 	auto original = GetDeviceOriginal(
 		device, 24, gOrigCopyDescriptorsSimple, "ID3D12Device::CopyDescriptorsSimple");
 	if (!original)
 		return;
+	if (DX12IsInternalReplay()) {
+		original(device, numDescriptors, destDescriptorRangeStart,
+			srcDescriptorRangeStart, descriptorHeapsType);
+		return;
+	}
 	original(device, numDescriptors, destDescriptorRangeStart,
 		srcDescriptorRangeStart, descriptorHeapsType);
 	RecordDescriptorCopyRange(device, descriptorHeapsType, destDescriptorRangeStart,
@@ -1134,16 +1200,27 @@ static HRESULT STDMETHODCALLTYPE HookedCreateCommittedResource(
 	D3D12_RESOURCE_STATES initialState, const D3D12_CLEAR_VALUE *optimizedClearValue,
 	REFIID riid, void **resource)
 {
+	LogResourceHookCall("ID3D12Device::CreateCommittedResource", device);
 	auto original = GetDeviceOriginal(
 		device, 27, gOrigCreateCommittedResource, "ID3D12Device::CreateCommittedResource");
 	if (!original)
 		return E_FAIL;
-	HRESULT hr = original(device, heapProperties, heapFlags, desc,
+	if (DX12IsInternalReplay())
+		return original(device, heapProperties, heapFlags, desc,
+			initialState, optimizedClearValue, riid, resource);
+	D3D12_RESOURCE_DESC adjustedDesc = {};
+	const D3D12_RESOURCE_DESC *descToUse = desc;
+	if (desc) {
+		adjustedDesc = *desc;
+		if (DX12ModAdjustBufferResourceDesc(&adjustedDesc, "CreateCommittedResource"))
+			descToUse = &adjustedDesc;
+	}
+	HRESULT hr = original(device, heapProperties, heapFlags, descToUse,
 		initialState, optimizedClearValue, riid, resource);
 	if (SUCCEEDED(hr) && resource && *resource) {
 		ID3D12Resource *d3dResource = nullptr;
 		if (SUCCEEDED(static_cast<IUnknown*>(*resource)->QueryInterface(IID_PPV_ARGS(&d3dResource)))) {
-			RecordResource(d3dResource, desc, heapProperties, initialState);
+			RecordResource(d3dResource, descToUse, heapProperties, initialState);
 			d3dResource->Release();
 		}
 	}
@@ -1155,10 +1232,14 @@ static HRESULT STDMETHODCALLTYPE HookedCreatePlacedResource(
 	const D3D12_RESOURCE_DESC *desc, D3D12_RESOURCE_STATES initialState,
 	const D3D12_CLEAR_VALUE *optimizedClearValue, REFIID riid, void **resource)
 {
+	LogResourceHookCall("ID3D12Device::CreatePlacedResource", device);
 	auto original = GetDeviceOriginal(
 		device, 29, gOrigCreatePlacedResource, "ID3D12Device::CreatePlacedResource");
 	if (!original)
 		return E_FAIL;
+	if (DX12IsInternalReplay())
+		return original(device, heap, heapOffset, desc,
+			initialState, optimizedClearValue, riid, resource);
 	HRESULT hr = original(device, heap, heapOffset, desc,
 		initialState, optimizedClearValue, riid, resource);
 	if (SUCCEEDED(hr) && resource && *resource) {
@@ -1176,10 +1257,14 @@ static HRESULT STDMETHODCALLTYPE HookedCreateReservedResource(
 	D3D12_RESOURCE_STATES initialState, const D3D12_CLEAR_VALUE *optimizedClearValue,
 	REFIID riid, void **resource)
 {
+	LogResourceHookCall("ID3D12Device::CreateReservedResource", device);
 	auto original = GetDeviceOriginal(
 		device, 30, gOrigCreateReservedResource, "ID3D12Device::CreateReservedResource");
 	if (!original)
 		return E_FAIL;
+	if (DX12IsInternalReplay())
+		return original(device, desc, initialState,
+			optimizedClearValue, riid, resource);
 	HRESULT hr = original(device, desc, initialState,
 		optimizedClearValue, riid, resource);
 	if (SUCCEEDED(hr) && resource && *resource) {
@@ -1198,16 +1283,27 @@ static HRESULT STDMETHODCALLTYPE HookedCreateCommittedResource1(
 	D3D12_RESOURCE_STATES initialState, const D3D12_CLEAR_VALUE *optimizedClearValue,
 	ID3D12ProtectedResourceSession *protectedSession, REFIID riid, void **resource)
 {
+	LogResourceHookCall("ID3D12Device4::CreateCommittedResource1", device);
 	auto original = GetDeviceOriginal(
 		device, 53, gOrigCreateCommittedResource1, "ID3D12Device4::CreateCommittedResource1");
 	if (!original)
 		return E_FAIL;
-	HRESULT hr = original(device, heapProperties, heapFlags, desc,
+	if (DX12IsInternalReplay())
+		return original(device, heapProperties, heapFlags, desc,
+			initialState, optimizedClearValue, protectedSession, riid, resource);
+	D3D12_RESOURCE_DESC adjustedDesc = {};
+	const D3D12_RESOURCE_DESC *descToUse = desc;
+	if (desc) {
+		adjustedDesc = *desc;
+		if (DX12ModAdjustBufferResourceDesc(&adjustedDesc, "CreateCommittedResource1"))
+			descToUse = &adjustedDesc;
+	}
+	HRESULT hr = original(device, heapProperties, heapFlags, descToUse,
 		initialState, optimizedClearValue, protectedSession, riid, resource);
 	if (SUCCEEDED(hr) && resource && *resource) {
 		ID3D12Resource *d3dResource = nullptr;
 		if (SUCCEEDED(static_cast<IUnknown*>(*resource)->QueryInterface(IID_PPV_ARGS(&d3dResource)))) {
-			RecordResource(d3dResource, desc, heapProperties, initialState);
+			RecordResource(d3dResource, descToUse, heapProperties, initialState);
 			d3dResource->Release();
 		}
 	}
@@ -1219,10 +1315,14 @@ static HRESULT STDMETHODCALLTYPE HookedCreateReservedResource1(
 	D3D12_RESOURCE_STATES initialState, const D3D12_CLEAR_VALUE *optimizedClearValue,
 	ID3D12ProtectedResourceSession *protectedSession, REFIID riid, void **resource)
 {
+	LogResourceHookCall("ID3D12Device4::CreateReservedResource1", device);
 	auto original = GetDeviceOriginal(
 		device, 55, gOrigCreateReservedResource1, "ID3D12Device4::CreateReservedResource1");
 	if (!original)
 		return E_FAIL;
+	if (DX12IsInternalReplay())
+		return original(device, desc, initialState,
+			optimizedClearValue, protectedSession, riid, resource);
 	HRESULT hr = original(device, desc, initialState,
 		optimizedClearValue, protectedSession, riid, resource);
 	if (SUCCEEDED(hr) && resource && *resource) {
@@ -1241,17 +1341,28 @@ static HRESULT STDMETHODCALLTYPE HookedCreateCommittedResource2(
 	D3D12_RESOURCE_STATES initialState, const D3D12_CLEAR_VALUE *optimizedClearValue,
 	ID3D12ProtectedResourceSession *protectedSession, REFIID riid, void **resource)
 {
+	LogResourceHookCall("ID3D12Device8::CreateCommittedResource2", device);
 	auto original = GetDeviceOriginal(
 		device, 69, gOrigCreateCommittedResource2, "ID3D12Device8::CreateCommittedResource2");
 	if (!original)
 		return E_FAIL;
-	HRESULT hr = original(device, heapProperties, heapFlags, desc,
+	if (DX12IsInternalReplay())
+		return original(device, heapProperties, heapFlags, desc,
+			initialState, optimizedClearValue, protectedSession, riid, resource);
+	D3D12_RESOURCE_DESC1 adjustedDesc = {};
+	const D3D12_RESOURCE_DESC1 *descToUse = desc;
+	if (desc) {
+		adjustedDesc = *desc;
+		if (DX12ModAdjustBufferResourceDesc1(&adjustedDesc, "CreateCommittedResource2"))
+			descToUse = &adjustedDesc;
+	}
+	HRESULT hr = original(device, heapProperties, heapFlags, descToUse,
 		initialState, optimizedClearValue, protectedSession, riid, resource);
 	if (SUCCEEDED(hr) && resource && *resource) {
 		ID3D12Resource *d3dResource = nullptr;
 		if (SUCCEEDED(static_cast<IUnknown*>(*resource)->QueryInterface(IID_PPV_ARGS(&d3dResource)))) {
-			D3D12_RESOURCE_DESC desc0 = ResourceDescFromDesc1(desc);
-			RecordResource(d3dResource, desc ? &desc0 : nullptr, heapProperties, initialState);
+			D3D12_RESOURCE_DESC desc0 = ResourceDescFromDesc1(descToUse);
+			RecordResource(d3dResource, descToUse ? &desc0 : nullptr, heapProperties, initialState);
 			d3dResource->Release();
 		}
 	}
@@ -1263,10 +1374,14 @@ static HRESULT STDMETHODCALLTYPE HookedCreatePlacedResource1(
 	const D3D12_RESOURCE_DESC1 *desc, D3D12_RESOURCE_STATES initialState,
 	const D3D12_CLEAR_VALUE *optimizedClearValue, REFIID riid, void **resource)
 {
+	LogResourceHookCall("ID3D12Device8::CreatePlacedResource1", device);
 	auto original = GetDeviceOriginal(
 		device, 70, gOrigCreatePlacedResource1, "ID3D12Device8::CreatePlacedResource1");
 	if (!original)
 		return E_FAIL;
+	if (DX12IsInternalReplay())
+		return original(device, heap, heapOffset, desc,
+			initialState, optimizedClearValue, riid, resource);
 	HRESULT hr = original(device, heap, heapOffset, desc,
 		initialState, optimizedClearValue, riid, resource);
 	if (SUCCEEDED(hr) && resource && *resource) {
@@ -1287,18 +1402,30 @@ static HRESULT STDMETHODCALLTYPE HookedCreateCommittedResource3(
 	ID3D12ProtectedResourceSession *protectedSession, UINT32 numCastableFormats,
 	const DXGI_FORMAT *castableFormats, REFIID riid, void **resource)
 {
+	LogResourceHookCall("ID3D12Device10::CreateCommittedResource3", device);
 	auto original = GetDeviceOriginal(
 		device, 76, gOrigCreateCommittedResource3, "ID3D12Device10::CreateCommittedResource3");
 	if (!original)
 		return E_FAIL;
-	HRESULT hr = original(device, heapProperties, heapFlags, desc,
+	if (DX12IsInternalReplay())
+		return original(device, heapProperties, heapFlags, desc,
+			initialLayout, optimizedClearValue, protectedSession, numCastableFormats,
+			castableFormats, riid, resource);
+	D3D12_RESOURCE_DESC1 adjustedDesc = {};
+	const D3D12_RESOURCE_DESC1 *descToUse = desc;
+	if (desc) {
+		adjustedDesc = *desc;
+		if (DX12ModAdjustBufferResourceDesc1(&adjustedDesc, "CreateCommittedResource3"))
+			descToUse = &adjustedDesc;
+	}
+	HRESULT hr = original(device, heapProperties, heapFlags, descToUse,
 		initialLayout, optimizedClearValue, protectedSession, numCastableFormats,
 		castableFormats, riid, resource);
 	if (SUCCEEDED(hr) && resource && *resource) {
 		ID3D12Resource *d3dResource = nullptr;
 		if (SUCCEEDED(static_cast<IUnknown*>(*resource)->QueryInterface(IID_PPV_ARGS(&d3dResource)))) {
-			D3D12_RESOURCE_DESC desc0 = ResourceDescFromDesc1(desc);
-			RecordResource(d3dResource, desc ? &desc0 : nullptr, heapProperties,
+			D3D12_RESOURCE_DESC desc0 = ResourceDescFromDesc1(descToUse);
+			RecordResource(d3dResource, descToUse ? &desc0 : nullptr, heapProperties,
 				ResourceStateFromLayout(initialLayout));
 			d3dResource->Release();
 		}
@@ -1312,10 +1439,15 @@ static HRESULT STDMETHODCALLTYPE HookedCreatePlacedResource2(
 	const D3D12_CLEAR_VALUE *optimizedClearValue, UINT32 numCastableFormats,
 	const DXGI_FORMAT *castableFormats, REFIID riid, void **resource)
 {
+	LogResourceHookCall("ID3D12Device10::CreatePlacedResource2", device);
 	auto original = GetDeviceOriginal(
 		device, 77, gOrigCreatePlacedResource2, "ID3D12Device10::CreatePlacedResource2");
 	if (!original)
 		return E_FAIL;
+	if (DX12IsInternalReplay())
+		return original(device, heap, heapOffset, desc,
+			initialLayout, optimizedClearValue, numCastableFormats, castableFormats,
+			riid, resource);
 	HRESULT hr = original(device, heap, heapOffset, desc,
 		initialLayout, optimizedClearValue, numCastableFormats, castableFormats,
 		riid, resource);
@@ -1337,10 +1469,15 @@ static HRESULT STDMETHODCALLTYPE HookedCreateReservedResource2(
 	ID3D12ProtectedResourceSession *protectedSession, UINT32 numCastableFormats,
 	const DXGI_FORMAT *castableFormats, REFIID riid, void **resource)
 {
+	LogResourceHookCall("ID3D12Device10::CreateReservedResource2", device);
 	auto original = GetDeviceOriginal(
 		device, 78, gOrigCreateReservedResource2, "ID3D12Device10::CreateReservedResource2");
 	if (!original)
 		return E_FAIL;
+	if (DX12IsInternalReplay())
+		return original(device, desc, initialLayout,
+			optimizedClearValue, protectedSession, numCastableFormats, castableFormats,
+			riid, resource);
 	HRESULT hr = original(device, desc, initialLayout,
 		optimizedClearValue, protectedSession, numCastableFormats, castableFormats,
 		riid, resource);
@@ -1759,6 +1896,54 @@ void DX12GetResourceMetadataSnapshot(
 
 	ReleaseSRWLockShared(&gResourceLock);
 	DX12FrameAnalysisLogJsonFunc("MetadataSnapshotComplete", nullptr);
+}
+
+bool DX12FindDescriptorSummaryByCpuHandle(
+	SIZE_T cpuHandle, DX12DescriptorSummary *summary)
+{
+	if (!cpuHandle || !summary)
+		return false;
+
+	AcquireSRWLockShared(&gResourceLock);
+	auto found = gDescriptorByCpuHandle.find(cpuHandle);
+	if (found == gDescriptorByCpuHandle.end() || found->second >= gDescriptors.size()) {
+		ReleaseSRWLockShared(&gResourceLock);
+		return false;
+	}
+	FillDescriptorSummary(summary, gDescriptors[found->second]);
+	ReleaseSRWLockShared(&gResourceLock);
+	return true;
+}
+
+bool DX12FindDescriptorHeapByGpuHandle(
+	D3D12_GPU_DESCRIPTOR_HANDLE gpuHandle, D3D12_DESCRIPTOR_HEAP_TYPE type,
+	DX12DescriptorHeapSummary *summary)
+{
+	if (!gpuHandle.ptr || !summary)
+		return false;
+
+	AcquireSRWLockShared(&gResourceLock);
+	for (const DescriptorHeapRecord &record : gDescriptorHeaps) {
+		if (record.desc.Type != type || record.gpuStart == 0 || record.increment == 0)
+			continue;
+		const UINT64 begin = record.gpuStart;
+		const UINT64 end = begin +
+			static_cast<UINT64>(record.desc.NumDescriptors) * record.increment;
+		if (gpuHandle.ptr < begin || gpuHandle.ptr >= end)
+			continue;
+		summary->heap = record.heap;
+		summary->type = static_cast<UINT>(record.desc.Type);
+		summary->numDescriptors = record.desc.NumDescriptors;
+		summary->flags = static_cast<UINT>(record.desc.Flags);
+		summary->nodeMask = record.desc.NodeMask;
+		summary->cpuStart = record.cpuStart;
+		summary->gpuStart = record.gpuStart;
+		summary->increment = record.increment;
+		ReleaseSRWLockShared(&gResourceLock);
+		return true;
+	}
+	ReleaseSRWLockShared(&gResourceLock);
+	return false;
 }
 
 static void WriteResourceDesc(FILE *file, const DescriptorRecord &record)

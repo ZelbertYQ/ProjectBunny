@@ -4,6 +4,7 @@
 
 #include "DX12FrameAnalysis.h"
 #include "DX12ModRuntime.h"
+#include "DX12Profiling.h"
 #include "DX12ShaderDump.h"
 #include "DX12ShaderHunt.h"
 #include "DX12State.h"
@@ -11,6 +12,8 @@
 static bool gF8WasDown = false;
 static bool gF9WasDown = false;
 static bool gF10WasDown = false;
+static bool gF11WasDown = false;
+static volatile LONG gReloadInProgress = 0;
 static bool gNumpad0WasDown = false;
 static bool gNumpadAddWasDown = false;
 static bool gNumpad9WasDown = false;
@@ -77,6 +80,46 @@ static bool KeyPressedOrRepeated(int vk, RepeatKeyState *state)
 	return false;
 }
 
+static DWORD WINAPI DX12ReloadThread(void*)
+{
+	const DWORD start = GetTickCount();
+	DX12LogJsonFunc("DX12ModRuntimeReload", "\"status\":\"thread_begin\"");
+	const bool ok = DX12ModRuntimeReload();
+	const DWORD elapsed = GetTickCount() - start;
+	if (ok) {
+		wchar_t status[128];
+		swprintf_s(status, L"Reload Success TimeConsume: %.3f S",
+			static_cast<double>(elapsed) / 1000.0);
+		DX12SetOverlayStatusTemporary(status, 3000);
+	}
+	DX12LogJsonFunc("DX12ModRuntimeReload",
+		"\"status\":\"thread_done\",\"result\":\"%s\",\"elapsedMs\":%lu",
+		ok ? "ok" : "failed", elapsed);
+	InterlockedExchange(&gReloadInProgress, 0);
+	return 0;
+}
+
+static void RequestDx12Reload()
+{
+	if (InterlockedCompareExchange(&gReloadInProgress, 1, 0) != 0) {
+		DX12LogJsonFunc("DX12ModRuntimeReload", "\"status\":\"skipped\",\"reason\":\"already_running\"");
+		DX12SetOverlayWarning(L"F10 reload already running");
+		return;
+	}
+
+	DX12SetOverlayStatus(L"F10 reload running");
+	HANDLE thread = CreateThread(nullptr, 0, DX12ReloadThread, nullptr, 0, nullptr);
+	if (thread) {
+		CloseHandle(thread);
+		return;
+	}
+
+	InterlockedExchange(&gReloadInProgress, 0);
+	DX12LogJsonFunc("DX12ModRuntimeReload",
+		"\"status\":\"failed\",\"reason\":\"create_thread\",\"error\":%lu", GetLastError());
+	DX12SetOverlayError(L"F10 reload failed: cannot start thread");
+}
+
 void DX12PollInput()
 {
 	const bool f8Down = (GetAsyncKeyState(VK_F8) & 0x8000) != 0;
@@ -103,9 +146,16 @@ void DX12PollInput()
 	const bool f10Down = (GetAsyncKeyState(VK_F10) & 0x8000) != 0;
 	if (f10Down && !gF10WasDown) {
 		DX12LogJsonFunc("InputHotkey", "\"key\":\"F10\",\"action\":\"ModRuntimeReload\"");
-		DX12ModRuntimeReload();
+		RequestDx12Reload();
 	}
 	gF10WasDown = f10Down;
+
+	const bool f11Down = (GetAsyncKeyState(VK_F11) & 0x8000) != 0;
+	if (f11Down && !gF11WasDown) {
+		DX12LogJsonFunc("InputHotkey", "\"key\":\"F11\",\"action\":\"ProfilingToggle\"");
+		DX12Profiling::Toggle();
+	}
+	gF11WasDown = f11Down;
 
 	const bool decimalDown = (GetAsyncKeyState(VK_DECIMAL) & 0x8000) != 0;
 	if (!decimalDown && KeyPressed(VK_NUMPAD0, &gNumpad0WasDown)) {

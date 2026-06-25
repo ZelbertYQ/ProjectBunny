@@ -6,7 +6,11 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "DX12FrameAnalysis.h"
 #include "DX12Json.h"
+#include "DX12ModRuntime.h"
+#include "DX12ShaderDump.h"
+#include "DX12ShaderHunt.h"
 #include "Nektra/NktHookLib.h"
 
 static HINSTANCE gModule = nullptr;
@@ -15,11 +19,64 @@ static unsigned long long gLogLineNo = 0;
 static volatile LONG gPresentCount = 0;
 static HWND gOverlayWindow = nullptr;
 static wchar_t gOverlayStatus[512] = L"3DMigoto DX12 hook alive";
+static COLORREF gOverlayStatusColor = RGB(0, 255, 0);
+static DWORD gOverlayStatusExpireTick = 0;
 static ID3D12CommandQueue *gCommandQueue = nullptr;
 static SRWLOCK gStateLock = SRWLOCK_INIT;
 static CNktHookLib gHookMgr;
 static std::unordered_set<void*> gHookedFunctions;
 static std::unordered_map<void*, void*> gOriginalFunctions;
+
+// Hot-path fast-forward flags — see DX12State.h for full documentation.
+volatile LONG gDX12HotPathSkipAll = 0;
+volatile LONG gDX12HotPathSkipBindings = 0;
+static thread_local UINT tDX12InternalReplayDepth = 0;
+
+void DX12EnterInternalReplay()
+{
+	++tDX12InternalReplayDepth;
+}
+
+void DX12LeaveInternalReplay()
+{
+	if (tDX12InternalReplayDepth)
+		--tDX12InternalReplayDepth;
+}
+
+bool DX12IsInternalReplay()
+{
+	return tDX12InternalReplayDepth != 0;
+}
+
+void DX12HotPathUpdate()
+{
+	// Heavy tracking subsystems that need full binding-tracker data.
+	const bool needsHeavyTracking =
+		DX12FrameAnalysisIsActive() ||
+		DX12FrameAnalysisIsCapturing() ||
+		DX12FrameAnalysisIsCaptureRequested() ||
+		DX12ShaderDumpIsCapturingFrame() ||
+		DX12ShaderDumpIsCaptureRequested() ||
+		DX12ShaderDumpIsBusy() ||
+		DX12HuntIsEnabled();
+
+	// Mod work that needs draw/dispatch hooks but NOT binding hooks.
+	const bool needsModWork =
+		DX12ModHasActiveShaderOverrides() ||
+		DX12ModHasActiveTextureOverrides() ||
+		DX12ModNeedsPresentReplacement() ||
+		DX12ModHasAnyActiveOverrides() ||
+		DX12ModNeedsPreSkinningUavProbe();
+
+	// Skip-all: only when NOTHING is active.
+	InterlockedExchange(&gDX12HotPathSkipAll,
+		(needsHeavyTracking || needsModWork) ? 0 : 1);
+
+	// Skip-bindings: when no heavy tracking is needed.  Mod work alone does
+	// NOT require binding tracking — the draw hooks handle mod matching.
+	InterlockedExchange(&gDX12HotPathSkipBindings,
+		needsHeavyTracking ? 0 : 1);
+}
 
 void DX12SetModule(HINSTANCE module)
 {
@@ -44,6 +101,41 @@ bool DX12OpenLogFile()
 	return gLog != nullptr;
 }
 
+static void MakeLogTime(char *buffer, size_t bufferSize)
+{
+	if (!buffer || !bufferSize)
+		return;
+	SYSTEMTIME localTime;
+	GetLocalTime(&localTime);
+	snprintf(buffer, bufferSize,
+		"\"%04u-%02u-%02uT%02u:%02u:%02u.%03u+08:00\"",
+		localTime.wYear, localTime.wMonth, localTime.wDay,
+		localTime.wHour, localTime.wMinute, localTime.wSecond,
+		localTime.wMilliseconds);
+}
+
+static void WriteJsonLogLine(const char *funcJson, const char *extra, bool flush)
+{
+	if (!gLog)
+		return;
+	char timeJson[64] = {};
+	MakeLogTime(timeJson, sizeof(timeJson));
+	const DWORD tick = GetTickCount();
+	const DWORD threadId = GetCurrentThreadId();
+	const unsigned long long index = ++gLogLineNo;
+	if (extra && extra[0]) {
+		fprintf(gLog,
+			"{\"index\":%llu,\"time\":%s,\"tickMs\":%lu,\"thread\":%lu,\"func\":%s,%s}\n",
+			index, timeJson, tick, threadId, funcJson, extra);
+	} else {
+		fprintf(gLog,
+			"{\"index\":%llu,\"time\":%s,\"tickMs\":%lu,\"thread\":%lu,\"func\":%s}\n",
+			index, timeJson, tick, threadId, funcJson);
+	}
+	if (flush)
+		fflush(gLog);
+}
+
 void DX12CloseLogFile()
 {
 	if (gLog) {
@@ -65,10 +157,13 @@ void DX12Log(const char *fmt, ...)
 	vsnprintf(message, sizeof(message), fmt, args);
 	va_end(args);
 
-	strcpy_s(fields, sizeof(fields), "\"func\":\"Log\"");
+	fields[0] = '\0';
 	DX12JsonAppendLogFieldsFromText(fields, sizeof(fields), message);
-	fprintf(gLog, "{\"index\":%llu,%s}\n", ++gLogLineNo, fields);
-	fflush(gLog);
+	char funcJson[16];
+	DX12JsonEscapeString(funcJson, sizeof(funcJson), "Log");
+	WriteJsonLogLine(funcJson, fields[0] == ',' ? fields + 1 : fields, false);
+	// Do NOT fflush here — per-line sync flushes cause severe CPU stalls on the
+	// recording hot path. DX12FlushLog() is called from the Present hook instead.
 }
 
 void DX12LogJsonFunc(const char *func, const char *fmt, ...)
@@ -88,11 +183,76 @@ void DX12LogJsonFunc(const char *func, const char *fmt, ...)
 		va_end(args);
 	}
 
-	if (extra[0])
-		fprintf(gLog, "{\"index\":%llu,\"func\":%s,%s}\n", ++gLogLineNo, funcJson, extra);
-	else
-		fprintf(gLog, "{\"index\":%llu,\"func\":%s}\n", ++gLogLineNo, funcJson);
-	fflush(gLog);
+	WriteJsonLogLine(funcJson, extra, false);
+	// No fflush here — see DX12Log above.
+}
+
+void DX12LogJsonFuncFlush(const char *func, const char *fmt, ...)
+{
+	if (!gLog)
+		return;
+
+	char funcJson[512];
+	char extra[4096];
+	DX12JsonEscapeString(funcJson, sizeof(funcJson), func ? func : "Unknown");
+	extra[0] = '\0';
+
+	if (fmt && fmt[0]) {
+		va_list args;
+		va_start(args, fmt);
+		vsnprintf(extra, sizeof(extra), fmt, args);
+		va_end(args);
+	}
+
+	WriteJsonLogLine(funcJson, extra, true);
+}
+
+#if defined(_DEBUG)
+void DX12LogDebugJsonFunc(const char *func, const char *fmt, ...)
+{
+	if (!gLog)
+		return;
+
+	char funcJson[512];
+	char extra[4096];
+	DX12JsonEscapeString(funcJson, sizeof(funcJson), func ? func : "Unknown");
+	extra[0] = '\0';
+
+	if (fmt && fmt[0]) {
+		va_list args;
+		va_start(args, fmt);
+		vsnprintf(extra, sizeof(extra), fmt, args);
+		va_end(args);
+	}
+
+	WriteJsonLogLine(funcJson, extra, false);
+}
+
+void DX12LogDebugJsonFuncFlush(const char *func, const char *fmt, ...)
+{
+	if (!gLog)
+		return;
+
+	char funcJson[512];
+	char extra[4096];
+	DX12JsonEscapeString(funcJson, sizeof(funcJson), func ? func : "Unknown");
+	extra[0] = '\0';
+
+	if (fmt && fmt[0]) {
+		va_list args;
+		va_start(args, fmt);
+		vsnprintf(extra, sizeof(extra), fmt, args);
+		va_end(args);
+	}
+
+	WriteJsonLogLine(funcJson, extra, true);
+}
+#endif
+
+void DX12FlushLog()
+{
+	if (gLog)
+		fflush(gLog);
 }
 
 static bool RememberHook(void *target)
@@ -168,18 +328,76 @@ HWND DX12GetOverlayWindow()
 	return gOverlayWindow;
 }
 
+static void SetOverlayStatusColorLocked(const wchar_t *status, COLORREF color)
+{
+	if (status && status[0])
+		wcsncpy_s(gOverlayStatus, status, _TRUNCATE);
+	else
+		wcsncpy_s(gOverlayStatus, L"3DMigoto DX12 hook alive", _TRUNCATE);
+	gOverlayStatusColor = color;
+	gOverlayStatusExpireTick = 0;
+}
+
+static void InvalidateOverlayStatus()
+{
+	HWND hwnd = DX12GetOverlayWindow();
+	if (hwnd)
+		InvalidateRect(hwnd, nullptr, FALSE);
+}
+
 void DX12SetOverlayStatus(const wchar_t *status)
+{
+	AcquireSRWLockExclusive(&gStateLock);
+	SetOverlayStatusColorLocked(status, RGB(0, 255, 0));
+	ReleaseSRWLockExclusive(&gStateLock);
+	InvalidateOverlayStatus();
+}
+
+void DX12SetOverlayWarning(const wchar_t *status)
+{
+	AcquireSRWLockExclusive(&gStateLock);
+	SetOverlayStatusColorLocked(status, RGB(255, 220, 0));
+	ReleaseSRWLockExclusive(&gStateLock);
+	InvalidateOverlayStatus();
+}
+
+void DX12SetOverlayError(const wchar_t *status)
+{
+	AcquireSRWLockExclusive(&gStateLock);
+	SetOverlayStatusColorLocked(status, RGB(255, 64, 64));
+	ReleaseSRWLockExclusive(&gStateLock);
+	InvalidateOverlayStatus();
+}
+
+void DX12SetOverlayStatusTemporary(const wchar_t *status, DWORD durationMs)
 {
 	AcquireSRWLockExclusive(&gStateLock);
 	if (status && status[0])
 		wcsncpy_s(gOverlayStatus, status, _TRUNCATE);
 	else
 		wcsncpy_s(gOverlayStatus, L"3DMigoto DX12 hook alive", _TRUNCATE);
+	gOverlayStatusColor = RGB(0, 255, 0);
+	gOverlayStatusExpireTick = durationMs ? GetTickCount() + durationMs : 0;
 	ReleaseSRWLockExclusive(&gStateLock);
+	InvalidateOverlayStatus();
+}
 
-	HWND hwnd = DX12GetOverlayWindow();
-	if (hwnd)
-		InvalidateRect(hwnd, nullptr, FALSE);
+void DX12ClearExpiredOverlayStatus()
+{
+	bool changed = false;
+	AcquireSRWLockExclusive(&gStateLock);
+	if (gOverlayStatusExpireTick) {
+		const DWORD now = GetTickCount();
+		if (static_cast<LONG>(now - gOverlayStatusExpireTick) >= 0) {
+			wcsncpy_s(gOverlayStatus, L"3DMigoto DX12 hook alive", _TRUNCATE);
+			gOverlayStatusColor = RGB(0, 255, 0);
+			gOverlayStatusExpireTick = 0;
+			changed = true;
+		}
+	}
+	ReleaseSRWLockExclusive(&gStateLock);
+	if (changed)
+		InvalidateOverlayStatus();
 }
 
 void DX12GetOverlayStatus(wchar_t *status, size_t statusCount)
@@ -190,6 +408,14 @@ void DX12GetOverlayStatus(wchar_t *status, size_t statusCount)
 	AcquireSRWLockShared(&gStateLock);
 	wcsncpy_s(status, statusCount, gOverlayStatus, _TRUNCATE);
 	ReleaseSRWLockShared(&gStateLock);
+}
+
+COLORREF DX12GetOverlayStatusColor()
+{
+	AcquireSRWLockShared(&gStateLock);
+	COLORREF color = gOverlayStatusColor;
+	ReleaseSRWLockShared(&gStateLock);
+	return color;
 }
 
 void DX12SetCommandQueue(ID3D12CommandQueue *queue)

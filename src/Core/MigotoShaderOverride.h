@@ -13,6 +13,10 @@ namespace Bunny {
 struct ShaderOverrideConfig
 {
 	std::wstring section;
+	std::wstring originalSection;
+	std::wstring sourcePath;
+	std::wstring sourceDir;
+	std::wstring iniNamespace;
 	uint64_t hash = 0;
 	bool handlingSkip = false;
 	CommandListLinks commandLists;

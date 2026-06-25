@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <set>
+#include <fstream>
 #include <sstream>
 
 namespace Bunny {
@@ -85,20 +86,22 @@ static bool ShouldExcludeRecursive(const std::wstring &name, const std::vector<s
 	return false;
 }
 
-static void AppendFileText(const std::wstring &path, std::wstringstream *combined)
+static bool ReadFileText(const std::wstring &path, std::wstring *text)
 {
-	if (!combined)
-		return;
+	if (!text)
+		return false;
+	text->clear();
+
 	FILE *file = _wfsopen(path.c_str(), L"rb", _SH_DENYNO);
 	if (!file)
-		return;
+		return false;
 
 	fseek(file, 0, SEEK_END);
 	long size = ftell(file);
 	fseek(file, 0, SEEK_SET);
 	if (size <= 0) {
 		fclose(file);
-		return;
+		return true;
 	}
 
 	std::string bytes;
@@ -106,24 +109,66 @@ static void AppendFileText(const std::wstring &path, std::wstringstream *combine
 	size_t read = fread(&bytes[0], 1, bytes.size(), file);
 	fclose(file);
 	if (read != bytes.size())
-		return;
+		return false;
 
-	std::wstring text(bytes.begin(), bytes.end());
-	*combined << L"\n; ---- begin include: " << path << L" ----\n";
-	*combined << text;
-	*combined << L"\n; ---- end include: " << path << L" ----\n";
+	if (bytes.size() >= 3 &&
+	    static_cast<unsigned char>(bytes[0]) == 0xef &&
+	    static_cast<unsigned char>(bytes[1]) == 0xbb &&
+	    static_cast<unsigned char>(bytes[2]) == 0xbf) {
+		bytes.erase(0, 3);
+	}
+
+	UINT codePage = CP_UTF8;
+	int length = MultiByteToWideChar(
+		codePage, MB_ERR_INVALID_CHARS, bytes.data(),
+		static_cast<int>(bytes.size()), nullptr, 0);
+	if (length <= 0) {
+		codePage = CP_ACP;
+		length = MultiByteToWideChar(
+			codePage, 0, bytes.data(), static_cast<int>(bytes.size()),
+			nullptr, 0);
+	}
+	if (length < 0)
+		return false;
+
+	text->assign(static_cast<size_t>(length), L'\0');
+	if (length > 0) {
+		const DWORD flags = codePage == CP_UTF8 ? MB_ERR_INVALID_CHARS : 0;
+		if (!MultiByteToWideChar(
+			    codePage, flags, bytes.data(), static_cast<int>(bytes.size()),
+			    &(*text)[0], length))
+			return false;
+	}
+	return true;
+}
+
+static std::wstring MakeRelativeNamespace(
+	const std::wstring &rootDir, const std::wstring &path)
+{
+	wchar_t relative[MAX_PATH];
+	if (PathRelativePathToW(
+		relative, rootDir.c_str(), FILE_ATTRIBUTE_DIRECTORY,
+		path.c_str(), FILE_ATTRIBUTE_NORMAL)) {
+		std::wstring value = relative;
+		if (value.rfind(L".\\", 0) == 0 || value.rfind(L"./", 0) == 0)
+			value = value.substr(2);
+		return value;
+	}
+	return path;
 }
 
 struct LoaderState
 {
 	std::wstring rootDir;
 	std::set<std::wstring> seenFiles;
-	std::wstringstream combined;
+	IniDocument document;
 	std::vector<std::wstring> loadedFiles;
+	std::vector<std::wstring> errors;
 	std::vector<std::wstring> warnings;
 };
 
-static void LoadFileRecursive(const std::wstring &path, LoaderState *state);
+static void LoadFileRecursive(
+	const std::wstring &path, const std::wstring &iniNamespace, LoaderState *state);
 
 static void CollectIncludeEntries(
 	const IniDocument &ini, std::vector<std::wstring> *includes,
@@ -183,12 +228,16 @@ static void LoadDirectoryRecursive(
 		[](const std::wstring &a, const std::wstring &b) { return ToLower(a) < ToLower(b); });
 
 	for (const std::wstring &file : iniFiles)
-		LoadFileRecursive(JoinPath(dir, file), state);
+	{
+		std::wstring filePath = JoinPath(dir, file);
+		LoadFileRecursive(filePath, MakeRelativeNamespace(state->rootDir, filePath), state);
+	}
 	for (const std::wstring &child : directories)
 		LoadDirectoryRecursive(JoinPath(dir, child), excludeRecursive, state);
 }
 
-static void LoadFileRecursive(const std::wstring &path, LoaderState *state)
+static void LoadFileRecursive(
+	const std::wstring &path, const std::wstring &iniNamespace, LoaderState *state)
 {
 	if (!state)
 		return;
@@ -199,23 +248,33 @@ static void LoadFileRecursive(const std::wstring &path, LoaderState *state)
 		return;
 	}
 
-	IniDocument ini;
-	if (!ini.LoadFromFile(path.c_str())) {
-		state->warnings.push_back(L"unable to load ini: " + path + L" (" + ini.Error() + L")");
+	std::wstring text;
+	if (!ReadFileText(path, &text)) {
+		state->errors.push_back(L"unable to load ini: " + path);
 		return;
 	}
 
 	state->loadedFiles.push_back(path);
-	AppendFileText(path, &state->combined);
+	std::wstring sourceDir = DirectoryOf(path);
+	if (!state->document.AppendParse(text.c_str(), path, sourceDir, iniNamespace)) {
+		state->errors.push_back(
+			L"unable to parse ini: " + path + L" (" + state->document.Error() + L")");
+		return;
+	}
 
 	std::vector<std::wstring> includes;
 	std::vector<std::wstring> recursiveIncludes;
 	std::vector<std::wstring> excludeRecursive;
-	CollectIncludeEntries(ini, &includes, &recursiveIncludes, &excludeRecursive);
+	IniDocument localIni;
+	localIni.Parse(text.c_str());
+	CollectIncludeEntries(localIni, &includes, &recursiveIncludes, &excludeRecursive);
 
 	std::wstring includeBase = DirectoryOf(path);
 	for (const std::wstring &include : includes)
-		LoadFileRecursive(JoinPath(includeBase, include), state);
+	{
+		std::wstring includePath = JoinPath(includeBase, include);
+		LoadFileRecursive(includePath, MakeRelativeNamespace(state->rootDir, includePath), state);
+	}
 	for (const std::wstring &recursive : recursiveIncludes)
 		LoadDirectoryRecursive(JoinPath(includeBase, recursive), excludeRecursive, state);
 }
@@ -228,11 +287,13 @@ bool LoadMigotoIniWithIncludes(const wchar_t *rootPath, MigotoIniLoadResult *res
 	*result = MigotoIniLoadResult();
 	LoaderState state;
 	state.rootDir = DirectoryOf(rootPath);
-	LoadFileRecursive(rootPath, &state);
+	LoadFileRecursive(rootPath, L"", &state);
 
 	result->loadedFiles = std::move(state.loadedFiles);
+	result->errors = std::move(state.errors);
 	result->warnings = std::move(state.warnings);
-	return result->document.Parse(state.combined.str().c_str());
+	result->document = std::move(state.document);
+	return true;
 }
 
 } // namespace Bunny

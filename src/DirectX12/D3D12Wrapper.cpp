@@ -245,9 +245,13 @@ extern "C" HRESULT WINAPI D3D12CreateDevice(
 extern "C" HRESULT WINAPI D3D12GetDebugInterface(REFIID riid, void **debug)
 {
 	LoadRealD3D12();
+	DX12LogDebugJsonFunc("DX12HookCall", "\"api\":\"D3D12GetDebugInterface\",\"this\":\"%p\"", nullptr);
 	if (!gOrigD3D12GetDebugInterface)
 		return E_FAIL;
-	return gOrigD3D12GetDebugInterface(riid, debug);
+	HRESULT hr = gOrigD3D12GetDebugInterface(riid, debug);
+	DX12LogJsonFunc("D3D12GetDebugInterface",
+		"\"hr\":\"0x%lx\",\"debug\":\"%p\"", hr, debug ? *debug : nullptr);
+	return hr;
 }
 
 extern "C" HRESULT WINAPI D3D12SerializeRootSignature(
@@ -255,48 +259,71 @@ extern "C" HRESULT WINAPI D3D12SerializeRootSignature(
 	ID3DBlob **blob, ID3DBlob **errorBlob)
 {
 	LoadRealD3D12();
+	DX12LogDebugJsonFunc("DX12HookCall", "\"api\":\"D3D12SerializeRootSignature\",\"this\":\"%p\"", nullptr);
 	if (!gOrigD3D12SerializeRootSignature)
 		return E_FAIL;
-	return gOrigD3D12SerializeRootSignature(desc, version, blob, errorBlob);
+	HRESULT hr = gOrigD3D12SerializeRootSignature(desc, version, blob, errorBlob);
+	DX12LogJsonFunc("D3D12SerializeRootSignature",
+		"\"version\":%u,\"hr\":\"0x%lx\"", static_cast<UINT>(version), hr);
+	return hr;
 }
 
 extern "C" HRESULT WINAPI D3D12CreateRootSignatureDeserializer(
 	LPCVOID srcData, SIZE_T srcDataSize, REFIID riid, void **rootSignatureDeserializer)
 {
 	LoadRealD3D12();
+	DX12LogDebugJsonFunc("DX12HookCall", "\"api\":\"D3D12CreateRootSignatureDeserializer\",\"this\":\"%p\"", nullptr);
 	if (!gOrigD3D12CreateRootSignatureDeserializer)
 		return E_FAIL;
-	return gOrigD3D12CreateRootSignatureDeserializer(
+	HRESULT hr = gOrigD3D12CreateRootSignatureDeserializer(
 		srcData, srcDataSize, riid, rootSignatureDeserializer);
+	DX12LogJsonFunc("D3D12CreateRootSignatureDeserializer",
+		"\"size\":%llu,\"hr\":\"0x%lx\",\"object\":\"%p\"",
+		static_cast<unsigned long long>(srcDataSize), hr,
+		rootSignatureDeserializer ? *rootSignatureDeserializer : nullptr);
+	return hr;
 }
 
 extern "C" HRESULT WINAPI D3D12SerializeVersionedRootSignature(
 	const D3D12_VERSIONED_ROOT_SIGNATURE_DESC *desc, ID3DBlob **blob, ID3DBlob **errorBlob)
 {
 	LoadRealD3D12();
+	DX12LogDebugJsonFunc("DX12HookCall", "\"api\":\"D3D12SerializeVersionedRootSignature\",\"this\":\"%p\"", nullptr);
 	if (!gOrigD3D12SerializeVersionedRootSignature)
 		return E_FAIL;
-	return gOrigD3D12SerializeVersionedRootSignature(desc, blob, errorBlob);
+	HRESULT hr = gOrigD3D12SerializeVersionedRootSignature(desc, blob, errorBlob);
+	DX12LogJsonFunc("D3D12SerializeVersionedRootSignature", "\"hr\":\"0x%lx\"", hr);
+	return hr;
 }
 
 extern "C" HRESULT WINAPI D3D12CreateVersionedRootSignatureDeserializer(
 	LPCVOID srcData, SIZE_T srcDataSize, REFIID riid, void **rootSignatureDeserializer)
 {
 	LoadRealD3D12();
+	DX12LogDebugJsonFunc("DX12HookCall", "\"api\":\"D3D12CreateVersionedRootSignatureDeserializer\",\"this\":\"%p\"", nullptr);
 	if (!gOrigD3D12CreateVersionedRootSignatureDeserializer)
 		return E_FAIL;
-	return gOrigD3D12CreateVersionedRootSignatureDeserializer(
+	HRESULT hr = gOrigD3D12CreateVersionedRootSignatureDeserializer(
 		srcData, srcDataSize, riid, rootSignatureDeserializer);
+	DX12LogJsonFunc("D3D12CreateVersionedRootSignatureDeserializer",
+		"\"size\":%llu,\"hr\":\"0x%lx\",\"object\":\"%p\"",
+		static_cast<unsigned long long>(srcDataSize), hr,
+		rootSignatureDeserializer ? *rootSignatureDeserializer : nullptr);
+	return hr;
 }
 
 extern "C" HRESULT WINAPI D3D12EnableExperimentalFeatures(
 	UINT numFeatures, const IID *featureIIDs, void *configurationStructs, UINT *configurationStructSizes)
 {
 	LoadRealD3D12();
+	DX12LogDebugJsonFunc("DX12HookCall", "\"api\":\"D3D12EnableExperimentalFeatures\",\"this\":\"%p\"", nullptr);
 	if (!gOrigD3D12EnableExperimentalFeatures)
 		return E_FAIL;
-	return gOrigD3D12EnableExperimentalFeatures(
+	HRESULT hr = gOrigD3D12EnableExperimentalFeatures(
 		numFeatures, featureIIDs, configurationStructs, configurationStructSizes);
+	DX12LogJsonFunc("D3D12EnableExperimentalFeatures",
+		"\"features\":%u,\"hr\":\"0x%lx\"", numFeatures, hr);
+	return hr;
 }
 
 extern "C" HRESULT WINAPI D3D12GetInterface(REFCLSID clsid, REFIID riid, void **object)

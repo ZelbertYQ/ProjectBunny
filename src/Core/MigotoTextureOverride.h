@@ -12,9 +12,30 @@
 
 namespace Bunny {
 
+enum class NumericMatchOp
+{
+	Equal,
+	NotEqual,
+	Less,
+	LessEqual,
+	Greater,
+	GreaterEqual
+};
+
+struct NumericMatch
+{
+	NumericMatchOp op = NumericMatchOp::Equal;
+	uint32_t value = 0;
+	bool enabled = false;
+};
+
 struct TextureOverrideConfig
 {
 	std::wstring section;
+	std::wstring originalSection;
+	std::wstring sourcePath;
+	std::wstring sourceDir;
+	std::wstring iniNamespace;
 	uint32_t hash = 0;
 	bool handlingSkip = false;
 	std::wstring indexBufferResource;
@@ -22,10 +43,29 @@ struct TextureOverrideConfig
 	bool hasMatchVertexCount = false;
 	bool hasMatchIndexCount = false;
 	bool hasMatchInstanceCount = false;
-	uint32_t matchVertexCount = 0;
-	uint32_t matchIndexCount = 0;
-	uint32_t matchInstanceCount = 0;
+	bool hasMatchFirstVertex = false;
+	bool hasMatchFirstIndex = false;
+	bool hasMatchFirstInstance = false;
+	bool hasMatchCs = false;
+	bool hasMatchUavBytes = false;
+	NumericMatch matchVertexCount;
+	NumericMatch matchIndexCount;
+	NumericMatch matchInstanceCount;
+	NumericMatch matchFirstVertex;
+	NumericMatch matchFirstIndex;
+	NumericMatch matchFirstInstance;
+	uint64_t matchCs = 0;
+	uint64_t matchUavBytes = 0;
+	bool hasMatchPriority = false;
+	int matchPriority = 0;
+	bool hasVertexLimitRaise = false;
+	uint32_t overrideByteStride = 0;
+	uint32_t overrideVertexCount = 0;
+	uint64_t overrideByteWidth = 0;
+	uint32_t uavByteStride = 0;
+	uint64_t overrideNumElements = 0;
 	CommandListLinks commandLists;
+	std::vector<CommandListAction> actions;
 };
 
 using TextureOverrideList = std::vector<TextureOverrideConfig>;

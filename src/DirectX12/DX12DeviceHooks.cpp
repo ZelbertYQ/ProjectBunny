@@ -25,6 +25,15 @@ static PFN_CREATE_COMPUTE_PIPELINE_STATE gOrigCreateComputePipelineState = nullp
 static PFN_CREATE_PIPELINE_STATE gOrigCreatePipelineState = nullptr;
 static PFN_DEVICE_FACTORY_CREATE_DEVICE gOrigDeviceFactoryCreateDevice = nullptr;
 
+static void LogDeviceHookCall(const char *api, const void *object)
+{
+	if (DX12IsInternalReplay())
+		return;
+	DX12LogDebugJsonFunc("DX12HookCall",
+		"\"api\":\"%s\",\"present\":%ld,\"this\":\"%p\"",
+		api ? api : "", DX12GetPresentCount(), object);
+}
+
 struct DX12GraphicsPsoReplacement
 {
 	D3D12_GRAPHICS_PIPELINE_STATE_DESC desc = {};
@@ -66,6 +75,9 @@ static HRESULT STDMETHODCALLTYPE HookedCreateGraphicsPipelineState(
 	ID3D12Device *device, const D3D12_GRAPHICS_PIPELINE_STATE_DESC *desc,
 	REFIID riid, void **pipelineState)
 {
+	LogDeviceHookCall("ID3D12Device::CreateGraphicsPipelineState", device);
+	if (DX12IsInternalReplay())
+		return DX12CreateGraphicsPipelineStateOriginal(device, desc, riid, pipelineState);
 	DX12GraphicsPsoReplacement replacement;
 	const D3D12_GRAPHICS_PIPELINE_STATE_DESC *activeDesc = desc;
 	if (desc) {
@@ -98,6 +110,9 @@ static HRESULT STDMETHODCALLTYPE HookedCreateComputePipelineState(
 	ID3D12Device *device, const D3D12_COMPUTE_PIPELINE_STATE_DESC *desc,
 	REFIID riid, void **pipelineState)
 {
+	LogDeviceHookCall("ID3D12Device::CreateComputePipelineState", device);
+	if (DX12IsInternalReplay())
+		return DX12CreateComputePipelineStateOriginal(device, desc, riid, pipelineState);
 	DX12ComputePsoReplacement replacement;
 	const D3D12_COMPUTE_PIPELINE_STATE_DESC *activeDesc = desc;
 	if (desc) {
@@ -143,8 +158,11 @@ static HRESULT STDMETHODCALLTYPE HookedCreatePipelineState(
 	ID3D12Device2 *device, const D3D12_PIPELINE_STATE_STREAM_DESC *desc,
 	REFIID riid, void **pipelineState)
 {
+	LogDeviceHookCall("ID3D12Device2::CreatePipelineState", device);
 	auto original = GetDeviceOriginal(
 		device, 47, gOrigCreatePipelineState, "ID3D12Device2::CreatePipelineState");
+	if (DX12IsInternalReplay())
+		return original ? original(device, desc, riid, pipelineState) : E_FAIL;
 	HRESULT hr = original ? original(device, desc, riid, pipelineState) : E_FAIL;
 	if (SUCCEEDED(hr) && desc)
 		DX12RecordPipelineStateStream(
@@ -156,6 +174,7 @@ static HRESULT STDMETHODCALLTYPE HookedDeviceFactoryCreateDevice(
 	ID3D12DeviceFactory *factory, IUnknown *adapter, D3D_FEATURE_LEVEL featureLevel,
 	REFIID riid, void **device)
 {
+	LogDeviceHookCall("ID3D12DeviceFactory::CreateDevice", factory);
 	auto original = GetDeviceOriginal(
 		factory, 9, gOrigDeviceFactoryCreateDevice, "ID3D12DeviceFactory::CreateDevice");
 	HRESULT hr = original ? original(factory, adapter, featureLevel, riid, device) : E_FAIL;

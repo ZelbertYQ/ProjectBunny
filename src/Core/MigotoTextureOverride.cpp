@@ -1,5 +1,9 @@
 #include "MigotoTextureOverride.h"
 
+#include "MigotoShaderOverride.h"
+
+#include <algorithm>
+
 namespace Bunny {
 
 static bool StartsWithI(const std::wstring &value, const wchar_t *prefix)
@@ -38,6 +42,24 @@ bool ParseTextureOverrideHash(const std::wstring &text, uint32_t *value)
 	return true;
 }
 
+static bool ParseInt(const std::wstring &text, int *value)
+{
+	if (!value)
+		return false;
+
+	std::wstring trimmed = Trim(text);
+	if (trimmed.empty())
+		return false;
+
+	wchar_t *end = nullptr;
+	long parsed = std::wcstol(trimmed.c_str(), &end, 0);
+	if (!end || *Trim(end).c_str())
+		return false;
+
+	*value = static_cast<int>(parsed);
+	return true;
+}
+
 static bool ParseUInt(const std::wstring &text, uint32_t *value)
 {
 	if (!value)
@@ -53,6 +75,64 @@ static bool ParseUInt(const std::wstring &text, uint32_t *value)
 		return false;
 
 	*value = static_cast<uint32_t>(parsed);
+	return true;
+}
+
+static bool ParseNumericMatch(const std::wstring &text, NumericMatch *match)
+{
+	if (!match)
+		return false;
+
+	std::wstring value = Trim(text);
+	if (value.empty())
+		return false;
+
+	NumericMatchOp op = NumericMatchOp::Equal;
+	if (value.rfind(L"<=", 0) == 0) {
+		op = NumericMatchOp::LessEqual;
+		value = Trim(value.substr(2));
+	} else if (value.rfind(L">=", 0) == 0) {
+		op = NumericMatchOp::GreaterEqual;
+		value = Trim(value.substr(2));
+	} else if (value.rfind(L"!", 0) == 0) {
+		op = NumericMatchOp::NotEqual;
+		value = Trim(value.substr(1));
+	} else if (value.rfind(L"=", 0) == 0) {
+		op = NumericMatchOp::Equal;
+		value = Trim(value.substr(1));
+	} else if (value.rfind(L"<", 0) == 0) {
+		op = NumericMatchOp::Less;
+		value = Trim(value.substr(1));
+	} else if (value.rfind(L">", 0) == 0) {
+		op = NumericMatchOp::Greater;
+		value = Trim(value.substr(1));
+	}
+
+	uint32_t parsed = 0;
+	if (!ParseUInt(value, &parsed))
+		return false;
+
+	match->op = op;
+	match->value = parsed;
+	match->enabled = true;
+	return true;
+}
+
+static bool ParseUInt64(const std::wstring &text, uint64_t *value)
+{
+	if (!value)
+		return false;
+
+	std::wstring trimmed = Trim(text);
+	if (trimmed.empty())
+		return false;
+
+	wchar_t *end = nullptr;
+	unsigned long long parsed = std::wcstoull(trimmed.c_str(), &end, 0);
+	if (!end || *Trim(end).c_str())
+		return false;
+
+	*value = static_cast<uint64_t>(parsed);
 	return true;
 }
 
@@ -72,6 +152,12 @@ static bool ParseVertexBufferKey(const std::wstring &key, uint32_t *slot)
 	return true;
 }
 
+static std::wstring ResolveResourceReference(
+	const std::wstring &value, const std::wstring &iniNamespace)
+{
+	return ResolveNamespacedSectionReference(value, L"Resource", iniNamespace);
+}
+
 void ParseTextureOverrideSections(
 	const IniDocument &ini, TextureOverrideMap *textureOverrides)
 {
@@ -85,6 +171,10 @@ void ParseTextureOverrideSections(
 
 		TextureOverrideConfig config;
 		config.section = section.name;
+		config.originalSection = section.originalName.empty() ? section.name : section.originalName;
+		config.sourcePath = section.sourcePath;
+		config.sourceDir = section.sourceDir;
+		config.iniNamespace = section.iniNamespace;
 		bool hasHash = false;
 
 		for (const IniEntry &entry : section.entries) {
@@ -103,54 +193,161 @@ void ParseTextureOverrideSections(
 
 			if (key == L"handling") {
 				std::wstring value = ToLower(Trim(entry.value));
-				if (value == L"skip")
+				if (value == L"skip") {
 					config.handlingSkip = true;
+					CommandListAction action;
+					if (ParseCommandListActionFromEntry(key, value, &action)) {
+						ResolveCommandListActionReferences(&action, entry.iniNamespace);
+						config.actions.push_back(action);
+					}
+				}
 				continue;
 			}
 
 			if (key == L"ib") {
-				config.indexBufferResource = Trim(entry.value);
+				config.indexBufferResource =
+					ResolveResourceReference(entry.value, entry.iniNamespace);
+				CommandListAction action;
+				if (ParseCommandListActionFromEntry(key, Trim(entry.value), &action)) {
+					ResolveCommandListActionReferences(&action, entry.iniNamespace);
+					config.actions.push_back(action);
+				}
 				continue;
 			}
 
 			uint32_t vbSlot = 0;
 			if (ParseVertexBufferKey(key, &vbSlot)) {
-				config.vertexBufferResources[vbSlot] = Trim(entry.value);
+				config.vertexBufferResources[vbSlot] =
+					ResolveResourceReference(entry.value, entry.iniNamespace);
+				CommandListAction action;
+				if (ParseCommandListActionFromEntry(key, Trim(entry.value), &action)) {
+					ResolveCommandListActionReferences(&action, entry.iniNamespace);
+					config.actions.push_back(action);
+				}
 				continue;
 			}
 
 			if (key == L"match_vertex_count") {
-				uint32_t value = 0;
-				if (ParseUInt(entry.value, &value)) {
-					config.matchVertexCount = value;
+				if (ParseNumericMatch(entry.value, &config.matchVertexCount))
 					config.hasMatchVertexCount = true;
-				}
 				continue;
 			}
 
 			if (key == L"match_index_count") {
-				uint32_t value = 0;
-				if (ParseUInt(entry.value, &value)) {
-					config.matchIndexCount = value;
+				if (ParseNumericMatch(entry.value, &config.matchIndexCount))
 					config.hasMatchIndexCount = true;
-				}
 				continue;
 			}
 
 			if (key == L"match_instance_count") {
+				if (ParseNumericMatch(entry.value, &config.matchInstanceCount))
+					config.hasMatchInstanceCount = true;
+				continue;
+			}
+
+			if (key == L"match_first_vertex") {
+				if (ParseNumericMatch(entry.value, &config.matchFirstVertex))
+					config.hasMatchFirstVertex = true;
+				continue;
+			}
+
+			if (key == L"match_first_index") {
+				if (ParseNumericMatch(entry.value, &config.matchFirstIndex))
+					config.hasMatchFirstIndex = true;
+				continue;
+			}
+
+			if (key == L"match_first_instance") {
+				if (ParseNumericMatch(entry.value, &config.matchFirstInstance))
+					config.hasMatchFirstInstance = true;
+				continue;
+			}
+
+			if (key == L"match_priority") {
+				int value = 0;
+				if (ParseInt(entry.value, &value)) {
+					config.matchPriority = value;
+					config.hasMatchPriority = true;
+				}
+				continue;
+			}
+
+			if (key == L"match_cs") {
+				uint64_t value = 0;
+				if (ParseShaderOverrideHash(entry.value, &value)) {
+					config.matchCs = value;
+					config.hasMatchCs = true;
+				}
+				continue;
+			}
+
+			if (key == L"match_uav_bytes") {
+				uint64_t value = 0;
+				if (ParseUInt64(entry.value, &value)) {
+					config.matchUavBytes = value;
+					config.hasMatchUavBytes = true;
+				}
+				continue;
+			}
+
+			if (key == L"override_byte_stride") {
 				uint32_t value = 0;
 				if (ParseUInt(entry.value, &value)) {
-					config.matchInstanceCount = value;
-					config.hasMatchInstanceCount = true;
+					config.overrideByteStride = value;
+					config.hasVertexLimitRaise = true;
 				}
+				continue;
+			}
+
+			if (key == L"override_vertex_count") {
+				uint32_t value = 0;
+				if (ParseUInt(entry.value, &value)) {
+					config.overrideVertexCount = value;
+					config.hasVertexLimitRaise = true;
+				}
+				continue;
+			}
+
+			if (key == L"uav_byte_stride") {
+				uint32_t value = 0;
+				if (ParseUInt(entry.value, &value)) {
+					config.uavByteStride = value;
+					config.hasVertexLimitRaise = true;
+				}
+				continue;
+			}
+
+			CommandListAction action;
+			if (ParseCommandListActionFromEntry(key, Trim(entry.value), &action)) {
+				ResolveCommandListActionReferences(&action, entry.iniNamespace);
+				config.actions.push_back(action);
 				continue;
 			}
 
 			ParseCommandListLinksFromEntry(key, entry.value, &config.commandLists);
 		}
 
-		if (hasHash)
+		ResolveCommandListLinks(&config.commandLists, section.iniNamespace);
+		if (config.overrideByteStride && config.overrideVertexCount)
+			config.overrideByteWidth =
+				static_cast<uint64_t>(config.overrideByteStride) * config.overrideVertexCount;
+		if (config.uavByteStride && config.overrideByteWidth)
+			config.overrideNumElements = config.overrideByteWidth / config.uavByteStride;
+		const bool hasDrawContextMatch =
+			config.hasMatchVertexCount || config.hasMatchIndexCount ||
+			config.hasMatchInstanceCount || config.hasMatchFirstVertex ||
+			config.hasMatchFirstIndex || config.hasMatchFirstInstance;
+		if (hasHash || config.hasVertexLimitRaise || config.hasMatchCs || hasDrawContextMatch)
 			(*textureOverrides)[config.hash].push_back(config);
+	}
+
+	for (auto &bucket : *textureOverrides) {
+		std::sort(bucket.second.begin(), bucket.second.end(),
+			[](const TextureOverrideConfig &lhs, const TextureOverrideConfig &rhs) {
+				if (lhs.matchPriority != rhs.matchPriority)
+					return lhs.matchPriority > rhs.matchPriority;
+				return ToLower(lhs.section) < ToLower(rhs.section);
+			});
 	}
 }
 

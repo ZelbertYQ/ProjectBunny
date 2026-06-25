@@ -40,6 +40,10 @@ void ParseResourceSections(const IniDocument &ini, ResourceMap *resources)
 		ResourceConfig config;
 		config.section = section.name;
 		config.name = section.name;
+		config.originalSection = section.originalName.empty() ? section.name : section.originalName;
+		config.sourcePath = section.sourcePath;
+		config.sourceDir = section.sourceDir;
+		config.iniNamespace = section.iniNamespace;
 
 		for (const IniEntry &entry : section.entries) {
 			if (!entry.hasEquals)
@@ -76,6 +80,8 @@ void ParseResourceSections(const IniDocument &ini, ResourceMap *resources)
 		}
 
 		(*resources)[config.name] = config;
+		if (section.iniNamespace.empty())
+			(*resources)[config.originalSection] = config;
 	}
 }
 

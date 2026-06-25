@@ -51,6 +51,10 @@ void ParseShaderOverrideSections(
 
 		ShaderOverrideConfig config;
 		config.section = section.name;
+		config.originalSection = section.originalName.empty() ? section.name : section.originalName;
+		config.sourcePath = section.sourcePath;
+		config.sourceDir = section.sourceDir;
+		config.iniNamespace = section.iniNamespace;
 		bool hasHash = false;
 
 		for (const IniEntry &entry : section.entries) {
@@ -74,6 +78,7 @@ void ParseShaderOverrideSections(
 			ParseCommandListLinksFromEntry(key, entry.value, &config.commandLists);
 		}
 
+		ResolveCommandListLinks(&config.commandLists, section.iniNamespace);
 		if (hasHash)
 			(*shaderOverrides)[config.hash] = config;
 	}

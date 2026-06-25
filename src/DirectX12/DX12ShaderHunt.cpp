@@ -71,6 +71,43 @@ static bool gHuntingEnabled = false;
 static volatile LONG gHuntingActive = 0;
 static std::unordered_map<ID3D12GraphicsCommandList*, ID3D12PipelineState*> gCommandListPso;
 static std::unordered_map<ID3D12GraphicsCommandList*, HuntIaState> gCommandListIa;
+struct HuntIaViewCacheKey
+{
+	UINT64 gpuVa = 0;
+	UINT64 size = 0;
+	UINT stride = 0;
+	UINT format = 0;
+	UINT slot = 0;
+	UINT role = 0;
+
+	bool operator==(const HuntIaViewCacheKey &rhs) const
+	{
+		return gpuVa == rhs.gpuVa && size == rhs.size &&
+			stride == rhs.stride && format == rhs.format &&
+			slot == rhs.slot && role == rhs.role;
+	}
+};
+struct HuntIaViewCacheKeyHasher
+{
+	size_t operator()(const HuntIaViewCacheKey &key) const
+	{
+		uint64_t hash = 14695981039346656037ull;
+		auto append = [&hash](uint64_t value) {
+			hash ^= value;
+			hash *= 1099511628211ull;
+		};
+		append(key.gpuVa);
+		append(key.size);
+		append(key.stride);
+		append(key.format);
+		append(key.slot);
+		append(key.role);
+		return static_cast<size_t>(hash);
+	}
+};
+static std::unordered_map<HuntIaViewCacheKey, HuntIaBuffer, HuntIaViewCacheKeyHasher>
+	gIaViewCache;
+static SRWLOCK gIaViewCacheLock = SRWLOCK_INIT;
 static StageSelection gVS;
 static StageSelection gPS;
 static StageSelection gCS;
@@ -81,6 +118,57 @@ static UINT64 gPipelineStateBinds = 0;
 static UINT64 gDrawCalls = 0;
 static UINT64 gDispatchCalls = 0;
 static UINT64 gIndirectCalls = 0;
+
+static HuntIaBuffer ResolveIaViewCached(
+	const char *role, UINT slot, UINT64 gpuVa, UINT size, UINT stride, UINT format)
+{
+	HuntIaBuffer buffer;
+	buffer.role = role ? role : "";
+	buffer.slot = slot;
+	if (!gpuVa || !size)
+		return buffer;
+
+	const HuntIaViewCacheKey key = {
+		gpuVa, size, stride, format, slot,
+		role && role[0] == 'I' ? 1u : 2u
+	};
+	auto cached = gIaViewCache.find(key);
+	if (cached != gIaViewCache.end())
+		return cached->second;
+
+	buffer.gpuVa = gpuVa;
+	buffer.size = size;
+	buffer.stride = stride;
+	buffer.format = format;
+	buffer.valid = true;
+	DX12BufferResourceSummary summary;
+	if (DX12ResolveBufferResourceByGpuVa(gpuVa, size, &summary)) {
+		buffer.resolved = true;
+		buffer.resource = summary.resource;
+		buffer.resourceGpuVa = summary.gpuVirtualAddress;
+		buffer.resourceBytes = summary.hasResourceDesc ? summary.resourceDesc.Width : 0;
+		buffer.hash = DX12HashBufferResourceView(&summary, gpuVa, size);
+	} else {
+		buffer.hash = DX12HashBufferResourceView(nullptr, gpuVa, size);
+	}
+
+	// IA bindings are command-list hot path state. D3D12 records these bindings
+	// into the list; caching identical views avoids rescanning resource metadata
+	// when a game rebinds the same IB/VB hundreds of times in a burst frame.
+	if (gIaViewCache.size() > 4096)
+		gIaViewCache.clear();
+	gIaViewCache[key] = buffer;
+	return buffer;
+}
+
+static HuntIaBuffer ResolveIaViewCachedThreadSafe(
+	const char *role, UINT slot, UINT64 gpuVa, UINT size, UINT stride, UINT format)
+{
+	AcquireSRWLockExclusive(&gIaViewCacheLock);
+	HuntIaBuffer buffer = ResolveIaViewCached(role, slot, gpuVa, size, stride, format);
+	ReleaseSRWLockExclusive(&gIaViewCacheLock);
+	return buffer;
+}
 
 static UINT64 SelectedHashLocked(const StageSelection &stage)
 {
@@ -273,25 +361,9 @@ void DX12HuntSetIndexBuffer(ID3D12GraphicsCommandList *commandList, const D3D12_
 	HuntIaState &state = gCommandListIa[commandList];
 	state.indexBuffer = HuntIaBuffer();
 	if (view && view->BufferLocation && view->SizeInBytes) {
-		state.indexBuffer.role = "IB";
-		state.indexBuffer.gpuVa = view->BufferLocation;
-		state.indexBuffer.size = view->SizeInBytes;
-		state.indexBuffer.format = static_cast<UINT>(view->Format);
-		state.indexBuffer.valid = true;
-		DX12BufferResourceSummary summary;
-		if (DX12ResolveBufferResourceByGpuVa(
-		    view->BufferLocation, view->SizeInBytes, &summary)) {
-			state.indexBuffer.resolved = true;
-			state.indexBuffer.resource = summary.resource;
-			state.indexBuffer.resourceGpuVa = summary.gpuVirtualAddress;
-			state.indexBuffer.resourceBytes = summary.hasResourceDesc ?
-				summary.resourceDesc.Width : 0;
-			state.indexBuffer.hash = DX12HashBufferResourceView(
-				&summary, view->BufferLocation, view->SizeInBytes);
-		} else {
-			state.indexBuffer.hash = DX12HashBufferResourceView(
-				nullptr, view->BufferLocation, view->SizeInBytes);
-		}
+		state.indexBuffer = ResolveIaViewCachedThreadSafe(
+			"IB", 0, view->BufferLocation, view->SizeInBytes,
+			0, static_cast<UINT>(view->Format));
 	}
 	ReleaseSRWLockExclusive(&gHuntLock);
 }
@@ -314,24 +386,9 @@ void DX12HuntSetVertexBuffers(
 		buffer.role = "VB";
 		buffer.slot = slot;
 		if (views && views[i].BufferLocation && views[i].SizeInBytes) {
-			buffer.gpuVa = views[i].BufferLocation;
-			buffer.size = views[i].SizeInBytes;
-			buffer.stride = views[i].StrideInBytes;
-			buffer.valid = true;
-			DX12BufferResourceSummary summary;
-			if (DX12ResolveBufferResourceByGpuVa(
-			    views[i].BufferLocation, views[i].SizeInBytes, &summary)) {
-				buffer.resolved = true;
-				buffer.resource = summary.resource;
-				buffer.resourceGpuVa = summary.gpuVirtualAddress;
-				buffer.resourceBytes = summary.hasResourceDesc ?
-					summary.resourceDesc.Width : 0;
-				buffer.hash = DX12HashBufferResourceView(
-					&summary, views[i].BufferLocation, views[i].SizeInBytes);
-			} else {
-				buffer.hash = DX12HashBufferResourceView(
-					nullptr, views[i].BufferLocation, views[i].SizeInBytes);
-			}
+			buffer = ResolveIaViewCachedThreadSafe(
+				"VB", slot, views[i].BufferLocation, views[i].SizeInBytes,
+				views[i].StrideInBytes, 0);
 		}
 		state.vertexBuffers[slot] = buffer;
 	}
@@ -491,6 +548,36 @@ bool DX12HuntGetIaHashState(ID3D12GraphicsCommandList *commandList, DX12IaHashSt
 	}
 	ReleaseSRWLockShared(&gHuntLock);
 	return outState->hasIndexBuffer || !outState->vertexBuffers.empty();
+}
+
+bool DX12HuntHashIndexBufferView(const D3D12_INDEX_BUFFER_VIEW *view, uint32_t *hash)
+{
+	if (hash)
+		*hash = 0;
+	if (!view || !view->BufferLocation || !view->SizeInBytes)
+		return false;
+
+	HuntIaBuffer buffer = ResolveIaViewCachedThreadSafe(
+		"IB", 0, view->BufferLocation, view->SizeInBytes,
+		0, static_cast<UINT>(view->Format));
+	if (hash)
+		*hash = IaHash(buffer);
+	return IaHash(buffer) != 0;
+}
+
+bool DX12HuntHashVertexBufferView(UINT slot, const D3D12_VERTEX_BUFFER_VIEW *view, uint32_t *hash)
+{
+	if (hash)
+		*hash = 0;
+	if (!view || !view->BufferLocation || !view->SizeInBytes)
+		return false;
+
+	HuntIaBuffer buffer = ResolveIaViewCachedThreadSafe(
+		"VB", slot, view->BufferLocation, view->SizeInBytes,
+		view->StrideInBytes, 0);
+	if (hash)
+		*hash = IaHash(buffer);
+	return IaHash(buffer) != 0;
 }
 
 bool DX12HuntIsEnabled()
