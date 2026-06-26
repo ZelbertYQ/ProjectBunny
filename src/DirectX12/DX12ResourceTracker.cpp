@@ -1649,6 +1649,7 @@ void DX12RecordResourceBarrier(UINT numBarriers, const D3D12_RESOURCE_BARRIER *b
 		return;
 
 	AcquireSRWLockExclusive(&gResourceLock);
+	bool resourceStateChanged = false;
 	for (UINT i = 0; i < numBarriers; ++i) {
 		const D3D12_RESOURCE_BARRIER &barrier = barriers[i];
 		if (barrier.Type != D3D12_RESOURCE_BARRIER_TYPE_TRANSITION ||
@@ -1667,12 +1668,16 @@ void DX12RecordResourceBarrier(UINT numBarriers, const D3D12_RESOURCE_BARRIER *b
 			record.hasCurrentState = true;
 			UpdateDescriptorResourceStateLocked(
 				record.resource, record.currentState, record.hasCurrentState);
+			resourceStateChanged = true;
 		} else {
 			record.hasCurrentState = false;
 			UpdateDescriptorResourceStateLocked(
 				record.resource, record.currentState, record.hasCurrentState);
+			resourceStateChanged = true;
 		}
 	}
+	if (resourceStateChanged)
+		gBufferResolveCache.clear();
 	ReleaseSRWLockExclusive(&gResourceLock);
 }
 

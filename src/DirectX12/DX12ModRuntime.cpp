@@ -329,7 +329,28 @@ struct DX12ActivePreSkinTextureOverride
 	UINT outputStride = 0;
 };
 
+struct DX12ActivePreSkinOutputState
+{
+	D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+	bool uavBarrierPending = false;
+};
+
 static std::map<std::wstring, DX12ActivePreSkinTextureOverride> gActivePreSkinTextureOverrides;
+static std::unordered_map<ID3D12Resource*, DX12ActivePreSkinOutputState> gActivePreSkinOutputStates;
+static bool ActivePreSkinResourceReferencedLocked(
+	const std::wstring &skipSection, ID3D12Resource *resource)
+{
+	if (!resource)
+		return false;
+	for (const auto &item : gActivePreSkinTextureOverrides) {
+		if (item.first == skipSection)
+			continue;
+		if (item.second.outputResource == resource)
+			return true;
+	}
+	return false;
+}
+
 static void ReleaseActivePreSkinTextureOverride(DX12ActivePreSkinTextureOverride *active)
 {
 	if (!active)
@@ -347,18 +368,30 @@ static void ClearActivePreSkinTextureOverridesLocked()
 	for (auto &item : gActivePreSkinTextureOverrides)
 		ReleaseActivePreSkinTextureOverride(&item.second);
 	gActivePreSkinTextureOverrides.clear();
+	gActivePreSkinOutputStates.clear();
 }
 
 static void StoreActivePreSkinTextureOverrideLocked(
 	const std::wstring &section, const DX12ActivePreSkinTextureOverride &active)
 {
 	auto existing = gActivePreSkinTextureOverrides.find(section);
+	ID3D12Resource *oldResource = existing != gActivePreSkinTextureOverrides.end() ?
+		existing->second.outputResource : nullptr;
 	if (existing != gActivePreSkinTextureOverrides.end())
 		ReleaseActivePreSkinTextureOverride(&existing->second);
+	if (oldResource && oldResource != active.outputResource &&
+	    !ActivePreSkinResourceReferencedLocked(section, oldResource))
+		gActivePreSkinOutputStates.erase(oldResource);
 	DX12ActivePreSkinTextureOverride stored = active;
 	if (stored.outputResource)
 		stored.outputResource->AddRef();
 	gActivePreSkinTextureOverrides[section] = stored;
+	if (stored.outputResource) {
+		DX12ActivePreSkinOutputState &state =
+			gActivePreSkinOutputStates[stored.outputResource];
+		state.state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+		state.uavBarrierPending = true;
+	}
 }
 static std::map<std::wstring, LONG> gPreSkinSectionAppliedPresent;
 
@@ -5755,15 +5788,38 @@ static bool AppendPreSkinResourceViewLocked(
 	if (entry.preSkinByteWidth == 0 || entry.preSkinStride == 0)
 		return false;
 
+	D3D12_RESOURCE_STATES preparedBeforeState = D3D12_RESOURCE_STATE_COMMON;
+	bool preparedTransition = false;
+	bool preparedUavBarrier = false;
 	if (entry.preSkinHasDescriptor &&
 	    entry.preSkinDescriptor.kind == "UAV" &&
 	    entry.preSkinDescriptor.resource == entry.preSkinResource) {
-		D3D12_RESOURCE_BARRIER uavBarrier = {};
-		uavBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-		uavBarrier.UAV.pResource = entry.preSkinResource;
-		commandList->ResourceBarrier(1, &uavBarrier);
-
-		D3D12_RESOURCE_STATES beforeState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+		DX12ActivePreSkinOutputState outputState = {};
+		auto stateIt = gActivePreSkinOutputStates.find(entry.preSkinResource);
+		if (stateIt != gActivePreSkinOutputStates.end())
+			outputState = stateIt->second;
+		else {
+			outputState.state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+			outputState.uavBarrierPending = true;
+		}
+		D3D12_RESOURCE_STATES beforeState = outputState.state;
+		DX12BufferResourceSummary tracked = {};
+		if (DX12ResolveBufferResourceByGpuVa(
+			entry.preSkinResource->GetGPUVirtualAddress(), entry.preSkinByteWidth, &tracked) &&
+		    tracked.hasCurrentState &&
+		    tracked.resource == entry.preSkinResource) {
+			beforeState = static_cast<D3D12_RESOURCE_STATES>(tracked.currentState);
+			outputState.state = beforeState;
+		}
+		if (outputState.uavBarrierPending &&
+		    beforeState == D3D12_RESOURCE_STATE_UNORDERED_ACCESS) {
+			D3D12_RESOURCE_BARRIER uavBarrier = {};
+			uavBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+			uavBarrier.UAV.pResource = entry.preSkinResource;
+			commandList->ResourceBarrier(1, &uavBarrier);
+			preparedUavBarrier = true;
+		}
+		outputState.uavBarrierPending = false;
 		if (beforeState != D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER) {
 			D3D12_RESOURCE_BARRIER transition = {};
 			transition.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -5772,14 +5828,20 @@ static bool AppendPreSkinResourceViewLocked(
 			transition.Transition.StateAfter = D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
 			transition.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
 			commandList->ResourceBarrier(1, &transition);
+			outputState.state = D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
+			preparedTransition = true;
 		}
+		gActivePreSkinOutputStates[entry.preSkinResource] = outputState;
+		preparedBeforeState = beforeState;
 #if defined(_DEBUG)
 		DX12LogDebugJsonFunc("DX12PreSkinIaResourcePrepare",
-			"\"slot\":%u,\"bytes\":%llu,\"stride\":%u,\"beforeState\":%u,\"gpuVa\":\"0x%llx\"",
+			"\"slot\":%u,\"bytes\":%llu,\"stride\":%u,\"beforeState\":%u,\"uavBarrier\":%s,\"transition\":%s,\"gpuVa\":\"0x%llx\"",
 			entry.vertexSlot,
 			static_cast<unsigned long long>(entry.preSkinByteWidth),
 			entry.preSkinStride,
-			static_cast<UINT>(beforeState),
+			static_cast<UINT>(preparedBeforeState),
+			preparedUavBarrier ? "true" : "false",
+			preparedTransition ? "true" : "false",
 			static_cast<unsigned long long>(entry.preSkinResource->GetGPUVirtualAddress()));
 #endif
 	}

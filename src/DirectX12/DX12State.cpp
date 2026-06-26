@@ -2,11 +2,15 @@
 
 #include <Shlwapi.h>
 #include <atomic>
+#include <deque>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
+#include <vector>
 
 #include "DX12FrameAnalysis.h"
 #include "DX12Json.h"
@@ -17,7 +21,11 @@
 
 static HINSTANCE gModule = nullptr;
 static FILE *gLog = nullptr;
-static unsigned long long gLogLineNo = 0;
+static HANDLE gLogThread = nullptr;
+static HANDLE gLogEvent = nullptr;
+static SRWLOCK gLogQueueLock = SRWLOCK_INIT;
+static std::deque<std::string> gLogQueue;
+static volatile LONG gLogStopRequested = 0;
 static volatile LONG gPresentCount = 0;
 static HWND gOverlayWindow = nullptr;
 static wchar_t gOverlayStatus[512] = L"3DMigoto DX12 hook alive";
@@ -93,6 +101,36 @@ HINSTANCE DX12GetModule()
 	return gModule;
 }
 
+static DWORD WINAPI DX12LogThreadProc(void*)
+{
+	for (;;) {
+		if (gLogEvent)
+			WaitForSingleObject(gLogEvent, 100);
+		if (gLogEvent)
+			ResetEvent(gLogEvent);
+
+		std::vector<std::string> pending;
+		AcquireSRWLockExclusive(&gLogQueueLock);
+		while (!gLogQueue.empty()) {
+			pending.push_back(std::move(gLogQueue.front()));
+			gLogQueue.pop_front();
+		}
+		const bool stopping = InterlockedCompareExchange(&gLogStopRequested, 0, 0) != 0;
+		ReleaseSRWLockExclusive(&gLogQueueLock);
+
+		if (gLog) {
+			for (const auto &line : pending)
+				fputs(line.c_str(), gLog);
+			if (!pending.empty() || stopping)
+				fflush(gLog);
+		}
+
+		if (stopping && pending.empty())
+			break;
+	}
+	return 0;
+}
+
 bool DX12OpenLogFile()
 {
 #if !defined(_DEBUG)
@@ -105,8 +143,25 @@ bool DX12OpenLogFile()
 	PathRemoveFileSpecW(path);
 	PathAppendW(path, L"d3d12_log.jsonl");
 	gLog = _wfsopen(path, L"w", _SH_DENYNO);
-	gLogLineNo = 0;
-	return gLog != nullptr;
+	if (!gLog)
+		return false;
+
+	InterlockedExchange(&gLogStopRequested, 0);
+	gLogEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+	if (!gLogEvent) {
+		fclose(gLog);
+		gLog = nullptr;
+		return false;
+	}
+	gLogThread = CreateThread(nullptr, 0, DX12LogThreadProc, nullptr, 0, nullptr);
+	if (!gLogThread) {
+		CloseHandle(gLogEvent);
+		gLogEvent = nullptr;
+		fclose(gLog);
+		gLog = nullptr;
+		return false;
+	}
+	return true;
 }
 
 #if !defined(_DEBUG)
@@ -138,40 +193,79 @@ static void MakeLogTime(char *buffer, size_t bufferSize)
 	SYSTEMTIME localTime;
 	GetLocalTime(&localTime);
 	snprintf(buffer, bufferSize,
-		"\"%04u-%02u-%02uT%02u:%02u:%02u.%03u+08:00\"",
-		localTime.wYear, localTime.wMonth, localTime.wDay,
+		"\"%02u:%02u:%02u.%03u\"",
 		localTime.wHour, localTime.wMinute, localTime.wSecond,
 		localTime.wMilliseconds);
 }
 
-static void WriteJsonLogLine(const char *funcJson, const char *extra, bool flush)
+static void EnqueueJsonLogLine(const char *line)
+{
+	if (!line || !line[0])
+		return;
+
+	AcquireSRWLockExclusive(&gLogQueueLock);
+	gLogQueue.emplace_back(line);
+	ReleaseSRWLockExclusive(&gLogQueueLock);
+	if (gLogEvent)
+		SetEvent(gLogEvent);
+}
+
+static void WriteJsonLogLine(const char *func, const char *funcJson, const char *extra, bool flush)
 {
 	if (!gLog)
 		return;
+
 	char timeJson[64] = {};
 	MakeLogTime(timeJson, sizeof(timeJson));
-	const DWORD tick = GetTickCount();
-	const DWORD threadId = GetCurrentThreadId();
-	const unsigned long long index = ++gLogLineNo;
+	const bool isHookCall = func && strcmp(func, "DX12HookCall") == 0;
+	char line[8192];
 	if (extra && extra[0]) {
-		fprintf(gLog,
-			"{\"index\":%llu,\"time\":%s,\"tickMs\":%lu,\"thread\":%lu,\"func\":%s,%s}\n",
-			index, timeJson, tick, threadId, funcJson, extra);
+		if (isHookCall) {
+			snprintf(line, sizeof(line),
+				"{%s,\"time\":%s}\n",
+				extra, timeJson);
+		} else {
+			snprintf(line, sizeof(line),
+				"{\"func\":%s,\"time\":%s,%s}\n",
+				funcJson, timeJson, extra);
+		}
 	} else {
-		fprintf(gLog,
-			"{\"index\":%llu,\"time\":%s,\"tickMs\":%lu,\"thread\":%lu,\"func\":%s}\n",
-			index, timeJson, tick, threadId, funcJson);
+		if (isHookCall) {
+			snprintf(line, sizeof(line),
+				"{\"api\":\"\",\"time\":%s}\n",
+				timeJson);
+		} else {
+			snprintf(line, sizeof(line),
+				"{\"func\":%s,\"time\":%s}\n",
+				funcJson, timeJson);
+		}
 	}
+	EnqueueJsonLogLine(line);
 	if (flush)
-		fflush(gLog);
+		DX12FlushLog();
 }
 
 void DX12CloseLogFile()
 {
+	InterlockedExchange(&gLogStopRequested, 1);
+	if (gLogEvent)
+		SetEvent(gLogEvent);
+	if (gLogThread) {
+		WaitForSingleObject(gLogThread, 5000);
+		CloseHandle(gLogThread);
+		gLogThread = nullptr;
+	}
+	if (gLogEvent) {
+		CloseHandle(gLogEvent);
+		gLogEvent = nullptr;
+	}
 	if (gLog) {
 		fclose(gLog);
 		gLog = nullptr;
 	}
+	AcquireSRWLockExclusive(&gLogQueueLock);
+	gLogQueue.clear();
+	ReleaseSRWLockExclusive(&gLogQueueLock);
 }
 
 void DX12Log(const char *fmt, ...)
@@ -195,7 +289,7 @@ void DX12Log(const char *fmt, ...)
 	DX12JsonAppendLogFieldsFromText(fields, sizeof(fields), message);
 	char funcJson[16];
 	DX12JsonEscapeString(funcJson, sizeof(funcJson), "Log");
-	WriteJsonLogLine(funcJson, fields[0] == ',' ? fields + 1 : fields, false);
+	WriteJsonLogLine("Log", funcJson, fields[0] == ',' ? fields + 1 : fields, false);
 	// Do NOT fflush here — per-line sync flushes cause severe CPU stalls on the
 	// recording hot path. DX12FlushLog() is called from the Present hook instead.
 }
@@ -221,7 +315,7 @@ void DX12LogJsonFunc(const char *func, const char *fmt, ...)
 		va_end(args);
 	}
 
-	WriteJsonLogLine(funcJson, extra, false);
+	WriteJsonLogLine(func ? func : "Unknown", funcJson, extra, false);
 	// No fflush here — see DX12Log above.
 }
 
@@ -246,7 +340,7 @@ void DX12LogJsonFuncFlush(const char *func, const char *fmt, ...)
 		va_end(args);
 	}
 
-	WriteJsonLogLine(funcJson, extra, true);
+	WriteJsonLogLine(func ? func : "Unknown", funcJson, extra, true);
 }
 
 #if defined(_DEBUG)
@@ -267,7 +361,7 @@ void DX12LogDebugJsonFunc(const char *func, const char *fmt, ...)
 		va_end(args);
 	}
 
-	WriteJsonLogLine(funcJson, extra, false);
+	WriteJsonLogLine(func ? func : "Unknown", funcJson, extra, false);
 }
 
 void DX12LogDebugJsonFuncFlush(const char *func, const char *fmt, ...)
@@ -287,14 +381,14 @@ void DX12LogDebugJsonFuncFlush(const char *func, const char *fmt, ...)
 		va_end(args);
 	}
 
-	WriteJsonLogLine(funcJson, extra, true);
+	WriteJsonLogLine(func ? func : "Unknown", funcJson, extra, true);
 }
 #endif
 
 void DX12FlushLog()
 {
-	if (gLog)
-		fflush(gLog);
+	if (gLogEvent)
+		SetEvent(gLogEvent);
 }
 
 static bool RememberHook(void *target)

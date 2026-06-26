@@ -111,7 +111,7 @@ call "$vcvars" > nul
 if errorlevel 1 exit /b 1
 "$cmake" -S "$root" -B "$buildDir" -G "Ninja" -DCMAKE_BUILD_TYPE="$Configuration"
 if errorlevel 1 exit /b 1
-"$cmake" --build "$buildDir"
+"$cmake" --build "$buildDir" --target DirectX12 D3DCompiler_46 dxgi DirectX11 Injector
 "@
 
 # CMake 配置
@@ -138,9 +138,7 @@ $files = @(
     "src/DirectX12/d3d12.dll",
     "src/D3DCompiler_46/d3dcompiler_47.dll",
     "src/DirectXGI/dxgi.dll",
-    "src/Injector/3DMigoto Loader.exe",
-    "src/InjectorLib/3dmloader.dll",
-    "src/D3D_Shaders/D3D_Shaders.exe"
+    "src/Injector/3DMigoto Loader.exe"
 )
 foreach ($f in $files) {
     $src = "$buildDir/$f"
