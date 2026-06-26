@@ -119,7 +119,7 @@ static PFN_CREATE_RESERVED_RESOURCE2 gOrigCreateReservedResource2 = nullptr;
 
 static void LogResourceHookCall(const char *api, const void *object)
 {
-	if (DX12IsInternalReplay())
+	if (!DX12ShouldLogHookCall(api))
 		return;
 	DX12LogDebugJsonFunc("DX12HookCall",
 		"\"api\":\"%s\",\"present\":%ld,\"this\":\"%p\"",

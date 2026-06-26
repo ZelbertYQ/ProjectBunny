@@ -25,6 +25,7 @@ static HANDLE gLogThread = nullptr;
 static HANDLE gLogEvent = nullptr;
 static SRWLOCK gLogQueueLock = SRWLOCK_INIT;
 static std::deque<std::string> gLogQueue;
+static volatile LONG gLogDroppedLines = 0;
 static volatile LONG gLogStopRequested = 0;
 static volatile LONG gPresentCount = 0;
 static HWND gOverlayWindow = nullptr;
@@ -40,10 +41,24 @@ static CNktHookLib gHookMgr;
 static std::unordered_set<void*> gHookedFunctions;
 static std::unordered_map<void*, void*> gOriginalFunctions;
 
-// Hot-path fast-forward flags — see DX12State.h for full documentation.
+// Hot-path fast-forward flags; see DX12State.h for full documentation.
 volatile LONG gDX12HotPathSkipAll = 0;
 volatile LONG gDX12HotPathSkipBindings = 0;
 static thread_local UINT tDX12InternalReplayDepth = 0;
+
+#if defined(_DEBUG)
+struct DX12HookCallLogBudget
+{
+	LONG present = -1;
+	LONG count = 0;
+};
+
+static constexpr LONG kHookCallLogBudgetPerApiPerPresent = 16;
+static SRWLOCK gHookCallLogBudgetLock = SRWLOCK_INIT;
+static std::unordered_map<std::string, DX12HookCallLogBudget> gHookCallLogBudgets;
+#endif
+
+static constexpr size_t kMaxQueuedLogLines = 8192;
 
 void DX12EnterInternalReplay()
 {
@@ -86,9 +101,37 @@ void DX12HotPathUpdate()
 		(needsHeavyTracking || needsRecordWork) ? 0 : 1);
 
 	// Skip-bindings: when no heavy tracking is needed.  Mod work alone does
-	// NOT require binding tracking — the draw hooks handle mod matching.
+	// NOT require binding tracking; the draw hooks handle mod matching.
 	InterlockedExchange(&gDX12HotPathSkipBindings,
 		needsHeavyTracking ? 0 : 1);
+}
+
+bool DX12ShouldLogHookCall(const char *api)
+{
+#if defined(_DEBUG)
+	if (!api || !api[0] || DX12IsInternalReplay())
+		return false;
+
+	const LONG present = DX12GetPresentCount();
+	bool shouldLog = false;
+	AcquireSRWLockExclusive(&gHookCallLogBudgetLock);
+	DX12HookCallLogBudget &budget = gHookCallLogBudgets[api];
+	if (budget.present != present) {
+		budget.present = present;
+		budget.count = 0;
+	}
+	if (budget.count < kHookCallLogBudgetPerApiPerPresent) {
+		++budget.count;
+		shouldLog = true;
+	}
+	if (gHookCallLogBudgets.size() > 256)
+		gHookCallLogBudgets.clear();
+	ReleaseSRWLockExclusive(&gHookCallLogBudgetLock);
+	return shouldLog;
+#else
+	(void)api;
+	return false;
+#endif
 }
 
 void DX12SetModule(HINSTANCE module)
@@ -119,6 +162,14 @@ static DWORD WINAPI DX12LogThreadProc(void*)
 		ReleaseSRWLockExclusive(&gLogQueueLock);
 
 		if (gLog) {
+			const LONG dropped = InterlockedExchange(&gLogDroppedLines, 0);
+			if (dropped > 0) {
+				char droppedLine[256];
+				snprintf(droppedLine, sizeof(droppedLine),
+					"{\"func\":\"DX12LogQueue\",\"event\":\"DroppedLines\",\"count\":%ld}\n",
+					dropped);
+				fputs(droppedLine, gLog);
+			}
 			for (const auto &line : pending)
 				fputs(line.c_str(), gLog);
 			if (!pending.empty() || stopping)
@@ -204,7 +255,11 @@ static void EnqueueJsonLogLine(const char *line)
 		return;
 
 	AcquireSRWLockExclusive(&gLogQueueLock);
-	gLogQueue.emplace_back(line);
+	if (gLogQueue.size() < kMaxQueuedLogLines) {
+		gLogQueue.emplace_back(line);
+	} else {
+		InterlockedIncrement(&gLogDroppedLines);
+	}
 	ReleaseSRWLockExclusive(&gLogQueueLock);
 	if (gLogEvent)
 		SetEvent(gLogEvent);
@@ -290,7 +345,7 @@ void DX12Log(const char *fmt, ...)
 	char funcJson[16];
 	DX12JsonEscapeString(funcJson, sizeof(funcJson), "Log");
 	WriteJsonLogLine("Log", funcJson, fields[0] == ',' ? fields + 1 : fields, false);
-	// Do NOT fflush here — per-line sync flushes cause severe CPU stalls on the
+	// Do NOT fflush here; per-line sync flushes cause severe CPU stalls on the
 	// recording hot path. DX12FlushLog() is called from the Present hook instead.
 }
 

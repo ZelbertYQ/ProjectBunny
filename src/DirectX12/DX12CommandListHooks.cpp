@@ -414,7 +414,7 @@ static void SyncHuntIaFromRuntimeState(
 
 static void LogDX12Call(const char *api, const void *object, const char *fmt = nullptr, ...)
 {
-	if (DX12IsInternalReplay())
+	if (!DX12ShouldLogHookCall(api))
 		return;
 
 	char detail[1024];

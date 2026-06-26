@@ -55,12 +55,13 @@ extern volatile LONG gDX12HotPathSkipAll;
 // Separate fast-forward for BINDING hooks (SetRoot*, IASet*, SetDescriptorHeaps).
 // Set to true when no HEAVY tracking is needed (hunt / frame-analysis / shader-
 // dump are all off), even when mod work (texture/shader overrides) is active.
-// Binding hooks only need to track state for hunt/capture — mod work only needs
+// Binding hooks only need to track state for hunt/capture; mod work only needs
 // draw hooks.  This lets ~80 % of API calls (bindings) skip the StateCapture
 // path entirely while draw hooks still run the mod matching path.
 extern volatile LONG gDX12HotPathSkipBindings;
 
 void DX12HotPathUpdate();
+bool DX12ShouldLogHookCall(const char *api);
 
 void DX12EnterInternalReplay();
 void DX12LeaveInternalReplay();

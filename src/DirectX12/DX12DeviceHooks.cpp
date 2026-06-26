@@ -27,7 +27,7 @@ static PFN_DEVICE_FACTORY_CREATE_DEVICE gOrigDeviceFactoryCreateDevice = nullptr
 
 static void LogDeviceHookCall(const char *api, const void *object)
 {
-	if (DX12IsInternalReplay())
+	if (!DX12ShouldLogHookCall(api))
 		return;
 	DX12LogDebugJsonFunc("DX12HookCall",
 		"\"api\":\"%s\",\"present\":%ld,\"this\":\"%p\"",
