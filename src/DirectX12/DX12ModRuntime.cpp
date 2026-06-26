@@ -851,7 +851,15 @@ void DX12ModNotifyCommandListsSubmitted(
 	const UINT64 fenceValue = ++gPreSkinRetireFenceNextValue;
 	gPreSkinRetireFence->AddRef();
 	ID3D12Fence *fence = gPreSkinRetireFence;
-	HRESULT hr = queue->Signal(fence, fenceValue);
+	ReleaseSRWLockExclusive(&gPreSkinRetireLock);
+
+	HRESULT hr = S_OK;
+	{
+		DX12InternalReplayScope internalReplay;
+		hr = queue->Signal(fence, fenceValue);
+	}
+
+	AcquireSRWLockExclusive(&gPreSkinRetireLock);
 	if (FAILED(hr)) {
 		fence->Release();
 		RequeuePendingPreSkinSubmissionLocked(&pending);

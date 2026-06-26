@@ -930,6 +930,12 @@ static void STDMETHODCALLTYPE HookedQueueEndEvent(ID3D12CommandQueue *queue)
 static HRESULT STDMETHODCALLTYPE HookedQueueSignal(
 	ID3D12CommandQueue *queue, ID3D12Fence *fence, UINT64 value)
 {
+	if (DX12IsInternalReplay()) {
+		PFN_QUEUE_SIGNAL original =
+			DX12_QUEUE_ORIG(queue, 14, PFN_QUEUE_SIGNAL, Signal);
+		return original ? original(queue, fence, value) : E_FAIL;
+	}
+
 	LogDX12Call("ID3D12CommandQueue::Signal", queue, " fence=%p value=%llu",
 		fence, static_cast<unsigned long long>(value));
 	PFN_QUEUE_SIGNAL original =
@@ -2103,8 +2109,6 @@ void DX12HookCommandQueue(IUnknown *commandQueue)
 			HookedQueueEndEvent, "ID3D12CommandQueue::EndEvent"},
 		{14, reinterpret_cast<void**>(&gOrigQueueSignal),
 			HookedQueueSignal, "ID3D12CommandQueue::Signal"},
-		{15, reinterpret_cast<void**>(&gOrigQueueWait),
-			HookedQueueWait, "ID3D12CommandQueue::Wait"},
 		{16, reinterpret_cast<void**>(&gOrigQueueGetTimestampFrequency),
 			HookedQueueGetTimestampFrequency, "ID3D12CommandQueue::GetTimestampFrequency"},
 		{17, reinterpret_cast<void**>(&gOrigQueueGetClockCalibration),
