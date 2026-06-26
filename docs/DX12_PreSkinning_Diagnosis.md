@@ -104,3 +104,50 @@ The expected direction is:
 `DX12BindingTracker.cpp` was split into live tracking, frame export, resource export, and shared private helpers after this fix. The split keeps each cpp below 1000 lines and makes future binding-state changes easier to review without mixing runtime capture with frame-analysis output.
 
 The remaining section-id fallback paths in `DX12ModRuntimeIaRuntime.cpp` are still architectural debt. They were not changed here because the reproduced failure was in command-list binding state tracking, not texture override identity resolution.
+
+### Fourth Failure
+
+With no Mod enabled and the green overlay in its default state, the runtime log still showed dense per-frame JSON output.
+
+A 5000-line sample was dominated by `ID3D12Device::CreateDepthStencilView`, `ID3D12Device::CreateRenderTargetView`, `ID3D12GraphicsCommandList::IASetPrimitiveTopology`, `ID3D12GraphicsCommandList::SetGraphicsRootSignature`, `Reset`, `Present1`, and one `DX12FrameStats` row every frame.
+
+This means the injected DX12 DLL could be CPU-bound by hook-side formatting, queue locking, event signaling, and periodic flush pressure before the game had enough work submitted to keep the GPU busy. The visible symptom matched that model: GPU utilization stayed near idle while frame pacing was poor.
+
+### Fourth Cause
+
+Debug hook-call logging and present-stage logging had become part of the default runtime path. Even though the log writer used a background thread, every logged hook still paid CPU-side costs in the hooked call: budget lookup, string formatting, queue insertion under an exclusive lock, event signaling, and per-present stage flush requests.
+
+DX11 keeps `[Logging] calls = 0` as the default, so the normal injected path does not write every API call. DX12 had drifted away from that model during diagnosis work.
+
+### Fourth Fix
+
+DX12 diagnostic JSON logging is now opt-in through `MIGOTO_DX12_DIAGNOSTIC_LOGS=1`.
+
+Default gameplay still opens the log file for startup, reload, and error-level records, but debug JSON logs no longer enter the queue unless diagnostics are explicitly enabled. `Present` no longer forces a log flush every frame, and `DX12FrameStats` is emitted only when diagnostics are enabled or profiling summary mode is active.
+
+This keeps the default path close to DX11: injected but idle should pay only the hook forwarding and active-system predicates, not disk or JSON work.
+
+`DX12ResourceTracker.cpp` was also split into:
+
+- `DX12ResourceTracker.cpp` for shared metadata state, root signatures, descriptor records, resource records, barriers, and internal helpers
+- `DX12ResourceTrackerHooks.cpp` for D3D12 device hook adapters and descriptor/resource creation interception
+- `DX12ResourceTrackerQueries.cpp` for read-side summaries, hashing, and metadata snapshots
+- `DX12ResourceTrackerPrivate.h` for the private seam between those implementation files
+
+Each resource tracker cpp is now below 1000 lines.
+
+### Fourth Verification
+
+`build_debug_x64.ps1` succeeded and copied the new `d3d12.dll` to `D:\SSMTCacheFolder\3Dmigoto\ZZMIDX12\d3d12.dll`.
+
+Retest default injection without `MIGOTO_DX12_DIAGNOSTIC_LOGS`. The expected direction is:
+
+- `D:\SSMTCacheFolder\3Dmigoto\ZZMIDX12\d3d12_log.jsonl` should no longer grow with per-frame hook calls or `DX12FrameStats`
+- default scene GPU utilization should rise if logging was the CPU-side bottleneck
+- if further diagnosis is needed, set `MIGOTO_DX12_DIAGNOSTIC_LOGS=1` before launching and rerun the same scene
+
+### Fourth Follow-up Risk
+
+The original-function lookup helpers still accept static fallback function pointers. This is an existing fallback design and should eventually be replaced with a single original-resolution model that either resolves through the hook registry or fails loudly at hook-install time.
+
+The latest runtime log also showed the game creating RTV/DSV descriptors and placed resources every frame. If GPU utilization remains low after disabling default diagnostic logs, the next hypothesis should test whether our resource metadata tracking around descriptor/resource creation is still doing too much work when no active system needs full metadata.

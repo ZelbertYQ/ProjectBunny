@@ -26,6 +26,8 @@ add_library(DirectX12 SHARED
     DX12ResourceDump.cpp
     DX12ResourceMetadataDump.cpp
     DX12ResourceTracker.cpp
+    DX12ResourceTrackerHooks.cpp
+    DX12ResourceTrackerQueries.cpp
     DX12Runtime.cpp
     DX12ShaderDump.cpp
     DX12ShaderHunt.cpp

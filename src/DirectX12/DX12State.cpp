@@ -34,6 +34,7 @@ static COLORREF gOverlayStatusColor = RGB(0, 255, 0);
 static DWORD gOverlayStatusExpireTick = 0;
 static ID3D12CommandQueue *gCommandQueue = nullptr;
 static SRWLOCK gStateLock = SRWLOCK_INIT;
+static std::atomic<bool> gDiagnosticsLogging{ false };
 #if !defined(_DEBUG)
 static std::atomic<bool> gReleaseStartupLogging{ true };
 #endif
@@ -145,7 +146,7 @@ void DX12HotPathUpdate()
 bool DX12ShouldLogHookCall(const char *api)
 {
 #if defined(_DEBUG)
-	if (!api || !api[0] || DX12IsInternalReplay())
+	if (!DX12DiagnosticsLoggingEnabled() || !api || !api[0] || DX12IsInternalReplay())
 		return false;
 	if (DX12IsNoisyHookCallApi(api))
 		return false;
@@ -180,6 +181,23 @@ void DX12SetModule(HINSTANCE module)
 HINSTANCE DX12GetModule()
 {
 	return gModule;
+}
+
+static bool ReadDiagnosticsLoggingEnabled()
+{
+	wchar_t value[32] = {};
+	const DWORD chars = GetEnvironmentVariableW(L"MIGOTO_DX12_DIAGNOSTIC_LOGS", value, ARRAYSIZE(value));
+	if (chars == 0 || chars >= ARRAYSIZE(value))
+		return false;
+	return !_wcsicmp(value, L"1") ||
+		!_wcsicmp(value, L"true") ||
+		!_wcsicmp(value, L"on") ||
+		!_wcsicmp(value, L"yes");
+}
+
+bool DX12DiagnosticsLoggingEnabled()
+{
+	return gDiagnosticsLogging.load(std::memory_order_relaxed);
 }
 
 static DWORD WINAPI DX12LogThreadProc(void*)
@@ -225,6 +243,7 @@ bool DX12OpenLogFile()
 #if !defined(_DEBUG)
 	gReleaseStartupLogging.store(true, std::memory_order_relaxed);
 #endif
+	gDiagnosticsLogging.store(ReadDiagnosticsLoggingEnabled(), std::memory_order_relaxed);
 	wchar_t path[MAX_PATH];
 	if (!GetModuleFileNameW(gModule, path, MAX_PATH))
 		return false;
@@ -265,8 +284,9 @@ static bool DX12ReleaseShouldLogFunction(const char *func)
 		return true;
 	if (!func)
 		return false;
+	if (DX12DiagnosticsLoggingEnabled())
+		return true;
 	return strcmp(func, "DX12ModRuntimeReload") == 0 ||
-		strcmp(func, "DX12PreSkinMatchCsProbe") == 0 ||
 		strcmp(func, "DX12PreSkinMatchCsApply") == 0;
 }
 #else
@@ -438,6 +458,8 @@ void DX12LogDebugJsonFunc(const char *func, const char *fmt, ...)
 {
 	if (!gLog)
 		return;
+	if (!DX12DiagnosticsLoggingEnabled())
+		return;
 
 	char funcJson[512];
 	char extra[4096];
@@ -457,6 +479,8 @@ void DX12LogDebugJsonFunc(const char *func, const char *fmt, ...)
 void DX12LogDebugJsonFuncFlush(const char *func, const char *fmt, ...)
 {
 	if (!gLog)
+		return;
+	if (!DX12DiagnosticsLoggingEnabled())
 		return;
 
 	char funcJson[512];

@@ -119,8 +119,8 @@ static PFN_PRESENT1 GetPresent1Original(IDXGISwapChain1 *swapChain)
 
 static void LogPresentStage(const char *api, const char *stage, IDXGISwapChain *swapChain, HRESULT hr = S_OK)
 {
-	// Early-present crashes often leave only buffered logs behind. Flush these
-	// low-volume stage markers so the next run shows the exact boundary reached.
+	if (!DX12DiagnosticsLoggingEnabled())
+		return;
 	DX12LogDebugJsonFuncFlush("DX12PresentStage",
 		"\"api\":\"%s\",\"stage\":\"%s\",\"present\":%ld,\"swapchain\":\"%p\",\"hr\":\"0x%lx\"",
 		api ? api : "", stage ? stage : "", DX12GetPresentCount(), swapChain, hr);
@@ -378,15 +378,9 @@ static HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain *swapChain, UINT s
 	LogPresentStage("Present", "afterOriginal", swapChain, hr);
 	LogPresentDeviceRemovedReason("Present", swapChain, hr);
 	DX12IncrementPresentCount();
-	DX12FlushLog();
 	LogPresentStage("Present", "beforeModBeginFrame", swapChain, hr);
 	DX12ModBeginFrame();
 
-	// Recalculate the hot-path skip-all flag once per frame.  When set, every
-	// recording hook (Draw, Dispatch, SetPipelineState, SetRoot*, IASet*, etc.)
-	// skips ALL tracking work and calls the original directly with a single
-	// branch.  This collapses the common "inject but idle" path to near-zero
-	// overhead.
 	DX12HotPathUpdate();
 	LogPresentStage("Present", "afterHotPathUpdate", swapChain, hr);
 
@@ -415,14 +409,9 @@ static HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain *swapChain, UINT s
 		DX12ShaderDumpBeginCapture();
 	} else if (DX12FrameAnalysisIsCapturing() || DX12ShaderDumpIsCapturingFrame() ||
 	           DX12ModHasActiveTextureOverrides()) {
-		// Binding tracking is needed by an active subsystem; reset per-frame
-		// state.  When nothing is active we skip this entirely so the binding
-		// tracker stays idle and does not consume CPU every frame.
 		DX12BindingBeginFrame();
 		LogPresentStage("Present", "afterBindingBeginFrame", swapChain, hr);
 	}
-	// else: no capture, no hunt, no texture overrides; skip binding frame
-	//       reset to save CPU on the Present path.
 	DX12Profiling::EndFrame();
 	LogPresentStage("Present", "end", swapChain, hr);
 	return hr;
@@ -444,16 +433,12 @@ static HRESULT STDMETHODCALLTYPE HookedPresent1(
 	LogPresentStage("Present1", "afterOriginal", swapChain, hr);
 	LogPresentDeviceRemovedReason("Present1", swapChain, hr);
 	DX12IncrementPresentCount();
-	DX12FlushLog();
 	LogPresentStage("Present1", "beforeModBeginFrame", swapChain, hr);
 	DX12ModBeginFrame();
 
-	// Recalculate the hot-path skip-all flag once per frame.
 	DX12HotPathUpdate();
 	LogPresentStage("Present1", "afterHotPathUpdate", swapChain, hr);
 
-	// Bump the global tracking generation so every command list's cached
-	// tracking predicates are invalidated once per frame.
 	DX12CommandListRuntimeBumpTrackingGeneration();
 
 	if (DX12HuntShouldDrawOverlay()) {
@@ -479,14 +464,9 @@ static HRESULT STDMETHODCALLTYPE HookedPresent1(
 		DX12ShaderDumpBeginCapture();
 	} else if (DX12FrameAnalysisIsCapturing() || DX12ShaderDumpIsCapturingFrame() ||
 	           DX12ModHasActiveTextureOverrides()) {
-		// Binding tracking is needed by an active subsystem; reset per-frame
-		// state.  When nothing is active we skip this entirely so the binding
-		// tracker stays idle and does not consume CPU every frame.
 		DX12BindingBeginFrame();
 		LogPresentStage("Present1", "afterBindingBeginFrame", swapChain, hr);
 	}
-	// else: no capture, no hunt, no texture overrides; skip binding frame
-	//       reset to save CPU on the Present path.
 	DX12Profiling::EndFrame();
 	LogPresentStage("Present1", "end", swapChain, hr);
 	return hr;

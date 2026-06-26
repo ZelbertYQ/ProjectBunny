@@ -1,23 +1,6 @@
-#include "DX12ResourceTracker.h"
+#include "DX12ResourceTrackerPrivate.h"
 
-#include <Shlwapi.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <string.h>
-
-#include <algorithm>
-#include <string>
-#include <unordered_map>
-#include <vector>
-
-#include "DX12FrameAnalysis.h"
-#include "DX12HookManager.h"
-#include "DX12Json.h"
-#include "DX12ModRuntime.h"
-#include "DX12State.h"
-#include "crc32c.h"
-
-static uint32_t HashBytes(uint32_t seed, const void *data, size_t size)
+uint32_t HashBytes(uint32_t seed, const void *data, size_t size)
 {
 	if (!data || size == 0)
 		return seed;
@@ -29,224 +12,31 @@ static uint32_t HashBytes(uint32_t seed, const void *data, size_t size)
 	}
 }
 
-typedef HRESULT(STDMETHODCALLTYPE *PFN_CREATE_DESCRIPTOR_HEAP)(
-	ID3D12Device*, const D3D12_DESCRIPTOR_HEAP_DESC*, REFIID, void**);
-typedef HRESULT(STDMETHODCALLTYPE *PFN_CREATE_ROOT_SIGNATURE)(
-	ID3D12Device*, UINT, const void*, SIZE_T, REFIID, void**);
-typedef void(STDMETHODCALLTYPE *PFN_CREATE_CONSTANT_BUFFER_VIEW)(
-	ID3D12Device*, const D3D12_CONSTANT_BUFFER_VIEW_DESC*, D3D12_CPU_DESCRIPTOR_HANDLE);
-typedef void(STDMETHODCALLTYPE *PFN_CREATE_SHADER_RESOURCE_VIEW)(
-	ID3D12Device*, ID3D12Resource*, const D3D12_SHADER_RESOURCE_VIEW_DESC*, D3D12_CPU_DESCRIPTOR_HANDLE);
-typedef void(STDMETHODCALLTYPE *PFN_CREATE_UNORDERED_ACCESS_VIEW)(
-	ID3D12Device*, ID3D12Resource*, ID3D12Resource*, const D3D12_UNORDERED_ACCESS_VIEW_DESC*, D3D12_CPU_DESCRIPTOR_HANDLE);
-typedef void(STDMETHODCALLTYPE *PFN_CREATE_RENDER_TARGET_VIEW)(
-	ID3D12Device*, ID3D12Resource*, const D3D12_RENDER_TARGET_VIEW_DESC*, D3D12_CPU_DESCRIPTOR_HANDLE);
-typedef void(STDMETHODCALLTYPE *PFN_CREATE_DEPTH_STENCIL_VIEW)(
-	ID3D12Device*, ID3D12Resource*, const D3D12_DEPTH_STENCIL_VIEW_DESC*, D3D12_CPU_DESCRIPTOR_HANDLE);
-typedef void(STDMETHODCALLTYPE *PFN_CREATE_SAMPLER)(
-	ID3D12Device*, const D3D12_SAMPLER_DESC*, D3D12_CPU_DESCRIPTOR_HANDLE);
-typedef void(STDMETHODCALLTYPE *PFN_COPY_DESCRIPTORS)(
-	ID3D12Device*, UINT, const D3D12_CPU_DESCRIPTOR_HANDLE*, const UINT*,
-	UINT, const D3D12_CPU_DESCRIPTOR_HANDLE*, const UINT*, D3D12_DESCRIPTOR_HEAP_TYPE);
-typedef void(STDMETHODCALLTYPE *PFN_COPY_DESCRIPTORS_SIMPLE)(
-	ID3D12Device*, UINT, D3D12_CPU_DESCRIPTOR_HANDLE, D3D12_CPU_DESCRIPTOR_HANDLE,
-	D3D12_DESCRIPTOR_HEAP_TYPE);
-typedef HRESULT(STDMETHODCALLTYPE *PFN_CREATE_COMMITTED_RESOURCE)(
-	ID3D12Device*, const D3D12_HEAP_PROPERTIES*, D3D12_HEAP_FLAGS,
-	const D3D12_RESOURCE_DESC*, D3D12_RESOURCE_STATES, const D3D12_CLEAR_VALUE*,
-	REFIID, void**);
-typedef HRESULT(STDMETHODCALLTYPE *PFN_CREATE_PLACED_RESOURCE)(
-	ID3D12Device*, ID3D12Heap*, UINT64, const D3D12_RESOURCE_DESC*,
-	D3D12_RESOURCE_STATES, const D3D12_CLEAR_VALUE*, REFIID, void**);
-typedef HRESULT(STDMETHODCALLTYPE *PFN_CREATE_RESERVED_RESOURCE)(
-	ID3D12Device*, const D3D12_RESOURCE_DESC*, D3D12_RESOURCE_STATES,
-	const D3D12_CLEAR_VALUE*, REFIID, void**);
-typedef HRESULT(STDMETHODCALLTYPE *PFN_CREATE_COMMITTED_RESOURCE1)(
-	ID3D12Device4*, const D3D12_HEAP_PROPERTIES*, D3D12_HEAP_FLAGS,
-	const D3D12_RESOURCE_DESC*, D3D12_RESOURCE_STATES, const D3D12_CLEAR_VALUE*,
-	ID3D12ProtectedResourceSession*, REFIID, void**);
-typedef HRESULT(STDMETHODCALLTYPE *PFN_CREATE_RESERVED_RESOURCE1)(
-	ID3D12Device4*, const D3D12_RESOURCE_DESC*, D3D12_RESOURCE_STATES,
-	const D3D12_CLEAR_VALUE*, ID3D12ProtectedResourceSession*, REFIID, void**);
-typedef HRESULT(STDMETHODCALLTYPE *PFN_CREATE_COMMITTED_RESOURCE2)(
-	ID3D12Device8*, const D3D12_HEAP_PROPERTIES*, D3D12_HEAP_FLAGS,
-	const D3D12_RESOURCE_DESC1*, D3D12_RESOURCE_STATES, const D3D12_CLEAR_VALUE*,
-	ID3D12ProtectedResourceSession*, REFIID, void**);
-typedef HRESULT(STDMETHODCALLTYPE *PFN_CREATE_PLACED_RESOURCE1)(
-	ID3D12Device8*, ID3D12Heap*, UINT64, const D3D12_RESOURCE_DESC1*,
-	D3D12_RESOURCE_STATES, const D3D12_CLEAR_VALUE*, REFIID, void**);
-typedef HRESULT(STDMETHODCALLTYPE *PFN_CREATE_COMMITTED_RESOURCE3)(
-	ID3D12Device10*, const D3D12_HEAP_PROPERTIES*, D3D12_HEAP_FLAGS,
-	const D3D12_RESOURCE_DESC1*, D3D12_BARRIER_LAYOUT, const D3D12_CLEAR_VALUE*,
-	ID3D12ProtectedResourceSession*, UINT32, const DXGI_FORMAT*, REFIID, void**);
-typedef HRESULT(STDMETHODCALLTYPE *PFN_CREATE_PLACED_RESOURCE2)(
-	ID3D12Device10*, ID3D12Heap*, UINT64, const D3D12_RESOURCE_DESC1*,
-	D3D12_BARRIER_LAYOUT, const D3D12_CLEAR_VALUE*, UINT32, const DXGI_FORMAT*,
-	REFIID, void**);
-typedef HRESULT(STDMETHODCALLTYPE *PFN_CREATE_RESERVED_RESOURCE2)(
-	ID3D12Device10*, const D3D12_RESOURCE_DESC*, D3D12_BARRIER_LAYOUT,
-	const D3D12_CLEAR_VALUE*, ID3D12ProtectedResourceSession*, UINT32,
-	const DXGI_FORMAT*, REFIID, void**);
-
-static PFN_CREATE_DESCRIPTOR_HEAP gOrigCreateDescriptorHeap = nullptr;
-static PFN_CREATE_ROOT_SIGNATURE gOrigCreateRootSignature = nullptr;
-static PFN_CREATE_CONSTANT_BUFFER_VIEW gOrigCreateConstantBufferView = nullptr;
-static PFN_CREATE_SHADER_RESOURCE_VIEW gOrigCreateShaderResourceView = nullptr;
-static PFN_CREATE_UNORDERED_ACCESS_VIEW gOrigCreateUnorderedAccessView = nullptr;
-static PFN_CREATE_RENDER_TARGET_VIEW gOrigCreateRenderTargetView = nullptr;
-static PFN_CREATE_DEPTH_STENCIL_VIEW gOrigCreateDepthStencilView = nullptr;
-static PFN_CREATE_SAMPLER gOrigCreateSampler = nullptr;
-static PFN_COPY_DESCRIPTORS gOrigCopyDescriptors = nullptr;
-static PFN_COPY_DESCRIPTORS_SIMPLE gOrigCopyDescriptorsSimple = nullptr;
-static PFN_CREATE_COMMITTED_RESOURCE gOrigCreateCommittedResource = nullptr;
-static PFN_CREATE_PLACED_RESOURCE gOrigCreatePlacedResource = nullptr;
-static PFN_CREATE_RESERVED_RESOURCE gOrigCreateReservedResource = nullptr;
-static PFN_CREATE_COMMITTED_RESOURCE1 gOrigCreateCommittedResource1 = nullptr;
-static PFN_CREATE_RESERVED_RESOURCE1 gOrigCreateReservedResource1 = nullptr;
-static PFN_CREATE_COMMITTED_RESOURCE2 gOrigCreateCommittedResource2 = nullptr;
-static PFN_CREATE_PLACED_RESOURCE1 gOrigCreatePlacedResource1 = nullptr;
-static PFN_CREATE_COMMITTED_RESOURCE3 gOrigCreateCommittedResource3 = nullptr;
-static PFN_CREATE_PLACED_RESOURCE2 gOrigCreatePlacedResource2 = nullptr;
-static PFN_CREATE_RESERVED_RESOURCE2 gOrigCreateReservedResource2 = nullptr;
-
-static void LogResourceHookCall(const char *api, const void *object)
-{
-	if (!DX12ShouldLogHookCall(api))
-		return;
-	DX12LogDebugJsonFunc("DX12HookCall",
-		"\"api\":\"%s\",\"present\":%ld,\"this\":\"%p\"",
-		api ? api : "", DX12GetPresentCount(), object);
-}
-
-static void LogResourceOriginalFallback(const char *api, const void *object, UINT slot, const void *fallback)
-{
-	if (!DX12ShouldLogHookCall(api))
-		return;
-	DX12LogDebugJsonFunc("DX12FallbackPath",
-		"\"kind\":\"original_lookup\",\"api\":\"%s\",\"present\":%ld,\"this\":\"%p\","
-		"\"slot\":%u,\"fallback\":\"%p\"",
-		api ? api : "", DX12GetPresentCount(), object, slot, fallback);
-}
-
-template <typename T>
-static T GetDeviceOriginal(void *device, UINT slot, T fallback, const char *name)
-{
-	if (device) {
-		void **vtable = *reinterpret_cast<void***>(device);
-		if (vtable) {
-			void *original = DX12GetOriginalFunction(vtable[slot]);
-			if (original)
-				return reinterpret_cast<T>(original);
-		}
-	}
-	if (fallback) {
-		LogResourceOriginalFallback(name, device, slot, reinterpret_cast<const void*>(fallback));
-		return fallback;
-	}
-	DX12LogJsonFunc(name ? name : "ID3D12Device::Unknown",
-		"\"event\":\"MissingOriginal\",\"this\":\"%p\",\"slot\":%u",
-		device, slot);
-	return nullptr;
-}
-
-struct RootSignatureRecord
-{
-	ID3D12RootSignature *rootSignature = nullptr;
-	UINT64 hash = 0;
-	SIZE_T size = 0;
-	UINT nodeMask = 0;
-	UINT version = 0;
-	UINT flags = 0;
-	UINT staticSamplerCount = 0;
-	bool parsed = false;
-	std::vector<DX12RootParameterSummary> parameters;
-};
-
-struct DescriptorHeapRecord
-{
-	ID3D12DescriptorHeap *heap = nullptr;
-	D3D12_DESCRIPTOR_HEAP_DESC desc = {};
-	SIZE_T cpuStart = 0;
-	UINT64 gpuStart = 0;
-	UINT increment = 0;
-};
-
-struct DescriptorRecord
-{
-	std::string kind;
-	SIZE_T cpuHandle = 0;
-	ID3D12Resource *resource = nullptr;
-	ID3D12Resource *counterResource = nullptr;
-	D3D12_RESOURCE_DESC resourceDesc = {};
-	bool hasResourceDesc = false;
-	UINT resourceHeapType = 0;
-	bool hasResourceHeapType = false;
-	UINT64 gpuVirtualAddress = 0;
-	UINT64 resourceOffset = 0;
-	UINT64 viewSize = 0;
-	D3D12_RESOURCE_STATES currentState = D3D12_RESOURCE_STATE_COMMON;
-	bool hasCurrentState = false;
-	D3D12_CONSTANT_BUFFER_VIEW_DESC cbv = {};
-	D3D12_SHADER_RESOURCE_VIEW_DESC srv = {};
-	D3D12_UNORDERED_ACCESS_VIEW_DESC uav = {};
-	D3D12_RENDER_TARGET_VIEW_DESC rtv = {};
-	D3D12_DEPTH_STENCIL_VIEW_DESC dsv = {};
-	D3D12_SAMPLER_DESC sampler = {};
-	bool hasDesc = false;
-};
-
-struct ResourceRecord
-{
-	ID3D12Resource *resource = nullptr;
-	D3D12_RESOURCE_DESC desc = {};
-	D3D12_HEAP_TYPE heapType = D3D12_HEAP_TYPE_DEFAULT;
-	bool hasHeapType = false;
-	UINT64 gpuVirtualAddress = 0;
-	UINT64 size = 0;
-	D3D12_RESOURCE_STATES currentState = D3D12_RESOURCE_STATE_COMMON;
-	bool hasCurrentState = false;
-};
-
-struct BufferResolveCacheEntry
-{
-	UINT64 begin = 0;
-	UINT64 end = 0;
-	DX12BufferResourceSummary summary = {};
-};
-
-struct PsoRootRecord
-{
-	UINT64 psoIndex = 0;
-	std::string kind;
-	ID3D12PipelineState *pipelineState = nullptr;
-	ID3D12RootSignature *rootSignature = nullptr;
-};
-
-static SRWLOCK gResourceLock = SRWLOCK_INIT;
-static std::vector<RootSignatureRecord> gRootSignatures;
-static std::vector<DescriptorHeapRecord> gDescriptorHeaps;
-static std::vector<DescriptorRecord> gDescriptors;
-static std::unordered_map<ID3D12RootSignature*, size_t> gRootSignatureByPtr;
-static std::unordered_map<ID3D12DescriptorHeap*, size_t> gDescriptorHeapByPtr;
-static std::unordered_map<SIZE_T, size_t> gDescriptorByCpuHandle;
-static std::vector<PsoRootRecord> gPsoRoots;
-static std::unordered_map<UINT64, size_t> gPsoRootByIndex;
-static std::vector<ResourceRecord> gResources;
-static std::unordered_map<ID3D12Resource*, size_t> gResourceByPtr;
-static std::unordered_map<UINT64, BufferResolveCacheEntry> gBufferResolveCache;
-static bool gCleanupRegistered = false;
-static UINT64 gResourcesRecordedFromCreate = 0;
-static UINT64 gDescriptorRecordsSeen = 0;
-static UINT64 gDescriptorCopyRecordsSeen = 0;
-static UINT64 gDescriptorHeapRecordsSeen = 0;
-static UINT64 gRootSignatureRecordsSeen = 0;
-static UINT64 gPsoRootRecordsSeen = 0;
-static LONG gLastResourceStatsPresent = -1;
+SRWLOCK gResourceLock = SRWLOCK_INIT;
+std::vector<RootSignatureRecord> gRootSignatures;
+std::vector<DescriptorHeapRecord> gDescriptorHeaps;
+std::vector<DescriptorRecord> gDescriptors;
+std::unordered_map<ID3D12RootSignature*, size_t> gRootSignatureByPtr;
+std::unordered_map<ID3D12DescriptorHeap*, size_t> gDescriptorHeapByPtr;
+std::unordered_map<SIZE_T, size_t> gDescriptorByCpuHandle;
+std::vector<PsoRootRecord> gPsoRoots;
+std::unordered_map<UINT64, size_t> gPsoRootByIndex;
+std::vector<ResourceRecord> gResources;
+std::unordered_map<ID3D12Resource*, size_t> gResourceByPtr;
+std::unordered_map<UINT64, BufferResolveCacheEntry> gBufferResolveCache;
+bool gCleanupRegistered = false;
+UINT64 gResourcesRecordedFromCreate = 0;
+UINT64 gDescriptorRecordsSeen = 0;
+UINT64 gDescriptorCopyRecordsSeen = 0;
+UINT64 gDescriptorHeapRecordsSeen = 0;
+UINT64 gRootSignatureRecordsSeen = 0;
+UINT64 gPsoRootRecordsSeen = 0;
+LONG gLastResourceStatsPresent = -1;
 static constexpr size_t kMaxTrackedDescriptors = 131072;
 static constexpr size_t kDescriptorPruneBatch = 32768;
 static constexpr LONG kResourceStatsLogInterval = 300;
 
-static void LogResourceTrackerStatsLocked();
+void LogResourceTrackerStatsLocked();
 
 typedef HRESULT(WINAPI *PFN_D3D12_CREATE_ROOT_SIGNATURE_DESERIALIZER_LOCAL)(
 	LPCVOID, SIZE_T, REFIID, void**);
@@ -256,8 +46,7 @@ typedef HRESULT(WINAPI *PFN_D3D12_CREATE_VERSIONED_ROOT_SIGNATURE_DESERIALIZER_L
 static HMODULE gD3D12ForDeserialization = nullptr;
 static PFN_D3D12_CREATE_ROOT_SIGNATURE_DESERIALIZER_LOCAL gCreateRootSignatureDeserializer = nullptr;
 static PFN_D3D12_CREATE_VERSIONED_ROOT_SIGNATURE_DESERIALIZER_LOCAL gCreateVersionedRootSignatureDeserializer = nullptr;
-
-static UINT64 Fnv1a64(const void *data, size_t size)
+UINT64 Fnv1a64(const void *data, size_t size)
 {
 	const uint8_t *bytes = static_cast<const uint8_t*>(data);
 	UINT64 hash = 14695981039346656037ull;
@@ -268,46 +57,7 @@ static UINT64 Fnv1a64(const void *data, size_t size)
 	return hash;
 }
 
-static uint32_t Fnv1a32Append(uint32_t hash, const void *data, size_t size)
-{
-	const uint8_t *bytes = static_cast<const uint8_t*>(data);
-	for (size_t i = 0; i < size; ++i) {
-		hash ^= bytes[i];
-		hash *= 16777619u;
-	}
-	return hash;
-}
-
-static uint32_t Fnv1a32(const void *data, size_t size)
-{
-	return Fnv1a32Append(2166136261u, data, size);
-}
-
-static constexpr uint32_t MakeTrackerFourCC(char a, char b, char c, char d)
-{
-	return static_cast<uint32_t>(static_cast<uint8_t>(a)) |
-		(static_cast<uint32_t>(static_cast<uint8_t>(b)) << 8) |
-		(static_cast<uint32_t>(static_cast<uint8_t>(c)) << 16) |
-		(static_cast<uint32_t>(static_cast<uint8_t>(d)) << 24);
-}
-
-static const char *DescriptorHeapTypeName(D3D12_DESCRIPTOR_HEAP_TYPE type)
-{
-	switch (type) {
-	case D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV:
-		return "CBV_SRV_UAV";
-	case D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER:
-		return "SAMPLER";
-	case D3D12_DESCRIPTOR_HEAP_TYPE_RTV:
-		return "RTV";
-	case D3D12_DESCRIPTOR_HEAP_TYPE_DSV:
-		return "DSV";
-	default:
-		return "UNKNOWN";
-	}
-}
-
-static D3D12_RESOURCE_DESC ResourceDescFromDesc1(const D3D12_RESOURCE_DESC1 *desc)
+D3D12_RESOURCE_DESC ResourceDescFromDesc1(const D3D12_RESOURCE_DESC1 *desc)
 {
 	D3D12_RESOURCE_DESC out = {};
 	if (!desc)
@@ -325,7 +75,7 @@ static D3D12_RESOURCE_DESC ResourceDescFromDesc1(const D3D12_RESOURCE_DESC1 *des
 	return out;
 }
 
-static D3D12_RESOURCE_STATES ResourceStateFromLayout(D3D12_BARRIER_LAYOUT layout)
+D3D12_RESOURCE_STATES ResourceStateFromLayout(D3D12_BARRIER_LAYOUT layout)
 {
 	switch (layout) {
 	case D3D12_BARRIER_LAYOUT_COMMON:
@@ -356,7 +106,7 @@ static D3D12_RESOURCE_STATES ResourceStateFromLayout(D3D12_BARRIER_LAYOUT layout
 	}
 }
 
-static ID3D12Resource *CanonicalResource(ID3D12Resource *resource)
+ID3D12Resource *CanonicalResource(ID3D12Resource *resource)
 {
 	if (!resource)
 		return nullptr;
@@ -370,7 +120,7 @@ static ID3D12Resource *CanonicalResource(ID3D12Resource *resource)
 	return resource;
 }
 
-static void RecordResource(
+void RecordResource(
 	ID3D12Resource *resource, const D3D12_RESOURCE_DESC *desc,
 	const D3D12_HEAP_PROPERTIES *heapProperties,
 	D3D12_RESOURCE_STATES initialState)
@@ -411,7 +161,7 @@ static void RecordResource(
 	ReleaseSRWLockExclusive(&gResourceLock);
 }
 
-static void CleanupTrackedResources()
+void CleanupTrackedResources()
 {
 	AcquireSRWLockExclusive(&gResourceLock);
 	gRootSignatures.clear();
@@ -595,7 +345,7 @@ static void ParseRootParameter1(
 	record->parameters.push_back(std::move(parameter));
 }
 
-static void ParseRootSignatureBlob(RootSignatureRecord *record, const void *blob, SIZE_T blobLength)
+void ParseRootSignatureBlob(RootSignatureRecord *record, const void *blob, SIZE_T blobLength)
 {
 	if (!record || !blob || blobLength == 0)
 		return;
@@ -652,7 +402,7 @@ static void ParseRootSignatureBlob(RootSignatureRecord *record, const void *blob
 	legacy->Release();
 }
 
-static void FillResourceInfo(DescriptorRecord *record, ID3D12Resource *resource)
+void FillResourceInfo(DescriptorRecord *record, ID3D12Resource *resource)
 {
 	if (!record || !resource)
 		return;
@@ -678,7 +428,7 @@ static void FillResourceInfo(DescriptorRecord *record, ID3D12Resource *resource)
 	ReleaseSRWLockShared(&gResourceLock);
 }
 
-static bool ResolveBufferByGpuVa(UINT64 gpuVa, UINT64 size, DescriptorRecord *record)
+bool ResolveBufferByGpuVa(UINT64 gpuVa, UINT64 size, DescriptorRecord *record)
 {
 	if (!record || gpuVa == 0)
 		return false;
@@ -821,7 +571,7 @@ static UINT UavBufferBytesPerElement(const D3D12_UNORDERED_ACCESS_VIEW_DESC &des
 	return DxgiFormatBytesPerElement(desc.Format);
 }
 
-static void FillSrvBufferView(DescriptorRecord *record)
+void FillSrvBufferView(DescriptorRecord *record)
 {
 	if (!record || !record->hasDesc ||
 		record->srv.ViewDimension != D3D12_SRV_DIMENSION_BUFFER)
@@ -836,7 +586,7 @@ static void FillSrvBufferView(DescriptorRecord *record)
 			record->resourceDesc.Width - record->resourceOffset : 0;
 }
 
-static void FillUavBufferView(DescriptorRecord *record)
+void FillUavBufferView(DescriptorRecord *record)
 {
 	if (!record || !record->hasDesc ||
 		record->uav.ViewDimension != D3D12_UAV_DIMENSION_BUFFER)
@@ -867,7 +617,7 @@ static void PruneDescriptorCacheLocked()
 	RebuildDescriptorIndexLocked();
 }
 
-static void LogResourceTrackerStatsLocked()
+void LogResourceTrackerStatsLocked()
 {
 	const LONG present = DX12GetPresentCount();
 	const LONG last = InterlockedCompareExchange(&gLastResourceStatsPresent, 0, 0);
@@ -908,7 +658,7 @@ static void UpdateDescriptorResourceStateLocked(
 	}
 }
 
-static void RecordDescriptor(DescriptorRecord &&record)
+void RecordDescriptor(DescriptorRecord &&record)
 {
 	AcquireSRWLockExclusive(&gResourceLock);
 	++gDescriptorRecordsSeen;
@@ -924,12 +674,12 @@ static void RecordDescriptor(DescriptorRecord &&record)
 	ReleaseSRWLockExclusive(&gResourceLock);
 }
 
-static bool ShouldTrackFullDescriptorMetadata()
+bool ShouldTrackFullDescriptorMetadata()
 {
 	return InterlockedCompareExchange(&gDX12HotPathSkipBindings, 0, 0) == 0;
 }
 
-static bool ShouldTrackComputeDescriptorMetadata()
+bool ShouldTrackComputeDescriptorMetadata()
 {
 	return InterlockedCompareExchange(&gDX12HotPathTrackResourceMetadata, 0, 0) != 0;
 }
@@ -959,7 +709,7 @@ static void RecordDescriptorLocked(DescriptorRecord &&record)
 	}
 }
 
-static void RecordDescriptorCopyRange(
+void RecordDescriptorCopyRange(
 	ID3D12Device *device, D3D12_DESCRIPTOR_HEAP_TYPE type,
 	D3D12_CPU_DESCRIPTOR_HANDLE destStart, D3D12_CPU_DESCRIPTOR_HANDLE srcStart,
 	UINT count)
@@ -986,706 +736,6 @@ static void RecordDescriptorCopyRange(
 	ReleaseSRWLockExclusive(&gResourceLock);
 }
 
-static HRESULT STDMETHODCALLTYPE HookedCreateDescriptorHeap(
-	ID3D12Device *device, const D3D12_DESCRIPTOR_HEAP_DESC *desc, REFIID riid, void **heap)
-{
-	LogResourceHookCall("ID3D12Device::CreateDescriptorHeap", device);
-	auto original = GetDeviceOriginal(
-		device, 14, gOrigCreateDescriptorHeap, "ID3D12Device::CreateDescriptorHeap");
-	if (DX12IsInternalReplay())
-		return original ? original(device, desc, riid, heap) : E_FAIL;
-	HRESULT hr = original ? original(device, desc, riid, heap) : E_FAIL;
-	if (SUCCEEDED(hr) && desc && heap && *heap) {
-		ID3D12DescriptorHeap *descriptorHeap = nullptr;
-		if (SUCCEEDED(static_cast<IUnknown*>(*heap)->QueryInterface(IID_PPV_ARGS(&descriptorHeap)))) {
-			DescriptorHeapRecord record;
-			record.heap = descriptorHeap;
-			record.desc = *desc;
-			record.cpuStart = descriptorHeap->GetCPUDescriptorHandleForHeapStart().ptr;
-			record.gpuStart = descriptorHeap->GetGPUDescriptorHandleForHeapStart().ptr;
-			record.increment = device->GetDescriptorHandleIncrementSize(desc->Type);
-			descriptorHeap->Release();
-
-			AcquireSRWLockExclusive(&gResourceLock);
-			++gDescriptorHeapRecordsSeen;
-			auto found = gDescriptorHeapByPtr.find(record.heap);
-			if (found != gDescriptorHeapByPtr.end()) {
-				gDescriptorHeaps[found->second] = record;
-			} else {
-				gDescriptorHeapByPtr[record.heap] = gDescriptorHeaps.size();
-				gDescriptorHeaps.push_back(record);
-			}
-			LogResourceTrackerStatsLocked();
-			ReleaseSRWLockExclusive(&gResourceLock);
-		}
-	}
-	return hr;
-}
-
-static HRESULT STDMETHODCALLTYPE HookedCreateRootSignature(
-	ID3D12Device *device, UINT nodeMask, const void *blob, SIZE_T blobLength,
-	REFIID riid, void **rootSignature)
-{
-	LogResourceHookCall("ID3D12Device::CreateRootSignature", device);
-	auto original = GetDeviceOriginal(
-		device, 16, gOrigCreateRootSignature, "ID3D12Device::CreateRootSignature");
-	if (DX12IsInternalReplay())
-		return original ? original(device, nodeMask, blob, blobLength, riid, rootSignature) : E_FAIL;
-	HRESULT hr = original ? original(device, nodeMask, blob, blobLength, riid, rootSignature) : E_FAIL;
-	if (SUCCEEDED(hr) && blob && blobLength && rootSignature && *rootSignature) {
-		RootSignatureRecord record;
-		record.rootSignature = static_cast<ID3D12RootSignature*>(*rootSignature);
-		record.hash = Fnv1a64(blob, blobLength);
-		record.size = blobLength;
-		record.nodeMask = nodeMask;
-		ParseRootSignatureBlob(&record, blob, blobLength);
-
-		AcquireSRWLockExclusive(&gResourceLock);
-		++gRootSignatureRecordsSeen;
-		auto found = gRootSignatureByPtr.find(record.rootSignature);
-		if (found != gRootSignatureByPtr.end()) {
-			gRootSignatures[found->second] = std::move(record);
-		} else {
-			gRootSignatureByPtr[record.rootSignature] = gRootSignatures.size();
-			gRootSignatures.push_back(std::move(record));
-		}
-		LogResourceTrackerStatsLocked();
-		ReleaseSRWLockExclusive(&gResourceLock);
-	}
-	return hr;
-}
-
-static void STDMETHODCALLTYPE HookedCreateConstantBufferView(
-	ID3D12Device *device, const D3D12_CONSTANT_BUFFER_VIEW_DESC *desc,
-	D3D12_CPU_DESCRIPTOR_HANDLE destDescriptor)
-{
-	LogResourceHookCall("ID3D12Device::CreateConstantBufferView", device);
-	auto original = GetDeviceOriginal(
-		device, 17, gOrigCreateConstantBufferView, "ID3D12Device::CreateConstantBufferView");
-	if (!original)
-		return;
-	if (DX12IsInternalReplay()) {
-		original(device, desc, destDescriptor);
-		return;
-	}
-	original(device, desc, destDescriptor);
-	if (!ShouldTrackComputeDescriptorMetadata())
-		return;
-	if (desc) {
-		DescriptorRecord record;
-		record.kind = "CBV";
-		record.cpuHandle = destDescriptor.ptr;
-		record.cbv = *desc;
-		record.hasDesc = true;
-		record.gpuVirtualAddress = desc->BufferLocation;
-		record.viewSize = desc->SizeInBytes;
-		ResolveBufferByGpuVa(desc->BufferLocation, desc->SizeInBytes, &record);
-		RecordDescriptor(std::move(record));
-	}
-}
-
-static void STDMETHODCALLTYPE HookedCreateShaderResourceView(
-	ID3D12Device *device, ID3D12Resource *resource,
-	const D3D12_SHADER_RESOURCE_VIEW_DESC *desc, D3D12_CPU_DESCRIPTOR_HANDLE destDescriptor)
-{
-	LogResourceHookCall("ID3D12Device::CreateShaderResourceView", device);
-	auto original = GetDeviceOriginal(
-		device, 18, gOrigCreateShaderResourceView, "ID3D12Device::CreateShaderResourceView");
-	if (!original)
-		return;
-	if (DX12IsInternalReplay()) {
-		original(device, resource, desc, destDescriptor);
-		return;
-	}
-	original(device, resource, desc, destDescriptor);
-	if (!ShouldTrackComputeDescriptorMetadata())
-		return;
-	DescriptorRecord record;
-	record.kind = "SRV";
-	record.cpuHandle = destDescriptor.ptr;
-	FillResourceInfo(&record, resource);
-	if (desc) {
-		record.srv = *desc;
-		record.hasDesc = true;
-		FillSrvBufferView(&record);
-	}
-	RecordDescriptor(std::move(record));
-}
-
-static void STDMETHODCALLTYPE HookedCreateUnorderedAccessView(
-	ID3D12Device *device, ID3D12Resource *resource, ID3D12Resource *counterResource,
-	const D3D12_UNORDERED_ACCESS_VIEW_DESC *desc, D3D12_CPU_DESCRIPTOR_HANDLE destDescriptor)
-{
-	LogResourceHookCall("ID3D12Device::CreateUnorderedAccessView", device);
-	auto original = GetDeviceOriginal(
-		device, 19, gOrigCreateUnorderedAccessView, "ID3D12Device::CreateUnorderedAccessView");
-	if (!original)
-		return;
-	if (DX12IsInternalReplay()) {
-		original(device, resource, counterResource, desc, destDescriptor);
-		return;
-	}
-	D3D12_UNORDERED_ACCESS_VIEW_DESC adjustedDesc = {};
-	const D3D12_UNORDERED_ACCESS_VIEW_DESC *descToUse = desc;
-	if (desc) {
-		adjustedDesc = *desc;
-		if (DX12ModAdjustUavDesc(resource, &adjustedDesc, "CreateUnorderedAccessView"))
-			descToUse = &adjustedDesc;
-	}
-	original(device, resource, counterResource, descToUse, destDescriptor);
-	if (!ShouldTrackComputeDescriptorMetadata())
-		return;
-	DescriptorRecord record;
-	record.kind = "UAV";
-	record.cpuHandle = destDescriptor.ptr;
-	record.counterResource = counterResource;
-	FillResourceInfo(&record, resource);
-	if (descToUse) {
-		record.uav = *descToUse;
-		record.hasDesc = true;
-		FillUavBufferView(&record);
-	}
-	RecordDescriptor(std::move(record));
-}
-
-static void STDMETHODCALLTYPE HookedCreateRenderTargetView(
-	ID3D12Device *device, ID3D12Resource *resource,
-	const D3D12_RENDER_TARGET_VIEW_DESC *desc, D3D12_CPU_DESCRIPTOR_HANDLE destDescriptor)
-{
-	LogResourceHookCall("ID3D12Device::CreateRenderTargetView", device);
-	auto original = GetDeviceOriginal(
-		device, 20, gOrigCreateRenderTargetView, "ID3D12Device::CreateRenderTargetView");
-	if (!original)
-		return;
-	if (DX12IsInternalReplay()) {
-		original(device, resource, desc, destDescriptor);
-		return;
-	}
-	original(device, resource, desc, destDescriptor);
-	if (!ShouldTrackFullDescriptorMetadata())
-		return;
-	DescriptorRecord record;
-	record.kind = "RTV";
-	record.cpuHandle = destDescriptor.ptr;
-	FillResourceInfo(&record, resource);
-	if (desc) {
-		record.rtv = *desc;
-		record.hasDesc = true;
-	}
-	RecordDescriptor(std::move(record));
-}
-
-static void STDMETHODCALLTYPE HookedCreateDepthStencilView(
-	ID3D12Device *device, ID3D12Resource *resource,
-	const D3D12_DEPTH_STENCIL_VIEW_DESC *desc, D3D12_CPU_DESCRIPTOR_HANDLE destDescriptor)
-{
-	LogResourceHookCall("ID3D12Device::CreateDepthStencilView", device);
-	auto original = GetDeviceOriginal(
-		device, 21, gOrigCreateDepthStencilView, "ID3D12Device::CreateDepthStencilView");
-	if (!original)
-		return;
-	if (DX12IsInternalReplay()) {
-		original(device, resource, desc, destDescriptor);
-		return;
-	}
-	original(device, resource, desc, destDescriptor);
-	if (!ShouldTrackFullDescriptorMetadata())
-		return;
-	DescriptorRecord record;
-	record.kind = "DSV";
-	record.cpuHandle = destDescriptor.ptr;
-	FillResourceInfo(&record, resource);
-	if (desc) {
-		record.dsv = *desc;
-		record.hasDesc = true;
-	}
-	RecordDescriptor(std::move(record));
-}
-
-static void STDMETHODCALLTYPE HookedCreateSampler(
-	ID3D12Device *device, const D3D12_SAMPLER_DESC *desc,
-	D3D12_CPU_DESCRIPTOR_HANDLE destDescriptor)
-{
-	LogResourceHookCall("ID3D12Device::CreateSampler", device);
-	auto original = GetDeviceOriginal(
-		device, 22, gOrigCreateSampler, "ID3D12Device::CreateSampler");
-	if (!original)
-		return;
-	if (DX12IsInternalReplay()) {
-		original(device, desc, destDescriptor);
-		return;
-	}
-	original(device, desc, destDescriptor);
-	if (!ShouldTrackFullDescriptorMetadata())
-		return;
-	if (desc) {
-		DescriptorRecord record;
-		record.kind = "Sampler";
-		record.cpuHandle = destDescriptor.ptr;
-		record.sampler = *desc;
-		record.hasDesc = true;
-		RecordDescriptor(std::move(record));
-	}
-}
-
-static void STDMETHODCALLTYPE HookedCopyDescriptors(
-	ID3D12Device *device, UINT numDestDescriptorRanges,
-	const D3D12_CPU_DESCRIPTOR_HANDLE *destDescriptorRangeStarts,
-	const UINT *destDescriptorRangeSizes, UINT numSrcDescriptorRanges,
-	const D3D12_CPU_DESCRIPTOR_HANDLE *srcDescriptorRangeStarts,
-	const UINT *srcDescriptorRangeSizes, D3D12_DESCRIPTOR_HEAP_TYPE descriptorHeapsType)
-{
-	LogResourceHookCall("ID3D12Device::CopyDescriptors", device);
-	auto original = GetDeviceOriginal(
-		device, 23, gOrigCopyDescriptors, "ID3D12Device::CopyDescriptors");
-	if (!original)
-		return;
-	if (DX12IsInternalReplay()) {
-		original(device, numDestDescriptorRanges, destDescriptorRangeStarts,
-			destDescriptorRangeSizes, numSrcDescriptorRanges, srcDescriptorRangeStarts,
-			srcDescriptorRangeSizes, descriptorHeapsType);
-		return;
-	}
-	original(device, numDestDescriptorRanges, destDescriptorRangeStarts,
-		destDescriptorRangeSizes, numSrcDescriptorRanges, srcDescriptorRangeStarts,
-		srcDescriptorRangeSizes, descriptorHeapsType);
-
-	if (!ShouldTrackComputeDescriptorMetadata())
-		return;
-	if (!destDescriptorRangeStarts || !srcDescriptorRangeStarts)
-		return;
-
-	UINT destRange = 0;
-	UINT srcRange = 0;
-	UINT destOffset = 0;
-	UINT srcOffset = 0;
-	while (destRange < numDestDescriptorRanges && srcRange < numSrcDescriptorRanges) {
-		const UINT destRangeSize = destDescriptorRangeSizes ? destDescriptorRangeSizes[destRange] : 1;
-		const UINT srcRangeSize = srcDescriptorRangeSizes ? srcDescriptorRangeSizes[srcRange] : 1;
-		if (destOffset >= destRangeSize) {
-			destRange++;
-			destOffset = 0;
-			continue;
-		}
-		if (srcOffset >= srcRangeSize) {
-			srcRange++;
-			srcOffset = 0;
-			continue;
-		}
-
-		const UINT count = min(destRangeSize - destOffset, srcRangeSize - srcOffset);
-		const UINT increment = device ? device->GetDescriptorHandleIncrementSize(descriptorHeapsType) : 0;
-		if (increment) {
-			D3D12_CPU_DESCRIPTOR_HANDLE dest = destDescriptorRangeStarts[destRange];
-			D3D12_CPU_DESCRIPTOR_HANDLE src = srcDescriptorRangeStarts[srcRange];
-			dest.ptr += static_cast<SIZE_T>(destOffset) * increment;
-			src.ptr += static_cast<SIZE_T>(srcOffset) * increment;
-			RecordDescriptorCopyRange(device, descriptorHeapsType, dest, src, count);
-		}
-		destOffset += count;
-		srcOffset += count;
-	}
-}
-
-static void STDMETHODCALLTYPE HookedCopyDescriptorsSimple(
-	ID3D12Device *device, UINT numDescriptors, D3D12_CPU_DESCRIPTOR_HANDLE destDescriptorRangeStart,
-	D3D12_CPU_DESCRIPTOR_HANDLE srcDescriptorRangeStart, D3D12_DESCRIPTOR_HEAP_TYPE descriptorHeapsType)
-{
-	LogResourceHookCall("ID3D12Device::CopyDescriptorsSimple", device);
-	auto original = GetDeviceOriginal(
-		device, 24, gOrigCopyDescriptorsSimple, "ID3D12Device::CopyDescriptorsSimple");
-	if (!original)
-		return;
-	if (DX12IsInternalReplay()) {
-		original(device, numDescriptors, destDescriptorRangeStart,
-			srcDescriptorRangeStart, descriptorHeapsType);
-		return;
-	}
-	original(device, numDescriptors, destDescriptorRangeStart,
-		srcDescriptorRangeStart, descriptorHeapsType);
-	if (!ShouldTrackComputeDescriptorMetadata())
-		return;
-	RecordDescriptorCopyRange(device, descriptorHeapsType, destDescriptorRangeStart,
-		srcDescriptorRangeStart, numDescriptors);
-}
-
-static HRESULT STDMETHODCALLTYPE HookedCreateCommittedResource(
-	ID3D12Device *device, const D3D12_HEAP_PROPERTIES *heapProperties,
-	D3D12_HEAP_FLAGS heapFlags, const D3D12_RESOURCE_DESC *desc,
-	D3D12_RESOURCE_STATES initialState, const D3D12_CLEAR_VALUE *optimizedClearValue,
-	REFIID riid, void **resource)
-{
-	LogResourceHookCall("ID3D12Device::CreateCommittedResource", device);
-	auto original = GetDeviceOriginal(
-		device, 27, gOrigCreateCommittedResource, "ID3D12Device::CreateCommittedResource");
-	if (!original)
-		return E_FAIL;
-	if (DX12IsInternalReplay())
-		return original(device, heapProperties, heapFlags, desc,
-			initialState, optimizedClearValue, riid, resource);
-	D3D12_RESOURCE_DESC adjustedDesc = {};
-	const D3D12_RESOURCE_DESC *descToUse = desc;
-	if (desc) {
-		adjustedDesc = *desc;
-		if (DX12ModAdjustBufferResourceDesc(&adjustedDesc, "CreateCommittedResource"))
-			descToUse = &adjustedDesc;
-	}
-	HRESULT hr = original(device, heapProperties, heapFlags, descToUse,
-		initialState, optimizedClearValue, riid, resource);
-	if (SUCCEEDED(hr) && resource && *resource) {
-		ID3D12Resource *d3dResource = nullptr;
-		if (SUCCEEDED(static_cast<IUnknown*>(*resource)->QueryInterface(IID_PPV_ARGS(&d3dResource)))) {
-			RecordResource(d3dResource, descToUse, heapProperties, initialState);
-			d3dResource->Release();
-		}
-	}
-	return hr;
-}
-
-static HRESULT STDMETHODCALLTYPE HookedCreatePlacedResource(
-	ID3D12Device *device, ID3D12Heap *heap, UINT64 heapOffset,
-	const D3D12_RESOURCE_DESC *desc, D3D12_RESOURCE_STATES initialState,
-	const D3D12_CLEAR_VALUE *optimizedClearValue, REFIID riid, void **resource)
-{
-	LogResourceHookCall("ID3D12Device::CreatePlacedResource", device);
-	auto original = GetDeviceOriginal(
-		device, 29, gOrigCreatePlacedResource, "ID3D12Device::CreatePlacedResource");
-	if (!original)
-		return E_FAIL;
-	if (DX12IsInternalReplay())
-		return original(device, heap, heapOffset, desc,
-			initialState, optimizedClearValue, riid, resource);
-	HRESULT hr = original(device, heap, heapOffset, desc,
-		initialState, optimizedClearValue, riid, resource);
-	if (SUCCEEDED(hr) && resource && *resource) {
-		ID3D12Resource *d3dResource = nullptr;
-		if (SUCCEEDED(static_cast<IUnknown*>(*resource)->QueryInterface(IID_PPV_ARGS(&d3dResource)))) {
-			RecordResource(d3dResource, desc, nullptr, initialState);
-			d3dResource->Release();
-		}
-	}
-	return hr;
-}
-
-static HRESULT STDMETHODCALLTYPE HookedCreateReservedResource(
-	ID3D12Device *device, const D3D12_RESOURCE_DESC *desc,
-	D3D12_RESOURCE_STATES initialState, const D3D12_CLEAR_VALUE *optimizedClearValue,
-	REFIID riid, void **resource)
-{
-	LogResourceHookCall("ID3D12Device::CreateReservedResource", device);
-	auto original = GetDeviceOriginal(
-		device, 30, gOrigCreateReservedResource, "ID3D12Device::CreateReservedResource");
-	if (!original)
-		return E_FAIL;
-	if (DX12IsInternalReplay())
-		return original(device, desc, initialState,
-			optimizedClearValue, riid, resource);
-	HRESULT hr = original(device, desc, initialState,
-		optimizedClearValue, riid, resource);
-	if (SUCCEEDED(hr) && resource && *resource) {
-		ID3D12Resource *d3dResource = nullptr;
-		if (SUCCEEDED(static_cast<IUnknown*>(*resource)->QueryInterface(IID_PPV_ARGS(&d3dResource)))) {
-			RecordResource(d3dResource, desc, nullptr, initialState);
-			d3dResource->Release();
-		}
-	}
-	return hr;
-}
-
-static HRESULT STDMETHODCALLTYPE HookedCreateCommittedResource1(
-	ID3D12Device4 *device, const D3D12_HEAP_PROPERTIES *heapProperties,
-	D3D12_HEAP_FLAGS heapFlags, const D3D12_RESOURCE_DESC *desc,
-	D3D12_RESOURCE_STATES initialState, const D3D12_CLEAR_VALUE *optimizedClearValue,
-	ID3D12ProtectedResourceSession *protectedSession, REFIID riid, void **resource)
-{
-	LogResourceHookCall("ID3D12Device4::CreateCommittedResource1", device);
-	auto original = GetDeviceOriginal(
-		device, 53, gOrigCreateCommittedResource1, "ID3D12Device4::CreateCommittedResource1");
-	if (!original)
-		return E_FAIL;
-	if (DX12IsInternalReplay())
-		return original(device, heapProperties, heapFlags, desc,
-			initialState, optimizedClearValue, protectedSession, riid, resource);
-	D3D12_RESOURCE_DESC adjustedDesc = {};
-	const D3D12_RESOURCE_DESC *descToUse = desc;
-	if (desc) {
-		adjustedDesc = *desc;
-		if (DX12ModAdjustBufferResourceDesc(&adjustedDesc, "CreateCommittedResource1"))
-			descToUse = &adjustedDesc;
-	}
-	HRESULT hr = original(device, heapProperties, heapFlags, descToUse,
-		initialState, optimizedClearValue, protectedSession, riid, resource);
-	if (SUCCEEDED(hr) && resource && *resource) {
-		ID3D12Resource *d3dResource = nullptr;
-		if (SUCCEEDED(static_cast<IUnknown*>(*resource)->QueryInterface(IID_PPV_ARGS(&d3dResource)))) {
-			RecordResource(d3dResource, descToUse, heapProperties, initialState);
-			d3dResource->Release();
-		}
-	}
-	return hr;
-}
-
-static HRESULT STDMETHODCALLTYPE HookedCreateReservedResource1(
-	ID3D12Device4 *device, const D3D12_RESOURCE_DESC *desc,
-	D3D12_RESOURCE_STATES initialState, const D3D12_CLEAR_VALUE *optimizedClearValue,
-	ID3D12ProtectedResourceSession *protectedSession, REFIID riid, void **resource)
-{
-	LogResourceHookCall("ID3D12Device4::CreateReservedResource1", device);
-	auto original = GetDeviceOriginal(
-		device, 55, gOrigCreateReservedResource1, "ID3D12Device4::CreateReservedResource1");
-	if (!original)
-		return E_FAIL;
-	if (DX12IsInternalReplay())
-		return original(device, desc, initialState,
-			optimizedClearValue, protectedSession, riid, resource);
-	HRESULT hr = original(device, desc, initialState,
-		optimizedClearValue, protectedSession, riid, resource);
-	if (SUCCEEDED(hr) && resource && *resource) {
-		ID3D12Resource *d3dResource = nullptr;
-		if (SUCCEEDED(static_cast<IUnknown*>(*resource)->QueryInterface(IID_PPV_ARGS(&d3dResource)))) {
-			RecordResource(d3dResource, desc, nullptr, initialState);
-			d3dResource->Release();
-		}
-	}
-	return hr;
-}
-
-static HRESULT STDMETHODCALLTYPE HookedCreateCommittedResource2(
-	ID3D12Device8 *device, const D3D12_HEAP_PROPERTIES *heapProperties,
-	D3D12_HEAP_FLAGS heapFlags, const D3D12_RESOURCE_DESC1 *desc,
-	D3D12_RESOURCE_STATES initialState, const D3D12_CLEAR_VALUE *optimizedClearValue,
-	ID3D12ProtectedResourceSession *protectedSession, REFIID riid, void **resource)
-{
-	LogResourceHookCall("ID3D12Device8::CreateCommittedResource2", device);
-	auto original = GetDeviceOriginal(
-		device, 69, gOrigCreateCommittedResource2, "ID3D12Device8::CreateCommittedResource2");
-	if (!original)
-		return E_FAIL;
-	if (DX12IsInternalReplay())
-		return original(device, heapProperties, heapFlags, desc,
-			initialState, optimizedClearValue, protectedSession, riid, resource);
-	D3D12_RESOURCE_DESC1 adjustedDesc = {};
-	const D3D12_RESOURCE_DESC1 *descToUse = desc;
-	if (desc) {
-		adjustedDesc = *desc;
-		if (DX12ModAdjustBufferResourceDesc1(&adjustedDesc, "CreateCommittedResource2"))
-			descToUse = &adjustedDesc;
-	}
-	HRESULT hr = original(device, heapProperties, heapFlags, descToUse,
-		initialState, optimizedClearValue, protectedSession, riid, resource);
-	if (SUCCEEDED(hr) && resource && *resource) {
-		ID3D12Resource *d3dResource = nullptr;
-		if (SUCCEEDED(static_cast<IUnknown*>(*resource)->QueryInterface(IID_PPV_ARGS(&d3dResource)))) {
-			D3D12_RESOURCE_DESC desc0 = ResourceDescFromDesc1(descToUse);
-			RecordResource(d3dResource, descToUse ? &desc0 : nullptr, heapProperties, initialState);
-			d3dResource->Release();
-		}
-	}
-	return hr;
-}
-
-static HRESULT STDMETHODCALLTYPE HookedCreatePlacedResource1(
-	ID3D12Device8 *device, ID3D12Heap *heap, UINT64 heapOffset,
-	const D3D12_RESOURCE_DESC1 *desc, D3D12_RESOURCE_STATES initialState,
-	const D3D12_CLEAR_VALUE *optimizedClearValue, REFIID riid, void **resource)
-{
-	LogResourceHookCall("ID3D12Device8::CreatePlacedResource1", device);
-	auto original = GetDeviceOriginal(
-		device, 70, gOrigCreatePlacedResource1, "ID3D12Device8::CreatePlacedResource1");
-	if (!original)
-		return E_FAIL;
-	if (DX12IsInternalReplay())
-		return original(device, heap, heapOffset, desc,
-			initialState, optimizedClearValue, riid, resource);
-	HRESULT hr = original(device, heap, heapOffset, desc,
-		initialState, optimizedClearValue, riid, resource);
-	if (SUCCEEDED(hr) && resource && *resource) {
-		ID3D12Resource *d3dResource = nullptr;
-		if (SUCCEEDED(static_cast<IUnknown*>(*resource)->QueryInterface(IID_PPV_ARGS(&d3dResource)))) {
-			D3D12_RESOURCE_DESC desc0 = ResourceDescFromDesc1(desc);
-			RecordResource(d3dResource, desc ? &desc0 : nullptr, nullptr, initialState);
-			d3dResource->Release();
-		}
-	}
-	return hr;
-}
-
-static HRESULT STDMETHODCALLTYPE HookedCreateCommittedResource3(
-	ID3D12Device10 *device, const D3D12_HEAP_PROPERTIES *heapProperties,
-	D3D12_HEAP_FLAGS heapFlags, const D3D12_RESOURCE_DESC1 *desc,
-	D3D12_BARRIER_LAYOUT initialLayout, const D3D12_CLEAR_VALUE *optimizedClearValue,
-	ID3D12ProtectedResourceSession *protectedSession, UINT32 numCastableFormats,
-	const DXGI_FORMAT *castableFormats, REFIID riid, void **resource)
-{
-	LogResourceHookCall("ID3D12Device10::CreateCommittedResource3", device);
-	auto original = GetDeviceOriginal(
-		device, 76, gOrigCreateCommittedResource3, "ID3D12Device10::CreateCommittedResource3");
-	if (!original)
-		return E_FAIL;
-	if (DX12IsInternalReplay())
-		return original(device, heapProperties, heapFlags, desc,
-			initialLayout, optimizedClearValue, protectedSession, numCastableFormats,
-			castableFormats, riid, resource);
-	D3D12_RESOURCE_DESC1 adjustedDesc = {};
-	const D3D12_RESOURCE_DESC1 *descToUse = desc;
-	if (desc) {
-		adjustedDesc = *desc;
-		if (DX12ModAdjustBufferResourceDesc1(&adjustedDesc, "CreateCommittedResource3"))
-			descToUse = &adjustedDesc;
-	}
-	HRESULT hr = original(device, heapProperties, heapFlags, descToUse,
-		initialLayout, optimizedClearValue, protectedSession, numCastableFormats,
-		castableFormats, riid, resource);
-	if (SUCCEEDED(hr) && resource && *resource) {
-		ID3D12Resource *d3dResource = nullptr;
-		if (SUCCEEDED(static_cast<IUnknown*>(*resource)->QueryInterface(IID_PPV_ARGS(&d3dResource)))) {
-			D3D12_RESOURCE_DESC desc0 = ResourceDescFromDesc1(descToUse);
-			RecordResource(d3dResource, descToUse ? &desc0 : nullptr, heapProperties,
-				ResourceStateFromLayout(initialLayout));
-			d3dResource->Release();
-		}
-	}
-	return hr;
-}
-
-static HRESULT STDMETHODCALLTYPE HookedCreatePlacedResource2(
-	ID3D12Device10 *device, ID3D12Heap *heap, UINT64 heapOffset,
-	const D3D12_RESOURCE_DESC1 *desc, D3D12_BARRIER_LAYOUT initialLayout,
-	const D3D12_CLEAR_VALUE *optimizedClearValue, UINT32 numCastableFormats,
-	const DXGI_FORMAT *castableFormats, REFIID riid, void **resource)
-{
-	LogResourceHookCall("ID3D12Device10::CreatePlacedResource2", device);
-	auto original = GetDeviceOriginal(
-		device, 77, gOrigCreatePlacedResource2, "ID3D12Device10::CreatePlacedResource2");
-	if (!original)
-		return E_FAIL;
-	if (DX12IsInternalReplay())
-		return original(device, heap, heapOffset, desc,
-			initialLayout, optimizedClearValue, numCastableFormats, castableFormats,
-			riid, resource);
-	HRESULT hr = original(device, heap, heapOffset, desc,
-		initialLayout, optimizedClearValue, numCastableFormats, castableFormats,
-		riid, resource);
-	if (SUCCEEDED(hr) && resource && *resource) {
-		ID3D12Resource *d3dResource = nullptr;
-		if (SUCCEEDED(static_cast<IUnknown*>(*resource)->QueryInterface(IID_PPV_ARGS(&d3dResource)))) {
-			D3D12_RESOURCE_DESC desc0 = ResourceDescFromDesc1(desc);
-			RecordResource(d3dResource, desc ? &desc0 : nullptr, nullptr,
-				ResourceStateFromLayout(initialLayout));
-			d3dResource->Release();
-		}
-	}
-	return hr;
-}
-
-static HRESULT STDMETHODCALLTYPE HookedCreateReservedResource2(
-	ID3D12Device10 *device, const D3D12_RESOURCE_DESC *desc,
-	D3D12_BARRIER_LAYOUT initialLayout, const D3D12_CLEAR_VALUE *optimizedClearValue,
-	ID3D12ProtectedResourceSession *protectedSession, UINT32 numCastableFormats,
-	const DXGI_FORMAT *castableFormats, REFIID riid, void **resource)
-{
-	LogResourceHookCall("ID3D12Device10::CreateReservedResource2", device);
-	auto original = GetDeviceOriginal(
-		device, 78, gOrigCreateReservedResource2, "ID3D12Device10::CreateReservedResource2");
-	if (!original)
-		return E_FAIL;
-	if (DX12IsInternalReplay())
-		return original(device, desc, initialLayout,
-			optimizedClearValue, protectedSession, numCastableFormats, castableFormats,
-			riid, resource);
-	HRESULT hr = original(device, desc, initialLayout,
-		optimizedClearValue, protectedSession, numCastableFormats, castableFormats,
-		riid, resource);
-	if (SUCCEEDED(hr) && resource && *resource) {
-		ID3D12Resource *d3dResource = nullptr;
-		if (SUCCEEDED(static_cast<IUnknown*>(*resource)->QueryInterface(IID_PPV_ARGS(&d3dResource)))) {
-			RecordResource(d3dResource, desc, nullptr, ResourceStateFromLayout(initialLayout));
-			d3dResource->Release();
-		}
-	}
-	return hr;
-}
-
-void DX12HookResourceMetadata(ID3D12Device *device)
-{
-	if (!device)
-		return;
-
-	if (!gCleanupRegistered) {
-		atexit(CleanupTrackedResources);
-		gCleanupRegistered = true;
-		DX12Log("Resource metadata tracking uses non-owning resource pointers\n");
-	}
-
-	DX12VTableHook deviceHooks[] = {
-		{14, reinterpret_cast<void**>(&gOrigCreateDescriptorHeap),
-			HookedCreateDescriptorHeap, "ID3D12Device::CreateDescriptorHeap"},
-		{16, reinterpret_cast<void**>(&gOrigCreateRootSignature),
-			HookedCreateRootSignature, "ID3D12Device::CreateRootSignature"},
-		{17, reinterpret_cast<void**>(&gOrigCreateConstantBufferView),
-			HookedCreateConstantBufferView, "ID3D12Device::CreateConstantBufferView"},
-		{18, reinterpret_cast<void**>(&gOrigCreateShaderResourceView),
-			HookedCreateShaderResourceView, "ID3D12Device::CreateShaderResourceView"},
-		{19, reinterpret_cast<void**>(&gOrigCreateUnorderedAccessView),
-			HookedCreateUnorderedAccessView, "ID3D12Device::CreateUnorderedAccessView"},
-		{20, reinterpret_cast<void**>(&gOrigCreateRenderTargetView),
-			HookedCreateRenderTargetView, "ID3D12Device::CreateRenderTargetView"},
-		{21, reinterpret_cast<void**>(&gOrigCreateDepthStencilView),
-			HookedCreateDepthStencilView, "ID3D12Device::CreateDepthStencilView"},
-		{22, reinterpret_cast<void**>(&gOrigCreateSampler),
-			HookedCreateSampler, "ID3D12Device::CreateSampler"},
-		{23, reinterpret_cast<void**>(&gOrigCopyDescriptors),
-			HookedCopyDescriptors, "ID3D12Device::CopyDescriptors"},
-		{24, reinterpret_cast<void**>(&gOrigCopyDescriptorsSimple),
-			HookedCopyDescriptorsSimple, "ID3D12Device::CopyDescriptorsSimple"},
-		{27, reinterpret_cast<void**>(&gOrigCreateCommittedResource),
-			HookedCreateCommittedResource, "ID3D12Device::CreateCommittedResource"},
-		{29, reinterpret_cast<void**>(&gOrigCreatePlacedResource),
-			HookedCreatePlacedResource, "ID3D12Device::CreatePlacedResource"},
-		{30, reinterpret_cast<void**>(&gOrigCreateReservedResource),
-			HookedCreateReservedResource, "ID3D12Device::CreateReservedResource"},
-	};
-	DX12InstallVTableHooks(device, deviceHooks);
-
-	ID3D12Device4 *device4 = nullptr;
-	if (SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&device4)))) {
-		DX12VTableHook device4Hooks[] = {
-			{53, reinterpret_cast<void**>(&gOrigCreateCommittedResource1),
-				HookedCreateCommittedResource1, "ID3D12Device4::CreateCommittedResource1"},
-			{55, reinterpret_cast<void**>(&gOrigCreateReservedResource1),
-				HookedCreateReservedResource1, "ID3D12Device4::CreateReservedResource1"},
-		};
-		DX12InstallVTableHooks(device4, device4Hooks);
-		device4->Release();
-	}
-
-	ID3D12Device8 *device8 = nullptr;
-	if (SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&device8)))) {
-		DX12VTableHook device8Hooks[] = {
-			{69, reinterpret_cast<void**>(&gOrigCreateCommittedResource2),
-				HookedCreateCommittedResource2, "ID3D12Device8::CreateCommittedResource2"},
-			{70, reinterpret_cast<void**>(&gOrigCreatePlacedResource1),
-				HookedCreatePlacedResource1, "ID3D12Device8::CreatePlacedResource1"},
-		};
-		DX12InstallVTableHooks(device8, device8Hooks);
-		device8->Release();
-	}
-
-	ID3D12Device10 *device10 = nullptr;
-	if (SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&device10)))) {
-		DX12VTableHook device10Hooks[] = {
-			{76, reinterpret_cast<void**>(&gOrigCreateCommittedResource3),
-				HookedCreateCommittedResource3, "ID3D12Device10::CreateCommittedResource3"},
-			{77, reinterpret_cast<void**>(&gOrigCreatePlacedResource2),
-				HookedCreatePlacedResource2, "ID3D12Device10::CreatePlacedResource2"},
-			{78, reinterpret_cast<void**>(&gOrigCreateReservedResource2),
-				HookedCreateReservedResource2, "ID3D12Device10::CreateReservedResource2"},
-		};
-		DX12InstallVTableHooks(device10, device10Hooks);
-		device10->Release();
-	}
-}
-
 void DX12RecordPsoRootSignature(
 	UINT64 psoIndex, const char *kind, ID3D12PipelineState *pipelineState,
 	ID3D12RootSignature *rootSignature)
@@ -1708,51 +758,6 @@ void DX12RecordPsoRootSignature(
 	LogResourceTrackerStatsLocked();
 	ReleaseSRWLockExclusive(&gResourceLock);
 }
-
-bool DX12GetRootSignatureSummary(
-	ID3D12RootSignature *rootSignature, DX12RootSignatureSummary *summary)
-{
-	if (!rootSignature || !summary)
-		return false;
-
-	AcquireSRWLockShared(&gResourceLock);
-	for (const RootSignatureRecord &record : gRootSignatures) {
-		if (record.rootSignature != rootSignature)
-			continue;
-		summary->rootSignature = record.rootSignature;
-		summary->hash = record.hash;
-		summary->size = record.size;
-		summary->nodeMask = record.nodeMask;
-		summary->version = record.version;
-		summary->flags = record.flags;
-		summary->staticSamplerCount = record.staticSamplerCount;
-		summary->parsed = record.parsed;
-		summary->parameters = record.parameters;
-		ReleaseSRWLockShared(&gResourceLock);
-		return true;
-	}
-	ReleaseSRWLockShared(&gResourceLock);
-	return false;
-}
-
-bool DX12GetPsoRootSignature(UINT64 psoIndex, ID3D12RootSignature **rootSignature)
-{
-	if (!psoIndex || !rootSignature)
-		return false;
-
-	*rootSignature = nullptr;
-	AcquireSRWLockShared(&gResourceLock);
-	for (auto it = gPsoRoots.rbegin(); it != gPsoRoots.rend(); ++it) {
-		if (it->psoIndex != psoIndex || !it->rootSignature)
-			continue;
-		*rootSignature = it->rootSignature;
-		ReleaseSRWLockShared(&gResourceLock);
-		return true;
-	}
-	ReleaseSRWLockShared(&gResourceLock);
-	return false;
-}
-
 void DX12RecordResourceBarrier(UINT numBarriers, const D3D12_RESOURCE_BARRIER *barriers)
 {
 	if (!barriers || numBarriers == 0)
@@ -1790,348 +795,3 @@ void DX12RecordResourceBarrier(UINT numBarriers, const D3D12_RESOURCE_BARRIER *b
 		gBufferResolveCache.clear();
 	ReleaseSRWLockExclusive(&gResourceLock);
 }
-
-bool DX12ResolveBufferResourceByGpuVa(
-	UINT64 gpuVirtualAddress, UINT64 size, DX12BufferResourceSummary *summary)
-{
-	if (!summary || gpuVirtualAddress == 0)
-		return false;
-
-	*summary = DX12BufferResourceSummary();
-	const UINT64 requestedEnd = gpuVirtualAddress + size;
-	bool resolved = false;
-	AcquireSRWLockShared(&gResourceLock);
-	auto cached = gBufferResolveCache.find(gpuVirtualAddress);
-	if (cached != gBufferResolveCache.end() &&
-	    requestedEnd <= cached->second.end) {
-		*summary = cached->second.summary;
-		summary->resourceOffset = gpuVirtualAddress - cached->second.begin;
-		summary->viewSize = size;
-		ReleaseSRWLockShared(&gResourceLock);
-		return true;
-	}
-
-	for (const ResourceRecord &resource : gResources) {
-		if (resource.desc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER ||
-			resource.gpuVirtualAddress == 0 || resource.size == 0)
-			continue;
-		const UINT64 begin = resource.gpuVirtualAddress;
-		const UINT64 end = begin + resource.size;
-		if (gpuVirtualAddress >= begin && requestedEnd <= end) {
-			summary->resource = resource.resource;
-			summary->resourceDesc = resource.desc;
-			summary->hasResourceDesc = true;
-			summary->gpuVirtualAddress = resource.gpuVirtualAddress;
-			summary->resourceOffset = gpuVirtualAddress - begin;
-			summary->viewSize = size;
-			if (resource.hasHeapType) {
-				summary->resourceHeapType = static_cast<UINT>(resource.heapType);
-				summary->hasResourceHeapType = true;
-			}
-			summary->currentState = static_cast<UINT>(resource.currentState);
-			summary->hasCurrentState = resource.hasCurrentState;
-			resolved = true;
-			break;
-		}
-	}
-	ReleaseSRWLockShared(&gResourceLock);
-
-	if (resolved) {
-		AcquireSRWLockExclusive(&gResourceLock);
-		BufferResolveCacheEntry entry;
-		entry.begin = summary->gpuVirtualAddress;
-		entry.end = summary->gpuVirtualAddress +
-			(summary->hasResourceDesc ? summary->resourceDesc.Width : summary->viewSize);
-		entry.summary = *summary;
-		entry.summary.resourceOffset = 0;
-		entry.summary.viewSize = entry.end - entry.begin;
-		gBufferResolveCache[gpuVirtualAddress] = entry;
-		ReleaseSRWLockExclusive(&gResourceLock);
-	}
-	return resolved;
-}
-
-uint32_t DX12HashBufferResourceView(
-	const DX12BufferResourceSummary *summary, UINT64 fallbackGpuVirtualAddress,
-	UINT64 fallbackSize)
-{
-	uint32_t hash = 0;
-	const uint32_t tag = MakeTrackerFourCC('D', 'X', 'B', 'V');
-	hash = HashBytes(hash, &tag, sizeof(tag));
-
-	if (summary && summary->hasResourceDesc) {
-		D3D12_RESOURCE_DESC desc = summary->resourceDesc;
-		desc.Alignment = 0;
-		hash = HashBytes(hash, &desc, sizeof(desc));
-		if (summary->hasResourceHeapType)
-			hash = HashBytes(hash, &summary->resourceHeapType, sizeof(summary->resourceHeapType));
-	} else {
-		hash = HashBytes(hash, &fallbackSize, sizeof(fallbackSize));
-	}
-
-	if (!hash)
-		hash = HashBytes(0, &fallbackGpuVirtualAddress, sizeof(fallbackGpuVirtualAddress));
-	return hash;
-}
-
-uint32_t DX12HashBufferView(
-	const DX12BufferResourceSummary *summary, UINT64 fallbackGpuVirtualAddress,
-	UINT64 fallbackSize, UINT stride, UINT format, UINT slot)
-{
-	uint32_t hash = DX12HashBufferResourceView(summary, fallbackGpuVirtualAddress, fallbackSize);
-	const uint32_t tag = MakeTrackerFourCC('D', 'X', 'I', 'A');
-	hash = HashBytes(hash, &tag, sizeof(tag));
-	hash = HashBytes(hash, &fallbackGpuVirtualAddress, sizeof(fallbackGpuVirtualAddress));
-	hash = HashBytes(hash, &fallbackSize, sizeof(fallbackSize));
-	hash = HashBytes(hash, &stride, sizeof(stride));
-	hash = HashBytes(hash, &format, sizeof(format));
-	hash = HashBytes(hash, &slot, sizeof(slot));
-	return hash;
-}
-
-uint32_t DX12HashIaBufferView(
-	UINT64 gpuVirtualAddress, UINT64 size, UINT stride, UINT format, UINT slot)
-{
-	if (!gpuVirtualAddress || !size)
-		return 0;
-
-	DX12BufferResourceSummary summary = {};
-	const bool resolved = DX12ResolveBufferResourceByGpuVa(gpuVirtualAddress, size, &summary);
-	if (!resolved)
-		return DX12HashBufferView(nullptr, gpuVirtualAddress, size, stride, format, slot);
-
-	uint32_t hash = DX12HashBufferResourceView(&summary, gpuVirtualAddress, size);
-	const uint32_t tag = MakeTrackerFourCC('D', 'X', 'I', 'A');
-	hash = HashBytes(hash, &tag, sizeof(tag));
-	hash = HashBytes(hash, &stride, sizeof(stride));
-	hash = HashBytes(hash, &format, sizeof(format));
-	hash = HashBytes(hash, &slot, sizeof(slot));
-	return hash;
-}
-
-uint32_t DX12HashDescriptorBufferView(
-	const DX12DescriptorSummary *descriptor, UINT64 fallbackGpuVirtualAddress,
-	UINT64 fallbackSize)
-{
-	(void)fallbackGpuVirtualAddress;
-	uint32_t hash = 0;
-	const uint32_t tag = MakeTrackerFourCC('D', 'X', 'D', 'V');
-	hash = HashBytes(hash, &tag, sizeof(tag));
-	if (descriptor) {
-		hash = HashBytes(hash, descriptor->kind.data(), descriptor->kind.size());
-		hash = HashBytes(hash, &descriptor->viewFormat, sizeof(descriptor->viewFormat));
-		hash = HashBytes(hash, &descriptor->viewDimension, sizeof(descriptor->viewDimension));
-		hash = HashBytes(hash, &descriptor->firstElement, sizeof(descriptor->firstElement));
-		hash = HashBytes(hash, &descriptor->numElements, sizeof(descriptor->numElements));
-		hash = HashBytes(hash, &descriptor->structureByteStride, sizeof(descriptor->structureByteStride));
-		hash = HashBytes(hash, &descriptor->bufferViewOffset, sizeof(descriptor->bufferViewOffset));
-		hash = HashBytes(hash, &descriptor->bufferViewBytes, sizeof(descriptor->bufferViewBytes));
-		const UINT64 stableViewSize = descriptor->viewSize ?
-			descriptor->viewSize : fallbackSize;
-		hash = HashBytes(hash, &stableViewSize, sizeof(stableViewSize));
-	} else {
-		hash = HashBytes(hash, &fallbackSize, sizeof(fallbackSize));
-	}
-	return hash;
-}
-
-static void FillDescriptorSummary(DX12DescriptorSummary *summary, const DescriptorRecord &record)
-{
-	if (!summary)
-		return;
-
-	summary->kind = record.kind;
-	summary->cpuHandle = record.cpuHandle;
-	summary->resource = record.resource;
-	summary->counterResource = record.counterResource;
-	summary->resourceDesc = record.resourceDesc;
-	summary->hasResourceDesc = record.hasResourceDesc;
-	summary->resourceHeapType = record.resourceHeapType;
-	summary->hasResourceHeapType = record.hasResourceHeapType;
-	summary->gpuVirtualAddress = record.gpuVirtualAddress;
-	summary->resourceOffset = record.resourceOffset;
-	summary->viewSize = record.viewSize;
-	summary->currentState = static_cast<UINT>(record.currentState);
-	summary->hasCurrentState = record.hasCurrentState;
-	summary->hasDesc = record.hasDesc;
-
-	if (record.kind == "CBV") {
-		summary->cbvSize = record.cbv.SizeInBytes;
-	} else if (record.kind == "SRV" && record.hasDesc) {
-		summary->viewFormat = static_cast<UINT>(record.srv.Format);
-		summary->viewDimension = static_cast<UINT>(record.srv.ViewDimension);
-		if (record.srv.ViewDimension == D3D12_SRV_DIMENSION_BUFFER) {
-			summary->firstElement = record.srv.Buffer.FirstElement;
-			summary->numElements = record.srv.Buffer.NumElements;
-			summary->structureByteStride = record.srv.Buffer.StructureByteStride;
-			summary->bufferViewOffset = record.resourceOffset;
-			summary->bufferViewBytes = record.viewSize;
-		}
-	} else if (record.kind == "UAV" && record.hasDesc) {
-		summary->viewFormat = static_cast<UINT>(record.uav.Format);
-		summary->viewDimension = static_cast<UINT>(record.uav.ViewDimension);
-		if (record.uav.ViewDimension == D3D12_UAV_DIMENSION_BUFFER) {
-			summary->firstElement = record.uav.Buffer.FirstElement;
-			summary->numElements = record.uav.Buffer.NumElements;
-			summary->structureByteStride = record.uav.Buffer.StructureByteStride;
-			summary->bufferViewOffset = record.resourceOffset;
-			summary->bufferViewBytes = record.viewSize;
-		}
-	} else if (record.kind == "RTV" && record.hasDesc) {
-		summary->viewFormat = static_cast<UINT>(record.rtv.Format);
-		summary->viewDimension = static_cast<UINT>(record.rtv.ViewDimension);
-	} else if (record.kind == "DSV" && record.hasDesc) {
-		summary->viewFormat = static_cast<UINT>(record.dsv.Format);
-		summary->viewDimension = static_cast<UINT>(record.dsv.ViewDimension);
-	}
-}
-
-void DX12GetResourceMetadataSnapshot(
-	std::vector<DX12RootSignatureSummary> *rootSignatures,
-	std::vector<DX12DescriptorSummary> *descriptors,
-	std::vector<DX12PsoRootSummary> *psoRoots)
-{
-	DX12GetResourceMetadataSnapshot(rootSignatures, descriptors, psoRoots, nullptr);
-}
-
-void DX12GetResourceMetadataSnapshot(
-	std::vector<DX12RootSignatureSummary> *rootSignatures,
-	std::vector<DX12DescriptorSummary> *descriptors,
-	std::vector<DX12PsoRootSummary> *psoRoots,
-	std::vector<DX12DescriptorHeapSummary> *descriptorHeaps)
-{
-	AcquireSRWLockShared(&gResourceLock);
-	size_t descriptorStateKnown = 0;
-	for (const DescriptorRecord &record : gDescriptors) {
-		if (record.hasCurrentState)
-			descriptorStateKnown++;
-	}
-	DX12FrameAnalysisLogJsonFunc("MetadataSnapshotBegin",
-		"\"roots\":%zu,\"descriptors\":%zu,\"descriptorStates\":%zu,\"resources\":%zu,\"resourcesFromCreate\":%llu,\"psoRoots\":%zu,\"heaps\":%zu,\"wantRoots\":%u,\"wantDescriptors\":%u,\"wantPsoRoots\":%u,\"wantHeaps\":%u",
-		gRootSignatures.size(), gDescriptors.size(), descriptorStateKnown,
-		gResources.size(),
-		static_cast<unsigned long long>(gResourcesRecordedFromCreate),
-		gPsoRoots.size(), gDescriptorHeaps.size(),
-		rootSignatures ? 1 : 0,
-		descriptors ? 1 : 0,
-		psoRoots ? 1 : 0,
-		descriptorHeaps ? 1 : 0);
-
-	if (rootSignatures) {
-		rootSignatures->clear();
-		rootSignatures->reserve(gRootSignatures.size());
-		for (const RootSignatureRecord &record : gRootSignatures) {
-			DX12RootSignatureSummary summary;
-			summary.rootSignature = record.rootSignature;
-			summary.hash = record.hash;
-			summary.size = record.size;
-			summary.nodeMask = record.nodeMask;
-			summary.version = record.version;
-			summary.flags = record.flags;
-			summary.staticSamplerCount = record.staticSamplerCount;
-			summary.parsed = record.parsed;
-			summary.parameters = record.parameters;
-			rootSignatures->push_back(summary);
-		}
-		DX12FrameAnalysisLogJsonFunc("MetadataSnapshotCopied",
-			"\"kind\":\"roots\",\"count\":%zu", rootSignatures->size());
-	}
-
-	if (descriptors) {
-		descriptors->clear();
-		descriptors->reserve(gDescriptors.size());
-		for (const DescriptorRecord &record : gDescriptors) {
-			DX12DescriptorSummary summary;
-			FillDescriptorSummary(&summary, record);
-			descriptors->push_back(summary);
-		}
-		DX12FrameAnalysisLogJsonFunc("MetadataSnapshotCopied",
-			"\"kind\":\"descriptors\",\"count\":%zu", descriptors->size());
-	}
-
-	if (psoRoots) {
-		psoRoots->clear();
-		psoRoots->reserve(gPsoRoots.size());
-		for (const PsoRootRecord &record : gPsoRoots) {
-			DX12PsoRootSummary summary;
-			summary.psoIndex = record.psoIndex;
-			summary.kind = record.kind;
-			summary.pipelineState = record.pipelineState;
-			summary.rootSignature = record.rootSignature;
-			psoRoots->push_back(summary);
-		}
-		DX12FrameAnalysisLogJsonFunc("MetadataSnapshotCopied",
-			"\"kind\":\"psoRoots\",\"count\":%zu", psoRoots->size());
-	}
-
-	if (descriptorHeaps) {
-		descriptorHeaps->clear();
-		descriptorHeaps->reserve(gDescriptorHeaps.size());
-		for (const DescriptorHeapRecord &record : gDescriptorHeaps) {
-			DX12DescriptorHeapSummary summary;
-			summary.heap = record.heap;
-			summary.type = static_cast<UINT>(record.desc.Type);
-			summary.numDescriptors = record.desc.NumDescriptors;
-			summary.flags = static_cast<UINT>(record.desc.Flags);
-			summary.nodeMask = record.desc.NodeMask;
-			summary.cpuStart = record.cpuStart;
-			summary.gpuStart = record.gpuStart;
-			summary.increment = record.increment;
-			descriptorHeaps->push_back(summary);
-		}
-		DX12FrameAnalysisLogJsonFunc("MetadataSnapshotCopied",
-			"\"kind\":\"heaps\",\"count\":%zu", descriptorHeaps->size());
-	}
-
-	ReleaseSRWLockShared(&gResourceLock);
-	DX12FrameAnalysisLogJsonFunc("MetadataSnapshotComplete", nullptr);
-}
-
-bool DX12FindDescriptorSummaryByCpuHandle(
-	SIZE_T cpuHandle, DX12DescriptorSummary *summary)
-{
-	if (!cpuHandle || !summary)
-		return false;
-
-	AcquireSRWLockShared(&gResourceLock);
-	auto found = gDescriptorByCpuHandle.find(cpuHandle);
-	if (found == gDescriptorByCpuHandle.end() || found->second >= gDescriptors.size()) {
-		ReleaseSRWLockShared(&gResourceLock);
-		return false;
-	}
-	FillDescriptorSummary(summary, gDescriptors[found->second]);
-	ReleaseSRWLockShared(&gResourceLock);
-	return true;
-}
-
-bool DX12FindDescriptorHeapByGpuHandle(
-	D3D12_GPU_DESCRIPTOR_HANDLE gpuHandle, D3D12_DESCRIPTOR_HEAP_TYPE type,
-	DX12DescriptorHeapSummary *summary)
-{
-	if (!gpuHandle.ptr || !summary)
-		return false;
-
-	AcquireSRWLockShared(&gResourceLock);
-	for (const DescriptorHeapRecord &record : gDescriptorHeaps) {
-		if (record.desc.Type != type || record.gpuStart == 0 || record.increment == 0)
-			continue;
-		const UINT64 begin = record.gpuStart;
-		const UINT64 end = begin +
-			static_cast<UINT64>(record.desc.NumDescriptors) * record.increment;
-		if (gpuHandle.ptr < begin || gpuHandle.ptr >= end)
-			continue;
-		summary->heap = record.heap;
-		summary->type = static_cast<UINT>(record.desc.Type);
-		summary->numDescriptors = record.desc.NumDescriptors;
-		summary->flags = static_cast<UINT>(record.desc.Flags);
-		summary->nodeMask = record.desc.NodeMask;
-		summary->cpuStart = record.cpuStart;
-		summary->gpuStart = record.gpuStart;
-		summary->increment = record.increment;
-		ReleaseSRWLockShared(&gResourceLock);
-		return true;
-	}
-	ReleaseSRWLockShared(&gResourceLock);
-	return false;
-}
-

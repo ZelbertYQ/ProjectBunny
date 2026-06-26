@@ -171,7 +171,7 @@ void EndFrame()
 
 	if (gMode == Mode::SUMMARY) {
 		FlushFrame();
-	} else {
+	} else if (DX12DiagnosticsLoggingEnabled()) {
 		LogFrameStats();
 	}
 
