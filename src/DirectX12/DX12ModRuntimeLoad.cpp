@@ -213,30 +213,13 @@ static void ClearPreSkinRuntimeState()
 	for (auto &retired : gRetiredPreSkinResources) {
 		if (retired.resource)
 			releaseBatch.resources.push_back(retired.resource);
-		if (retired.fence)
-			releaseBatch.fences.push_back(retired.fence);
 	}
 	gRetiredPreSkinResources.clear();
 	for (auto &retired : gRetiredPreSkinDescriptorHeaps) {
 		if (retired.heap)
 			releaseBatch.descriptorHeaps.push_back(retired.heap);
-		if (retired.fence)
-			releaseBatch.fences.push_back(retired.fence);
 	}
 	gRetiredPreSkinDescriptorHeaps.clear();
-	if (gPreSkinRetireFence) {
-		releaseBatch.fences.push_back(gPreSkinRetireFence);
-		gPreSkinRetireFence = nullptr;
-	}
-	if (gPreSkinRetireFenceDevice) {
-		releaseBatch.devices.push_back(gPreSkinRetireFenceDevice);
-		gPreSkinRetireFenceDevice = nullptr;
-	}
-	if (gPreSkinRetireFenceQueue) {
-		releaseBatch.queues.push_back(gPreSkinRetireFenceQueue);
-		gPreSkinRetireFenceQueue = nullptr;
-	}
-	gPreSkinRetireFenceNextValue = 0;
 	ReleaseSRWLockExclusive(&gPreSkinRetireLock);
 
 	AcquireSRWLockExclusive(&gPreSkinDescriptorRingLock);
