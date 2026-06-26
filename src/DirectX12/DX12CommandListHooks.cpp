@@ -1027,6 +1027,18 @@ static void STDMETHODCALLTYPE HookedDrawInstanced(
 		return;
 	}
 
+	if (gDX12HotPathSkipBindings && DX12HuntIsEnabled() && !DX12DrawHookFlowNeedsModWork()) {
+		DX12_PROFILE_FAST_FORWARD();
+		if (DX12HuntShouldSkipDraw(commandList, false))
+			return;
+		DX12HuntRecordDraw(commandList, false);
+		PFN_DRAW_INSTANCED original = DX12_CL_ORIG(commandList, 12, PFN_DRAW_INSTANCED, DrawInstanced);
+		if (original)
+			original(commandList, vertexCountPerInstance, instanceCount,
+				startVertexLocation, startInstanceLocation);
+		return;
+	}
+
 	LogDX12Call("ID3D12GraphicsCommandList::DrawInstanced", commandList,
 		" vertices=%u instances=%u startVertex=%u startInstance=%u",
 		vertexCountPerInstance, instanceCount, startVertexLocation, startInstanceLocation);
@@ -1102,6 +1114,19 @@ static void STDMETHODCALLTYPE HookedDrawIndexedInstanced(
 		return;
 	}
 
+	if (gDX12HotPathSkipBindings && DX12HuntIsEnabled() && !DX12DrawHookFlowNeedsModWork()) {
+		DX12_PROFILE_FAST_FORWARD();
+		if (DX12HuntShouldSkipDraw(commandList, true))
+			return;
+		DX12HuntRecordDraw(commandList, true);
+		PFN_DRAW_INDEXED_INSTANCED original =
+			DX12_CL_ORIG(commandList, 13, PFN_DRAW_INDEXED_INSTANCED, DrawIndexedInstanced);
+		if (original)
+			original(commandList, indexCountPerInstance, instanceCount,
+				startIndexLocation, baseVertexLocation, startInstanceLocation);
+		return;
+	}
+
 	LogDX12Call("ID3D12GraphicsCommandList::DrawIndexedInstanced", commandList,
 		" indices=%u instances=%u startIndex=%u baseVertex=%d startInstance=%u",
 		indexCountPerInstance, instanceCount, startIndexLocation, baseVertexLocation,
@@ -1167,6 +1192,18 @@ static void STDMETHODCALLTYPE HookedDispatch(
 	// Fast-forward: when no mod/hunt/capture work is needed, skip ALL tracking.
 	if (gDX12HotPathSkipAll) {
 		DX12_PROFILE_FAST_FORWARD();
+		PFN_DISPATCH original = DX12_CL_ORIG(commandList, 14, PFN_DISPATCH, Dispatch);
+		if (original)
+			original(commandList, threadGroupCountX, threadGroupCountY, threadGroupCountZ);
+		return;
+	}
+
+	if (gDX12HotPathSkipBindings && DX12HuntIsEnabled() &&
+	    !DX12ModHasActiveShaderOverrides() && !DX12ModNeedsPreSkinningUavProbe()) {
+		DX12_PROFILE_FAST_FORWARD();
+		DX12HuntRecordDispatch(commandList);
+		if (DX12HuntShouldSkipDispatch(commandList))
+			return;
 		PFN_DISPATCH original = DX12_CL_ORIG(commandList, 14, PFN_DISPATCH, Dispatch);
 		if (original)
 			original(commandList, threadGroupCountX, threadGroupCountY, threadGroupCountZ);
@@ -1327,6 +1364,17 @@ static void STDMETHODCALLTYPE HookedSetPipelineState(
 	// Fast-forward: skip PSO replacement and all tracking when idle.
 	if (gDX12HotPathSkipAll) {
 		DX12_PROFILE_FAST_FORWARD();
+		PFN_SET_PIPELINE_STATE original = DX12_CL_ORIG(commandList, 25, PFN_SET_PIPELINE_STATE, SetPipelineState);
+		if (original)
+			original(commandList, pipelineState);
+		return;
+	}
+
+	if (gDX12HotPathSkipBindings && DX12HuntIsEnabled() &&
+	    !DX12ModHasActiveShaderOverrides() && !DX12ModHasActiveTextureOverrides()) {
+		DX12_PROFILE_FAST_FORWARD();
+		DX12CommandListRuntimeRememberPipelineState(commandList, pipelineState);
+		DX12HuntSetPipelineState(commandList, pipelineState);
 		PFN_SET_PIPELINE_STATE original = DX12_CL_ORIG(commandList, 25, PFN_SET_PIPELINE_STATE, SetPipelineState);
 		if (original)
 			original(commandList, pipelineState);
@@ -1811,6 +1859,10 @@ static void STDMETHODCALLTYPE HookedIASetIndexBuffer(
 		// gCommandListIa AND buffer views from RuntimeState.  Both must be
 		// updated even when the BindingTracker is skipped.
 		DX12_PROFILE_FAST_FORWARD();
+		if (DX12HuntIsEnabled()) {
+			DX12Profiling::RecordIaHuntIaUpdate();
+			DX12HuntSetIndexBuffer(commandList, view);
+		}
 		if (DX12ModHasActiveTextureOverrides()) {
 			const bool hadCandidate =
 				DX12CommandListRuntimeMayHaveIaTextureCandidate(commandList);
@@ -1819,11 +1871,8 @@ static void STDMETHODCALLTYPE HookedIASetIndexBuffer(
 			// In the steady state most views cannot match any TextureOverride,
 			// so hash this one view first and only populate Hunt's full IA map
 			// when the hash can actually be consumed by the draw replacement path.
-			if (DX12HuntIsEnabled()) {
-				DX12Profiling::RecordIaHuntIaUpdate();
-				DX12HuntSetIndexBuffer(commandList, view);
-			} else if (hadCandidate ||
-			    UpdateIaTextureCandidateFromIndexView(commandList, view)) {
+			if (!DX12HuntIsEnabled() && (hadCandidate ||
+			    UpdateIaTextureCandidateFromIndexView(commandList, view))) {
 				SyncHuntIaFromRuntimeState(
 					commandList, DX12CommandListRuntimeGetState(commandList).ia);
 				UpdateIaTextureCandidateFlag(commandList);
@@ -1849,6 +1898,10 @@ static void STDMETHODCALLTYPE HookedIASetVertexBuffers(
 	} else {
 		// Fast path: only lightweight tracking for mod matching.
 		DX12_PROFILE_FAST_FORWARD();
+		if (DX12HuntIsEnabled()) {
+			DX12Profiling::RecordIaHuntIaUpdate();
+			DX12HuntSetVertexBuffers(commandList, startSlot, count, views);
+		}
 		if (DX12ModHasActiveTextureOverrides()) {
 			const bool hadCandidate =
 				DX12CommandListRuntimeMayHaveIaTextureCandidate(commandList);
@@ -1856,11 +1909,8 @@ static void STDMETHODCALLTYPE HookedIASetVertexBuffers(
 			// Keep the IASet hot path local unless the changed view is a real
 			// TextureOverride candidate. Full Hunt IA state is still maintained
 			// while shader hunting is active so manual selection remains exact.
-			if (DX12HuntIsEnabled()) {
-				DX12Profiling::RecordIaHuntIaUpdate();
-				DX12HuntSetVertexBuffers(commandList, startSlot, count, views);
-			} else if (hadCandidate || UpdateIaTextureCandidateFromVertexViews(
-				   commandList, startSlot, count, views)) {
+			if (!DX12HuntIsEnabled() && (hadCandidate || UpdateIaTextureCandidateFromVertexViews(
+				   commandList, startSlot, count, views))) {
 				SyncHuntIaFromRuntimeState(
 					commandList, DX12CommandListRuntimeGetState(commandList).ia);
 				UpdateIaTextureCandidateFlag(commandList);

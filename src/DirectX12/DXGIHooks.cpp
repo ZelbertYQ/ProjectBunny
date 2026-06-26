@@ -362,14 +362,14 @@ static HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain *swapChain, UINT s
 		DX12BindingBeginFrame();
 		DX12ShaderDumpBeginCapture();
 	} else if (DX12FrameAnalysisIsCapturing() || DX12ShaderDumpIsCapturingFrame() ||
-	           DX12HuntIsEnabled() || DX12ModHasActiveTextureOverrides()) {
-		// Binding tracking is needed by an active subsystem â€” reset per-frame
+	           DX12ModHasActiveTextureOverrides()) {
+		// Binding tracking is needed by an active subsystem â€?reset per-frame
 		// state.  When nothing is active we skip this entirely so the binding
 		// tracker stays idle and does not consume CPU every frame.
 		DX12BindingBeginFrame();
 		LogPresentStage("Present", "afterBindingBeginFrame", swapChain, hr);
 	}
-	// else: no capture, no hunt, no texture overrides â€” skip binding frame
+	// else: no capture, no hunt, no texture overrides â€?skip binding frame
 	//       reset to save CPU on the Present path.
 	DX12Profiling::EndFrame();
 	LogPresentStage("Present", "end", swapChain, hr);
@@ -424,14 +424,14 @@ static HRESULT STDMETHODCALLTYPE HookedPresent1(
 		DX12BindingBeginFrame();
 		DX12ShaderDumpBeginCapture();
 	} else if (DX12FrameAnalysisIsCapturing() || DX12ShaderDumpIsCapturingFrame() ||
-	           DX12HuntIsEnabled() || DX12ModHasActiveTextureOverrides()) {
-		// Binding tracking is needed by an active subsystem â€” reset per-frame
+	           DX12ModHasActiveTextureOverrides()) {
+		// Binding tracking is needed by an active subsystem â€?reset per-frame
 		// state.  When nothing is active we skip this entirely so the binding
 		// tracker stays idle and does not consume CPU every frame.
 		DX12BindingBeginFrame();
 		LogPresentStage("Present1", "afterBindingBeginFrame", swapChain, hr);
 	}
-	// else: no capture, no hunt, no texture overrides â€” skip binding frame
+	// else: no capture, no hunt, no texture overrides â€?skip binding frame
 	//       reset to save CPU on the Present path.
 	DX12Profiling::EndFrame();
 	LogPresentStage("Present1", "end", swapChain, hr);

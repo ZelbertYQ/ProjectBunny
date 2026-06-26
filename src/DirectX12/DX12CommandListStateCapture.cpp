@@ -13,20 +13,18 @@
 
 bool DX12CommandListCaptureShouldTrackBindings()
 {
-	// Texture overrides do NOT require the full BindingTracker â€” they only need
+	// Texture overrides do NOT require the full BindingTracker â€?they only need
 	// descriptor-heap pointers, which are tracked separately in RuntimeState.
 	// Including DX12ModHasActiveTextureOverrides() here forced the entire
 	// BindingTracker (62 lock sites, root-table tracking, event recording) to
 	// activate whenever any texture override was defined, even for simple
 	// unconditional replacements.  That was the #1 cause of the 3 % GPU issue.
-	return DX12FrameAnalysisIsCapturing() || DX12ShaderDumpIsCapturingFrame() ||
-		DX12HuntIsEnabled();
+	return DX12FrameAnalysisIsCapturing() || DX12ShaderDumpIsCapturingFrame();
 }
 
 bool DX12CommandListCaptureShouldRecordBindingEvents()
 {
-	return DX12FrameAnalysisIsCapturing() || DX12ShaderDumpIsCapturingFrame() ||
-		DX12HuntIsEnabled();
+	return DX12FrameAnalysisIsCapturing() || DX12ShaderDumpIsCapturingFrame();
 }
 
 bool DX12CommandListCaptureShouldTrackHuntIa()

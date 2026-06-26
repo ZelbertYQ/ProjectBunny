@@ -62,11 +62,11 @@ void DX12HotPathUpdate()
 		DX12FrameAnalysisIsCaptureRequested() ||
 		DX12ShaderDumpIsCapturingFrame() ||
 		DX12ShaderDumpIsCaptureRequested() ||
-		DX12ShaderDumpIsBusy() ||
-		DX12HuntIsEnabled();
+		DX12ShaderDumpIsBusy();
 
-	// Mod work that needs draw/dispatch hooks but NOT binding hooks.
-	const bool needsModWork =
+	// Lightweight work that needs draw/dispatch hooks but NOT BindingTracker.
+	const bool needsRecordWork =
+		DX12HuntIsEnabled() ||
 		DX12ModHasActiveShaderOverrides() ||
 		DX12ModHasActiveTextureOverrides() ||
 		DX12ModNeedsPresentReplacement() ||
@@ -75,7 +75,7 @@ void DX12HotPathUpdate()
 
 	// Skip-all: only when NOTHING is active.
 	InterlockedExchange(&gDX12HotPathSkipAll,
-		(needsHeavyTracking || needsModWork) ? 0 : 1);
+		(needsHeavyTracking || needsRecordWork) ? 0 : 1);
 
 	// Skip-bindings: when no heavy tracking is needed.  Mod work alone does
 	// NOT require binding tracking — the draw hooks handle mod matching.

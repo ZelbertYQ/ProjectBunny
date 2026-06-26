@@ -56,4 +56,6 @@ void DX12CommandListLifecycleClearState(
 		DX12CommandListRuntimeRememberPipelineState(commandList, pipelineState);
 	if (DX12CommandListCaptureShouldTrackHuntIaCached(commandList))
 		DX12CommandListRuntimeResetIa(commandList);
+	if (DX12HuntIsEnabled())
+		DX12HuntResetCommandList(commandList, pipelineState);
 }
