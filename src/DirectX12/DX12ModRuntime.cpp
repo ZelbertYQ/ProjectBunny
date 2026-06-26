@@ -429,7 +429,8 @@ static SRWLOCK gPreSkinDescriptorRingLock = SRWLOCK_INIT;
 static DX12PreSkinDescriptorRing gPreSkinDescriptorRing;
 static std::vector<DX12RetiredPreSkinDescriptorHeap> gRetiredPreSkinDescriptorHeaps;
 static constexpr UINT PreSkinDescriptorRingInitialCapacity = 4096;
-static constexpr LONG PreSkinDescriptorHeapRetireDelay = 4;
+static constexpr LONG PreSkinResourceRetireDelay = 32;
+static constexpr LONG PreSkinDescriptorHeapRetireDelay = 32;
 
 static void ReleasePreSkinDescriptorRestores(
 	std::vector<DX12PreSkinReplacementState::DescriptorRestore> *restores)
@@ -454,7 +455,7 @@ static void RetirePreSkinResource(ID3D12Resource *resource)
 #if defined(_DEBUG)
 	const size_t retiredCount = gRetiredPreSkinResources.size();
 #endif
-	const LONG keepAfter = DX12GetPresentCount() - 3;
+	const LONG keepAfter = DX12GetPresentCount() - PreSkinResourceRetireDelay;
 	auto it = gRetiredPreSkinResources.begin();
 	while (it != gRetiredPreSkinResources.end()) {
 		if (it->present <= keepAfter) {
@@ -5777,7 +5778,7 @@ bool DX12ModPrepareIaReplacement(
 		(void)removed;
 #endif
 	}
-	// DX11 does NOT validate VB0 â€?it lets the game's currently-bound VB0 be
+	// DX11 does NOT validate VB0 ï¿?it lets the game's currently-bound VB0 be
 	// used by replacement draws.  D3D12 command lists are sequential, so the
 	// VB0 set by the game before the draw call is still valid when the
 	// replacement draws execute.  Removing this check matches the DX11
@@ -5929,7 +5930,7 @@ bool DX12ModPrepareShaderOverrideReplacement(
 		executor.RunCommandListLinks(config->commandLists, false);
 	}
 	// DX11 behaviour: let the game's currently-bound VB0 be used by
-	// replacement draws â€?same rationale as the TextureOverride path above.
+	// replacement draws ï¿?same rationale as the TextureOverride path above.
 	LogShaderOverrideCommandListLimited("pre", configs, *replacement);
 	ReleaseSRWLockExclusive(&gModLock);
 	device->Release();
