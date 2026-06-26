@@ -914,67 +914,80 @@ static bool EnsurePreSkinDescriptorRingLocked(
 	if (!device || !requiredDescriptors || !cpuBase || !gpuBase || !increment)
 		return false;
 
-	AcquireSRWLockExclusive(&gPreSkinDescriptorRingLock);
-	const LONG present = DX12GetPresentCount();
-	if (gPreSkinDescriptorRing.device != device ||
-	    !gPreSkinDescriptorRing.heap ||
-	    requiredDescriptors > gPreSkinDescriptorRing.capacity ||
-	    gPreSkinDescriptorRing.offset + requiredDescriptors > gPreSkinDescriptorRing.capacity) {
-		const UINT capacity = (std::max)(
+	for (;;) {
+		ID3D12DescriptorHeap *oldHeap = nullptr;
+		ID3D12Device *oldDevice = nullptr;
+		UINT capacityToCreate = 0;
+		AcquireSRWLockExclusive(&gPreSkinDescriptorRingLock);
+		const bool needsNewHeap =
+			gPreSkinDescriptorRing.device != device ||
+			!gPreSkinDescriptorRing.heap ||
+			requiredDescriptors > gPreSkinDescriptorRing.capacity ||
+			gPreSkinDescriptorRing.offset + requiredDescriptors > gPreSkinDescriptorRing.capacity;
+		if (!needsNewHeap) {
+			D3D12_CPU_DESCRIPTOR_HANDLE cpu =
+				gPreSkinDescriptorRing.heap->GetCPUDescriptorHandleForHeapStart();
+			D3D12_GPU_DESCRIPTOR_HANDLE gpu =
+				gPreSkinDescriptorRing.heap->GetGPUDescriptorHandleForHeapStart();
+			cpu.ptr += static_cast<SIZE_T>(gPreSkinDescriptorRing.offset) *
+				gPreSkinDescriptorRing.increment;
+			gpu.ptr += static_cast<UINT64>(gPreSkinDescriptorRing.offset) *
+				gPreSkinDescriptorRing.increment;
+			gPreSkinDescriptorRing.offset += requiredDescriptors;
+			*cpuBase = cpu;
+			*gpuBase = gpu;
+			*increment = gPreSkinDescriptorRing.increment;
+			ReleaseSRWLockExclusive(&gPreSkinDescriptorRingLock);
+			return true;
+		}
+		capacityToCreate = (std::max)(
 			PreSkinDescriptorRingInitialCapacity, requiredDescriptors);
-		if (gPreSkinDescriptorRing.heap) {
-			// Do not overwrite descriptor slots that may still be referenced by
-			// already-recorded command lists. Allocate a fresh shader-visible
-			// heap page and retire the old one after several Presents.
-			RetirePreSkinDescriptorHeapLocked(gPreSkinDescriptorRing.heap);
-			gPreSkinDescriptorRing.heap = nullptr;
-		}
-		if (gPreSkinDescriptorRing.device && gPreSkinDescriptorRing.device != device) {
-			gPreSkinDescriptorRing.device->Release();
-			gPreSkinDescriptorRing.device = nullptr;
-		}
+		ReleaseSRWLockExclusive(&gPreSkinDescriptorRingLock);
 
 		D3D12_DESCRIPTOR_HEAP_DESC heapDesc = {};
 		heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-		heapDesc.NumDescriptors = capacity;
+		heapDesc.NumDescriptors = capacityToCreate;
 		heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-		ID3D12DescriptorHeap *heap = nullptr;
-		HRESULT hr = device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&heap));
-		if (FAILED(hr) || !heap) {
-			ReleaseSRWLockExclusive(&gPreSkinDescriptorRingLock);
+		ID3D12DescriptorHeap *newHeap = nullptr;
+		HRESULT hr = device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&newHeap));
+		if (FAILED(hr) || !newHeap)
 			return false;
-		}
 
-		if (!gPreSkinDescriptorRing.device) {
-			device->AddRef();
-			gPreSkinDescriptorRing.device = device;
+		AcquireSRWLockExclusive(&gPreSkinDescriptorRingLock);
+		const bool stillNeedsNewHeap =
+			gPreSkinDescriptorRing.device != device ||
+			!gPreSkinDescriptorRing.heap ||
+			requiredDescriptors > gPreSkinDescriptorRing.capacity ||
+			gPreSkinDescriptorRing.offset + requiredDescriptors > gPreSkinDescriptorRing.capacity;
+		if (!stillNeedsNewHeap) {
+			ReleaseSRWLockExclusive(&gPreSkinDescriptorRingLock);
+			newHeap->Release();
+			continue;
 		}
-		gPreSkinDescriptorRing.heap = heap;
-		gPreSkinDescriptorRing.capacity = capacity;
+		oldHeap = gPreSkinDescriptorRing.heap;
+		oldDevice = gPreSkinDescriptorRing.device != device ? gPreSkinDescriptorRing.device : nullptr;
+		if (oldDevice)
+			gPreSkinDescriptorRing.device = nullptr;
+		device->AddRef();
+		gPreSkinDescriptorRing.device = device;
+		gPreSkinDescriptorRing.heap = newHeap;
+		gPreSkinDescriptorRing.capacity = capacityToCreate;
 		gPreSkinDescriptorRing.offset = 0;
 		gPreSkinDescriptorRing.increment =
 			device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-		gPreSkinDescriptorRing.present = present;
+		gPreSkinDescriptorRing.present = DX12GetPresentCount();
+		ReleaseSRWLockExclusive(&gPreSkinDescriptorRingLock);
 
+		if (oldHeap)
+			RetirePreSkinDescriptorHeapLocked(oldHeap);
+		if (oldDevice)
+			oldDevice->Release();
 #if defined(_DEBUG)
 		DX12LogDebugJsonFunc("DX12PreSkinDescriptorRing",
 			"\"status\":\"created\",\"capacity\":%u,\"required\":%u",
-			capacity, requiredDescriptors);
+			capacityToCreate, requiredDescriptors);
 #endif
 	}
-
-	D3D12_CPU_DESCRIPTOR_HANDLE cpu = gPreSkinDescriptorRing.heap->GetCPUDescriptorHandleForHeapStart();
-	D3D12_GPU_DESCRIPTOR_HANDLE gpu = gPreSkinDescriptorRing.heap->GetGPUDescriptorHandleForHeapStart();
-	cpu.ptr += static_cast<SIZE_T>(gPreSkinDescriptorRing.offset) *
-		gPreSkinDescriptorRing.increment;
-	gpu.ptr += static_cast<UINT64>(gPreSkinDescriptorRing.offset) *
-		gPreSkinDescriptorRing.increment;
-	gPreSkinDescriptorRing.offset += requiredDescriptors;
-	*cpuBase = cpu;
-	*gpuBase = gpu;
-	*increment = gPreSkinDescriptorRing.increment;
-	ReleaseSRWLockExclusive(&gPreSkinDescriptorRingLock);
-	return true;
 }
 
 enum class DX12PsoKind
@@ -1994,8 +2007,9 @@ bool DX12ModRuntimeReload()
 	return true;
 }
 
-static std::wstring ResolveResourcePathLocked(
-	const Bunny::ResourceConfig &config, bool rootFallback)
+static std::wstring ResolveResourcePath(
+	const Bunny::ResourceConfig &config, const std::wstring &baseDir,
+	bool rootFallback)
 {
 	if (config.filename.empty())
 		return L"";
@@ -2004,12 +2018,18 @@ static std::wstring ResolveResourcePathLocked(
 	wcsncpy_s(path, config.filename.c_str(), _TRUNCATE);
 	if (PathIsRelativeW(path)) {
 		wchar_t combined[MAX_PATH];
-		const std::wstring &base = rootFallback || config.sourceDir.empty() ? gBaseDir : config.sourceDir;
+		const std::wstring &base = rootFallback || config.sourceDir.empty() ? baseDir : config.sourceDir;
 		wcsncpy_s(combined, base.c_str(), _TRUNCATE);
 		PathAppendW(combined, config.filename.c_str());
 		return combined;
 	}
 	return path;
+}
+
+static std::wstring ResolveResourcePathLocked(
+	const Bunny::ResourceConfig &config, bool rootFallback)
+{
+	return ResolveResourcePath(config, gBaseDir, rootFallback);
 }
 
 static bool ResourceConfigLooksLikeBuffer(const Bunny::ResourceConfig &config)
@@ -2027,14 +2047,15 @@ static bool ResourceConfigLooksLikeBuffer(const Bunny::ResourceConfig &config)
 		type == L"rwbyteaddressbuffer";
 }
 
-static bool LoadResourceBytesLocked(
-	const Bunny::ResourceConfig &config, std::vector<unsigned char> *bytes, std::wstring *path)
+static bool LoadResourceBytes(
+	const Bunny::ResourceConfig &config, const std::wstring &baseDir,
+	std::vector<unsigned char> *bytes, std::wstring *path)
 {
 	if (!bytes)
 		return false;
 	bytes->clear();
 
-	std::wstring resolvedPath = ResolveResourcePathLocked(config, false);
+	std::wstring resolvedPath = ResolveResourcePath(config, baseDir, false);
 	if (!resolvedPath.empty()) {
 		if (path)
 			*path = resolvedPath;
@@ -2042,7 +2063,7 @@ static bool LoadResourceBytesLocked(
 			return true;
 
 		if (!config.sourceDir.empty()) {
-			std::wstring fallbackPath = ResolveResourcePathLocked(config, true);
+			std::wstring fallbackPath = ResolveResourcePath(config, baseDir, true);
 			if (fallbackPath != resolvedPath) {
 				if (path)
 					*path = fallbackPath;
@@ -2071,6 +2092,12 @@ static bool LoadResourceBytesLocked(
 		bytes->push_back(static_cast<unsigned char>(parsed));
 	}
 	return !bytes->empty();
+}
+
+static bool LoadResourceBytesLocked(
+	const Bunny::ResourceConfig &config, std::vector<unsigned char> *bytes, std::wstring *path)
+{
+	return LoadResourceBytes(config, gBaseDir, bytes, path);
 }
 
 static ID3D12Device *AcquireModDevice(ID3D12GraphicsCommandList *commandList)
@@ -2202,6 +2229,153 @@ static DX12LoadedResource *EnsureLoadedResourceLocked(
 		static_cast<unsigned long long>(byteWidth), loadedResource.stride,
 		static_cast<UINT>(loadedResource.format));
 	return &inserted.first->second;
+}
+
+static DX12LoadedResource *EnsureLoadedResourceForPreSkin(
+	ID3D12Device *device, const std::wstring &name)
+{
+	if (!device || name.empty())
+		return nullptr;
+
+	Bunny::ResourceConfig config;
+	std::wstring baseDir;
+	AcquireSRWLockExclusive(&gModLock);
+	auto loaded = gLoadedResources.find(name);
+	if (loaded != gLoadedResources.end()) {
+		DX12LoadedResource *resource =
+			loaded->second.resource && !loaded->second.failed ? &loaded->second : nullptr;
+		ReleaseSRWLockExclusive(&gModLock);
+		return resource;
+	}
+	auto configIt = gResources.find(name);
+	if (configIt == gResources.end() || !ResourceConfigLooksLikeBuffer(configIt->second)) {
+		ReleaseSRWLockExclusive(&gModLock);
+		return nullptr;
+	}
+	config = configIt->second;
+	baseDir = gBaseDir;
+	ReleaseSRWLockExclusive(&gModLock);
+
+	std::vector<unsigned char> bytes;
+	std::wstring path;
+	if (!LoadResourceBytes(config, baseDir, &bytes, &path)) {
+		DX12LoadedResource failedResource;
+		failedResource.failed = true;
+		failedResource.name = name;
+		failedResource.path = path;
+		AcquireSRWLockExclusive(&gModLock);
+		auto inserted = gLoadedResources.emplace(name, failedResource);
+		DX12LoadedResource *result =
+			inserted.first->second.resource && !inserted.first->second.failed ?
+			&inserted.first->second : nullptr;
+		ReleaseSRWLockExclusive(&gModLock);
+		DX12LogJsonFunc("DX12ResourceLoad",
+			"\"status\":\"failed\",\"section\":\"%S\",\"reason\":\"read_failed\",\"path\":\"%S\"",
+			config.section.c_str(), path.c_str());
+		wchar_t status[512];
+		swprintf_s(status, L"DX12 mod warning: failed to read resource\n%ls\n%ls",
+			config.section.c_str(), path.c_str());
+		DX12SetOverlayWarning(status);
+		return result;
+	}
+
+	UINT64 byteWidth = config.hasByteWidth ? config.byteWidth : bytes.size();
+	if (byteWidth < bytes.size())
+		byteWidth = bytes.size();
+	if (byteWidth == 0)
+		return nullptr;
+
+	D3D12_HEAP_PROPERTIES heap = {};
+	heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+	heap.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+	heap.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+	heap.CreationNodeMask = 1;
+	heap.VisibleNodeMask = 1;
+
+	D3D12_RESOURCE_DESC desc = {};
+	desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+	desc.Width = byteWidth;
+	desc.Height = 1;
+	desc.DepthOrArraySize = 1;
+	desc.MipLevels = 1;
+	desc.Format = DXGI_FORMAT_UNKNOWN;
+	desc.SampleDesc.Count = 1;
+	desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+	ID3D12Resource *resource = nullptr;
+	HRESULT hr = device->CreateCommittedResource(
+		&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_GENERIC_READ,
+		nullptr, IID_PPV_ARGS(&resource));
+	if (FAILED(hr) || !resource) {
+		DX12LoadedResource failedResource;
+		failedResource.failed = true;
+		failedResource.name = name;
+		failedResource.path = path;
+		AcquireSRWLockExclusive(&gModLock);
+		gLoadedResources.emplace(name, failedResource);
+		ReleaseSRWLockExclusive(&gModLock);
+		DX12LogJsonFunc("DX12ResourceLoad",
+			"\"status\":\"failed\",\"section\":\"%S\",\"reason\":\"create_failed\",\"hr\":\"0x%lx\",\"bytes\":%llu",
+			config.section.c_str(), hr, static_cast<unsigned long long>(byteWidth));
+		wchar_t status[512];
+		swprintf_s(status, L"DX12 mod error: failed to create resource\n%ls hr=0x%lx",
+			config.section.c_str(), hr);
+		DX12SetOverlayError(status);
+		return nullptr;
+	}
+
+	void *mapped = nullptr;
+	D3D12_RANGE readRange = {};
+	hr = resource->Map(0, &readRange, &mapped);
+	if (SUCCEEDED(hr) && mapped) {
+		memcpy(mapped, bytes.data(), bytes.size());
+		if (byteWidth > bytes.size())
+			memset(static_cast<unsigned char*>(mapped) + bytes.size(), 0, byteWidth - bytes.size());
+		resource->Unmap(0, nullptr);
+	} else {
+		resource->Release();
+		DX12LoadedResource failedResource;
+		failedResource.failed = true;
+		failedResource.name = name;
+		failedResource.path = path;
+		AcquireSRWLockExclusive(&gModLock);
+		gLoadedResources.emplace(name, failedResource);
+		ReleaseSRWLockExclusive(&gModLock);
+		DX12LogJsonFunc("DX12ResourceLoad",
+			"\"status\":\"failed\",\"section\":\"%S\",\"reason\":\"map_failed\",\"hr\":\"0x%lx\"",
+			config.section.c_str(), hr);
+		wchar_t status[512];
+		swprintf_s(status, L"DX12 mod error: failed to map resource\n%ls hr=0x%lx",
+			config.section.c_str(), hr);
+		DX12SetOverlayError(status);
+		return nullptr;
+	}
+
+	DX12LoadedResource loadedResource;
+	loadedResource.resource = resource;
+	loadedResource.byteWidth = byteWidth;
+	loadedResource.stride = config.hasStride ? config.stride : 0;
+	loadedResource.format = ParseDx12ResourceFormat(config.format);
+	loadedResource.name = name;
+	loadedResource.path = path;
+
+	AcquireSRWLockExclusive(&gModLock);
+	auto inserted = gLoadedResources.emplace(name, loadedResource);
+	if (!inserted.second)
+		resource->Release();
+	DX12LoadedResource *result =
+		inserted.first->second.resource && !inserted.first->second.failed ?
+		&inserted.first->second : nullptr;
+	ReleaseSRWLockExclusive(&gModLock);
+
+	if (inserted.second) {
+		DX12LogJsonFunc("DX12ResourceLoad",
+			"\"status\":\"loaded\",\"section\":\"%S\",\"name\":\"%S\",\"path\":\"%S\",\"bytes\":%llu,\"stride\":%u,\"format\":%u",
+			config.section.c_str(), name.c_str(), path.c_str(),
+			static_cast<unsigned long long>(byteWidth), loadedResource.stride,
+			static_cast<UINT>(loadedResource.format));
+	}
+	return result;
 }
 
 static bool EnsureResourceUavLocked(
@@ -2452,6 +2626,26 @@ static DX12LoadedResource *FindReplacementResourceForVlrLocked(
 			best = resource;
 	}
 	return best;
+}
+
+static bool FindReplacementResourceNameForVlrLocked(
+	const DX12VertexLimitRaiseConfig &vlr, std::wstring *resourceName)
+{
+	if (resourceName)
+		resourceName->clear();
+	for (const std::wstring &name : gVlrResourceCandidates) {
+		auto configIt = gResources.find(name);
+		if (configIt == gResources.end())
+			continue;
+		const Bunny::ResourceConfig &config = configIt->second;
+		if (config.hasStride && vlr.overrideByteStride &&
+		    config.stride != vlr.overrideByteStride)
+			continue;
+		if (resourceName)
+			*resourceName = name;
+		return true;
+	}
+	return false;
 }
 
 static bool ProducerMatchesAnyVlr(
@@ -3593,7 +3787,7 @@ static bool ApplyPreSkinDescriptorTablePatchLocked(
 				resource = positiveIt->second.resource;
 				elementStride = positiveIt->second.elementStride;
 			} else {
-				resource = EnsureLoadedResourceLocked(device, replacementBinding->resource);
+				resource = EnsureLoadedResourceForPreSkin(device, replacementBinding->resource);
 				elementStride =
 					srv.descriptor.structureByteStride ? srv.descriptor.structureByteStride :
 					(resource ? resource->stride : 0);
@@ -3850,7 +4044,7 @@ static bool ApplyPreSkinSrvInputPatchesLocked(
 		if (!replacementBinding)
 			continue;
 
-		DX12LoadedResource *resource = EnsureLoadedResourceLocked(device, replacementBinding->resource);
+		DX12LoadedResource *resource = EnsureLoadedResourceForPreSkin(device, replacementBinding->resource);
 		const UINT elementStride =
 			srv.descriptor.structureByteStride ? srv.descriptor.structureByteStride :
 			(resource ? resource->stride : 0);
@@ -3925,16 +4119,29 @@ bool DX12ModApplyPreSkinningUavReplacement(
 	bool applied = false;
 	DX12ComputeUavProducer producer = {};
 	DX12VertexLimitRaiseConfig vlr = {};
+	std::wstring vlrResourceName;
 	DX12LoadedResource *replacement = nullptr;
-
-	AcquireSRWLockExclusive(&gModLock);
 	DX12CurrentComputeUavBinding hashBinding = {};
 	DX12UavHashTextureOverrideMatch hashMatch = {};
-	bool explicitMatchCs = HasMatchCsTextureOverrideLocked(computeShaderHash);
-	bool hashMatched = explicitMatchCs && FindPreSkinProducerByMatchCsLocked(
+	bool hashMatched = false;
+	bool explicitMatchCs = false;
+	bool hasExplicitDispatch = false;
+	bool vlrMatched = false;
+
+	AcquireSRWLockExclusive(&gModLock);
+	explicitMatchCs = HasMatchCsTextureOverrideLocked(computeShaderHash);
+	hashMatched = explicitMatchCs && FindPreSkinProducerByMatchCsLocked(
 		uavs, srvs, cbvs, rootConstants, computeShaderHash, &producer, &hashBinding, &hashMatch);
+	if (hashMatched)
+		hasExplicitDispatch = HasExplicitPreSkinDispatchOverride(hashMatch.config);
+	if (!hashMatched || !hasExplicitDispatch) {
+		vlrMatched = FindPreSkinProducerLocked(uavs, computeShaderHash, &producer, &vlr) &&
+			FindReplacementResourceNameForVlrLocked(vlr, &vlrResourceName);
+	}
+	ReleaseSRWLockExclusive(&gModLock);
+
 	if (hashMatched) {
-		if (!HasExplicitPreSkinDispatchOverride(hashMatch.config)) {
+		if (!hasExplicitDispatch) {
 #if defined(_DEBUG)
 			DX12LogDebugJsonFunc("DX12PreSkinningApply",
 				"\"status\":\"skip_missing_explicit_dispatch\",\"section\":\"%S\",\"handlingSkip\":%s",
@@ -3958,13 +4165,12 @@ bool DX12ModApplyPreSkinningUavReplacement(
 			}
 		}
 	}
-	if (!applied &&
-	    FindPreSkinProducerLocked(uavs, computeShaderHash, &producer, &vlr)) {
-		replacement = FindReplacementResourceForVlrLocked(device, vlr);
+	if (!applied && vlrMatched) {
+		replacement = EnsureLoadedResourceForPreSkin(device, vlrResourceName);
 		if (replacement && EnsureResourceUavLocked(
 			device, commandList, replacement,
 			vlr.uavByteStride ? vlr.uavByteStride : vlr.overrideByteStride,
-			0, false, true)) {
+			0, true, true)) {
 			const DX12CurrentComputeUavBinding *binding = nullptr;
 			for (const DX12CurrentComputeUavBinding &uav : uavs) {
 				if (uav.rootParameterIndex == producer.rootParameterIndex &&
@@ -3987,7 +4193,6 @@ bool DX12ModApplyPreSkinningUavReplacement(
 			}
 		}
 	}
-	ReleaseSRWLockExclusive(&gModLock);
 	DX12Profiling::RecordPreSkinUavTest(applied);
 	device->Release();
 	return applied;
@@ -4011,15 +4216,19 @@ bool DX12ModApplyKnownPreSkinningUavPatches(ID3D12GraphicsCommandList *commandLi
 
 	DX12InternalReplayScope internalReplay;
 	bool applied = false;
-	AcquireSRWLockExclusive(&gModLock);
 	for (const auto &patch : patches) {
-		if (ResourceBlockedByInactiveExplicitMatchCsLocked(patch.second))
+		AcquireSRWLockExclusive(&gModLock);
+		const bool blocked = ResourceBlockedByInactiveExplicitMatchCsLocked(patch.second);
+		ReleaseSRWLockExclusive(&gModLock);
+		if (blocked)
 			continue;
-		DX12LoadedResource *resource = EnsureLoadedResourceLocked(device, patch.second);
+		DX12LoadedResource *resource = EnsureLoadedResourceForPreSkin(device, patch.second);
 		if (!resource)
 			continue;
+		AcquireSRWLockExclusive(&gModLock);
 		const UINT elementStride = FindPreSkinUavElementStrideLocked(*resource);
-		if (!EnsureResourceUavLocked(device, commandList, resource, elementStride))
+		ReleaseSRWLockExclusive(&gModLock);
+		if (!EnsureResourceUavLocked(device, commandList, resource, elementStride, 0, true))
 			continue;
 		if (!resource->uavResource || !resource->uavCpu.ptr)
 			continue;
@@ -4042,7 +4251,6 @@ bool DX12ModApplyKnownPreSkinningUavPatches(ID3D12GraphicsCommandList *commandLi
 		resource->uavValid = true;
 		applied = true;
 	}
-	ReleaseSRWLockExclusive(&gModLock);
 	device->Release();
 	return applied;
 }
