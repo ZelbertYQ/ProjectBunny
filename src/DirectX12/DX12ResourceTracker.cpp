@@ -1798,22 +1798,8 @@ uint32_t DX12HashDescriptorBufferView(
 	const DX12DescriptorSummary *descriptor, UINT64 fallbackGpuVirtualAddress,
 	UINT64 fallbackSize)
 {
-	DX12BufferResourceSummary summary = {};
-	if (descriptor) {
-		summary.resource = descriptor->resource;
-		summary.resourceDesc = descriptor->resourceDesc;
-		summary.hasResourceDesc = descriptor->hasResourceDesc;
-		summary.resourceHeapType = descriptor->resourceHeapType;
-		summary.hasResourceHeapType = descriptor->hasResourceHeapType;
-		summary.gpuVirtualAddress = descriptor->gpuVirtualAddress;
-		summary.resourceOffset = descriptor->resourceOffset;
-		summary.viewSize = descriptor->viewSize;
-		summary.currentState = descriptor->currentState;
-		summary.hasCurrentState = descriptor->hasCurrentState;
-	}
-
-	uint32_t hash = DX12HashBufferResourceView(
-		descriptor ? &summary : nullptr, fallbackGpuVirtualAddress, fallbackSize);
+	(void)fallbackGpuVirtualAddress;
+	uint32_t hash = 0;
 	const uint32_t tag = MakeTrackerFourCC('D', 'X', 'D', 'V');
 	hash = HashBytes(hash, &tag, sizeof(tag));
 	if (descriptor) {
@@ -1825,9 +1811,12 @@ uint32_t DX12HashDescriptorBufferView(
 		hash = HashBytes(hash, &descriptor->structureByteStride, sizeof(descriptor->structureByteStride));
 		hash = HashBytes(hash, &descriptor->bufferViewOffset, sizeof(descriptor->bufferViewOffset));
 		hash = HashBytes(hash, &descriptor->bufferViewBytes, sizeof(descriptor->bufferViewBytes));
+		const UINT64 stableViewSize = descriptor->viewSize ?
+			descriptor->viewSize : fallbackSize;
+		hash = HashBytes(hash, &stableViewSize, sizeof(stableViewSize));
+	} else {
+		hash = HashBytes(hash, &fallbackSize, sizeof(fallbackSize));
 	}
-	hash = HashBytes(hash, &fallbackGpuVirtualAddress, sizeof(fallbackGpuVirtualAddress));
-	hash = HashBytes(hash, &fallbackSize, sizeof(fallbackSize));
 	return hash;
 }
 

@@ -83,6 +83,110 @@ static std::unordered_map<uint32_t, std::vector<size_t>> gIaAnyVertexTextureOver
 static std::unordered_map<UINT64, std::vector<size_t>> gIaMergedVertexTextureOverrideIndex;
 struct DX12TriggeredTextureOverride
 {
+	DX12TriggeredTextureOverride() = default;
+	DX12TriggeredTextureOverride(const DX12TriggeredTextureOverride &other)
+		: config(other.config),
+		  fallbackConfig(other.fallbackConfig),
+		  sectionId(other.sectionId),
+		  postRuntimeEffect(other.postRuntimeEffect),
+		  indexBuffer(other.indexBuffer),
+		  vertexSlot(other.vertexSlot),
+		  executeCommands(other.executeCommands),
+		  executeDrawActions(other.executeDrawActions),
+		  directIaAnchor(other.directIaAnchor),
+		  relatedMesh(other.relatedMesh),
+		  preSkinAnchor(other.preSkinAnchor),
+		  preSkinResource(other.preSkinResource),
+		  preSkinByteWidth(other.preSkinByteWidth),
+		  preSkinStride(other.preSkinStride),
+		  preSkinDescriptor(other.preSkinDescriptor),
+		  preSkinHasDescriptor(other.preSkinHasDescriptor)
+	{
+		if (preSkinResource)
+			preSkinResource->AddRef();
+	}
+	DX12TriggeredTextureOverride(DX12TriggeredTextureOverride &&other) noexcept
+		: config(other.config),
+		  fallbackConfig(std::move(other.fallbackConfig)),
+		  sectionId(other.sectionId),
+		  postRuntimeEffect(other.postRuntimeEffect),
+		  indexBuffer(other.indexBuffer),
+		  vertexSlot(other.vertexSlot),
+		  executeCommands(other.executeCommands),
+		  executeDrawActions(other.executeDrawActions),
+		  directIaAnchor(other.directIaAnchor),
+		  relatedMesh(other.relatedMesh),
+		  preSkinAnchor(other.preSkinAnchor),
+		  preSkinResource(other.preSkinResource),
+		  preSkinByteWidth(other.preSkinByteWidth),
+		  preSkinStride(other.preSkinStride),
+		  preSkinDescriptor(other.preSkinDescriptor),
+		  preSkinHasDescriptor(other.preSkinHasDescriptor)
+	{
+		other.preSkinResource = nullptr;
+		other.preSkinByteWidth = 0;
+		other.preSkinStride = 0;
+		other.preSkinHasDescriptor = false;
+	}
+	~DX12TriggeredTextureOverride()
+	{
+		if (preSkinResource)
+			preSkinResource->Release();
+	}
+	DX12TriggeredTextureOverride &operator=(const DX12TriggeredTextureOverride &other)
+	{
+		if (this == &other)
+			return *this;
+		if (preSkinResource)
+			preSkinResource->Release();
+		config = other.config;
+		fallbackConfig = other.fallbackConfig;
+		sectionId = other.sectionId;
+		postRuntimeEffect = other.postRuntimeEffect;
+		indexBuffer = other.indexBuffer;
+		vertexSlot = other.vertexSlot;
+		executeCommands = other.executeCommands;
+		executeDrawActions = other.executeDrawActions;
+		directIaAnchor = other.directIaAnchor;
+		relatedMesh = other.relatedMesh;
+		preSkinAnchor = other.preSkinAnchor;
+		preSkinResource = other.preSkinResource;
+		preSkinByteWidth = other.preSkinByteWidth;
+		preSkinStride = other.preSkinStride;
+		preSkinDescriptor = other.preSkinDescriptor;
+		preSkinHasDescriptor = other.preSkinHasDescriptor;
+		if (preSkinResource)
+			preSkinResource->AddRef();
+		return *this;
+	}
+	DX12TriggeredTextureOverride &operator=(DX12TriggeredTextureOverride &&other) noexcept
+	{
+		if (this == &other)
+			return *this;
+		if (preSkinResource)
+			preSkinResource->Release();
+		config = other.config;
+		fallbackConfig = std::move(other.fallbackConfig);
+		sectionId = other.sectionId;
+		postRuntimeEffect = other.postRuntimeEffect;
+		indexBuffer = other.indexBuffer;
+		vertexSlot = other.vertexSlot;
+		executeCommands = other.executeCommands;
+		executeDrawActions = other.executeDrawActions;
+		directIaAnchor = other.directIaAnchor;
+		relatedMesh = other.relatedMesh;
+		preSkinAnchor = other.preSkinAnchor;
+		preSkinResource = other.preSkinResource;
+		preSkinByteWidth = other.preSkinByteWidth;
+		preSkinStride = other.preSkinStride;
+		preSkinDescriptor = other.preSkinDescriptor;
+		preSkinHasDescriptor = other.preSkinHasDescriptor;
+		other.preSkinResource = nullptr;
+		other.preSkinByteWidth = 0;
+		other.preSkinStride = 0;
+		other.preSkinHasDescriptor = false;
+		return *this;
+	}
 	const Bunny::TextureOverrideConfig *config = nullptr;
 	Bunny::TextureOverrideConfig fallbackConfig;
 	uint32_t sectionId = 0;
@@ -97,6 +201,8 @@ struct DX12TriggeredTextureOverride
 	ID3D12Resource *preSkinResource = nullptr;
 	UINT64 preSkinByteWidth = 0;
 	UINT preSkinStride = 0;
+	DX12DescriptorSummary preSkinDescriptor;
+	bool preSkinHasDescriptor = false;
 };
 
 static const Bunny::TextureOverrideConfig &TriggeredTextureOverrideConfig(
@@ -184,6 +290,7 @@ static volatile LONG gPresentCommandListExecutedPresent = -1;
 static UINT64 gPreSkinActiveGeneration = 1;
 static UINT64 gPreSkinSrvCacheGeneration = 1;
 static volatile LONG gPreSkinMatchCsProbeLogCount = 0;
+static SRWLOCK gPreSkinMatchCsProbeLogLock = SRWLOCK_INIT;
 static std::unordered_set<uint64_t> gPreSkinMatchCsProbeKeys;
 struct DX12ShaderOverridePsoMatchCache
 {
@@ -438,6 +545,9 @@ struct DX12PreSkinReplacementState
 	UINT64 byteWidth = 0;
 	UINT stride = 0;
 	UINT64 producerSerial = 0;
+	bool hasActiveTextureOverride = false;
+	Bunny::TextureOverrideConfig activeConfig;
+	DX12ComputeUavProducer activeProducer;
 	struct DescriptorRestore
 	{
 		SIZE_T targetCpu = 0;
@@ -2827,10 +2937,15 @@ static void LogPreSkinMatchCsProbeLimited(
 	probeKey = HashCombine64(probeKey, HashComputeBindingListForProbe(srvs, true));
 	probeKey = HashCombine64(probeKey, HashComputeCbvListForProbe(cbvs));
 	probeKey = HashCombine64(probeKey, HashComputeRootConstantsForProbe(rootConstants));
-	if (!gPreSkinMatchCsProbeKeys.insert(probeKey).second)
-		return;
-	LONG count = InterlockedIncrement(&gPreSkinMatchCsProbeLogCount);
-	if (count > 256)
+	bool emit = false;
+	AcquireSRWLockExclusive(&gPreSkinMatchCsProbeLogLock);
+	if (gPreSkinMatchCsProbeLogCount < 256 &&
+	    gPreSkinMatchCsProbeKeys.insert(probeKey).second) {
+		++gPreSkinMatchCsProbeLogCount;
+		emit = true;
+	}
+	ReleaseSRWLockExclusive(&gPreSkinMatchCsProbeLogLock);
+	if (!emit)
 		return;
 	char uavText[512] = {};
 	char srvText[768] = {};
@@ -2840,7 +2955,7 @@ static void LogPreSkinMatchCsProbeLimited(
 	AppendComputeBindingHashList(srvs, true, srvText, sizeof(srvText));
 	AppendComputeCbvList(cbvs, cbvText, sizeof(cbvText));
 	AppendComputeRootConstantsList(rootConstants, rootText, sizeof(rootText));
-	DX12LogJsonFuncFlush("DX12PreSkinMatchCsProbe",
+	DX12LogJsonFunc("DX12PreSkinMatchCsProbe",
 		"\"cs\":\"%016llx\",\"section\":\"%S\",\"targetHash\":\"%08x\",\"uavBytes\":%llu,\"matchUavBytes\":%llu,\"inputMatched\":%s,\"uavs\":\"%s\",\"srvs\":\"%s\",\"cbvs\":\"%s\",\"rootConstants\":\"%s\"",
 		static_cast<unsigned long long>(csHash),
 		candidate.config.originalSection.empty() ? candidate.config.section.c_str() : candidate.config.originalSection.c_str(),
@@ -3489,9 +3604,16 @@ ID3D12DescriptorHeap *restoreCbvSrvUavHeap = nullptr;
 	state.rootParameterIndex = uavBinding.rootParameterIndex;
 	state.originalTable = uavBinding.tableGpuStart;
 	state.originalHeap = uavBinding.tableHeap;
-	state.resource = nullptr;
-	state.byteWidth = 0;
-	state.stride = 0;
+	state.resource = uavBinding.descriptor.resource;
+	state.byteWidth = DescriptorViewSize(uavBinding.descriptor);
+	state.stride = uavBinding.descriptor.structureByteStride;
+	state.hasActiveTextureOverride = state.resource && state.byteWidth && state.stride;
+	if (state.hasActiveTextureOverride) {
+		state.activeConfig = config;
+		state.activeProducer = producer;
+		if (state.resource)
+			state.resource->AddRef();
+	}
 	state.patchHeap = gPreSkinDescriptorRing.heap;
 	state.restoreCbvSrvUavHeap = restoreCbvSrvUavHeap;
 	state.restoreSamplerHeap = restoreSamplerHeap;
@@ -3924,6 +4046,20 @@ void DX12ModRestorePreSkinningUavReplacement(ID3D12GraphicsCommandList *commandL
 		device->Release();
 	}
 	ReleasePreSkinDescriptorRestores(&state.descriptorRestores);
+
+	if (state.hasActiveTextureOverride && state.resource) {
+		DX12ActivePreSkinTextureOverride active = {};
+		active.config = state.activeConfig;
+		active.producer = state.activeProducer;
+		active.outputResource = state.resource;
+		active.outputByteWidth = state.byteWidth;
+		active.outputStride = state.stride;
+		AcquireSRWLockExclusive(&gPreSkinLock);
+		StoreActivePreSkinTextureOverrideLocked(active.config.section, active);
+		ReleaseSRWLockExclusive(&gPreSkinLock);
+		state.resource->Release();
+		state.resource = nullptr;
+	}
 
 #if defined(_DEBUG)
 	DX12LogDebugJsonFunc("DX12PreSkinningApply",
@@ -5181,15 +5317,11 @@ static bool ActivePreSkinProducerMatchesIaState(
 	uint32_t *matchedSlot)
 {
 	for (const DX12IaBufferHash &buffer : iaState.vertexBuffers) {
-		for (const auto &target : active.config.vertexBufferResources) {
-			if (target.first != buffer.slot)
-				continue;
-			if (!ProducerMatchesIaBuffer(active.producer, buffer))
-				continue;
-			if (matchedSlot)
-				*matchedSlot = buffer.slot;
-			return true;
-		}
+		if (!ProducerMatchesIaBuffer(active.producer, buffer))
+			continue;
+		if (matchedSlot)
+			*matchedSlot = buffer.slot;
+		return true;
 	}
 	return false;
 }
@@ -5206,16 +5338,18 @@ static void AppendActivePreSkinTextureOverridesLocked(
 
 	std::vector<DX12ActivePreSkinTextureOverride> activeOverrides;
 	AcquireSRWLockShared(&gPreSkinLock);
-	for (const auto &item : gActivePreSkinTextureOverrides)
+	activeOverrides.reserve(gActivePreSkinTextureOverrides.size());
+	for (const auto &item : gActivePreSkinTextureOverrides) {
 		activeOverrides.push_back(item.second);
+		if (activeOverrides.back().outputResource)
+			activeOverrides.back().outputResource->AddRef();
+	}
 	ReleaseSRWLockShared(&gPreSkinLock);
 	if (activeOverrides.empty())
 		return;
 
 	for (const DX12ActivePreSkinTextureOverride &active : activeOverrides) {
 		const Bunny::TextureOverrideConfig &config = active.config;
-		if (config.vertexBufferResources.empty())
-			continue;
 		uint32_t matchedSlot = UINT_MAX;
 		if (!ActivePreSkinProducerMatchesIaState(active, iaState, &matchedSlot))
 			continue;
@@ -5238,15 +5372,19 @@ static void AppendActivePreSkinTextureOverridesLocked(
 		entry.postRuntimeEffect = TextureOverrideRuntimeEffectLocked(config, true);
 		entry.indexBuffer = false;
 		entry.vertexSlot = matchedSlot;
-		entry.executeCommands = executeCommands;
-		entry.executeDrawActions = executeCommands;
+		entry.executeCommands = false;
+		entry.executeDrawActions = false;
 		entry.directIaAnchor = true;
 		entry.preSkinAnchor = true;
 		entry.preSkinResource = active.outputResource;
 		entry.preSkinByteWidth = active.outputByteWidth;
 		entry.preSkinStride = active.outputStride;
+		entry.preSkinDescriptor = active.producer.descriptor;
+		entry.preSkinHasDescriptor = active.producer.hasDescriptor;
 		overrides->push_back(entry);
 	}
+	for (DX12ActivePreSkinTextureOverride &active : activeOverrides)
+		ReleaseActivePreSkinTextureOverride(&active);
 }
 static void AppendRelatedMeshTextureOverridesLocked(
 	std::vector<DX12TriggeredTextureOverride> *overrides,
@@ -5616,6 +5754,35 @@ static bool AppendPreSkinResourceViewLocked(
 		return false;
 	if (entry.preSkinByteWidth == 0 || entry.preSkinStride == 0)
 		return false;
+
+	if (entry.preSkinHasDescriptor &&
+	    entry.preSkinDescriptor.kind == "UAV" &&
+	    entry.preSkinDescriptor.resource == entry.preSkinResource) {
+		D3D12_RESOURCE_BARRIER uavBarrier = {};
+		uavBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+		uavBarrier.UAV.pResource = entry.preSkinResource;
+		commandList->ResourceBarrier(1, &uavBarrier);
+
+		D3D12_RESOURCE_STATES beforeState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+		if (beforeState != D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER) {
+			D3D12_RESOURCE_BARRIER transition = {};
+			transition.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+			transition.Transition.pResource = entry.preSkinResource;
+			transition.Transition.StateBefore = beforeState;
+			transition.Transition.StateAfter = D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
+			transition.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+			commandList->ResourceBarrier(1, &transition);
+		}
+#if defined(_DEBUG)
+		DX12LogDebugJsonFunc("DX12PreSkinIaResourcePrepare",
+			"\"slot\":%u,\"bytes\":%llu,\"stride\":%u,\"beforeState\":%u,\"gpuVa\":\"0x%llx\"",
+			entry.vertexSlot,
+			static_cast<unsigned long long>(entry.preSkinByteWidth),
+			entry.preSkinStride,
+			static_cast<UINT>(beforeState),
+			static_cast<unsigned long long>(entry.preSkinResource->GetGPUVirtualAddress()));
+#endif
+	}
 
 	if (replacement->vertexBuffers.empty() ||
 	    entry.vertexSlot < replacement->vertexBufferStartSlot ||
