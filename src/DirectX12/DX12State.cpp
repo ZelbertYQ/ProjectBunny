@@ -81,9 +81,7 @@ void DX12HotPathUpdate()
 	const bool needsRecordWork =
 		DX12HuntIsEnabled() ||
 		DX12ModHasActiveShaderOverrides() ||
-		DX12ModHasActiveTextureOverrides() ||
 		DX12ModNeedsPresentReplacement() ||
-		DX12ModHasAnyActiveOverrides() ||
 		DX12ModNeedsPreSkinningUavProbe();
 	const bool needsBindingState =
 		needsHeavyTracking ||

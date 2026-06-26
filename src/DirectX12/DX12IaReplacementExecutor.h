@@ -15,10 +15,6 @@ typedef void(STDMETHODCALLTYPE *DX12IaExecSetIndexBuffer)(
 	ID3D12GraphicsCommandList*, const D3D12_INDEX_BUFFER_VIEW*);
 typedef void(STDMETHODCALLTYPE *DX12IaExecSetVertexBuffers)(
 	ID3D12GraphicsCommandList*, UINT, UINT, const D3D12_VERTEX_BUFFER_VIEW*);
-typedef bool (*DX12IaShouldSuppressAutoReplacement)(
-	ID3D12GraphicsCommandList*, const DX12IaHashState&,
-	uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
-	int32_t, uint32_t, const DX12ModIaReplacement&);
 
 struct DX12IaDrawInvocation
 {
@@ -41,7 +37,6 @@ struct DX12IaReplacementExecutorCallbacks
 	DX12IaExecSetVertexBuffers setVertexBuffers = nullptr;
 	void (*recordReplacementDraw)(bool indexed) = nullptr;
 	void (*recordReplacementDispatch)() = nullptr;
-	DX12IaShouldSuppressAutoReplacement shouldSuppressAutoReplacement = nullptr;
 };
 
 bool DX12IaReplacementIsExecutingInternalDraw();
@@ -54,7 +49,6 @@ bool DX12IaReplacementApplyAndExecute(
 	const DX12IaDrawInvocation &draw,
 	const DX12IaHashState &iaState,
 	DX12ModIaReplacement *replacement,
-	bool fromShaderOverride,
 	const DX12CommandListRuntimeState &runtimeState,
 	const DX12IaReplacementExecutorCallbacks &callbacks);
 bool DX12IaReplacementHandleDrawOverrides(

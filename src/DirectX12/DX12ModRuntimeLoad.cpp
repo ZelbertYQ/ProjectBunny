@@ -550,12 +550,6 @@ static bool CommandListActionHasRuntimeEffect(
 	std::set<std::wstring> *visiting);
 static bool TextureOverrideMatchesIaBinding(
 	const Bunny::TextureOverrideConfig &config, bool indexBuffer, uint32_t vertexSlot);
-static void BuildDx12RelatedTextureOverrideIndex(
-	const Bunny::TextureOverrideMap &textureOverrides,
-	const std::unordered_map<std::wstring, bool> &textureOverridePreEffect,
-	const std::unordered_map<std::wstring, uint32_t> &textureOverrideSectionIds,
-	std::vector<DX12RelatedTextureOverrideCandidate> *relatedTextureOverrides,
-	std::unordered_map<std::wstring, std::vector<size_t>> *relatedTokenIndex);
 static void BuildDx12IaTextureOverrideIndex(
 	const Bunny::TextureOverrideMap &textureOverrides,
 	const std::unordered_map<std::wstring, uint32_t> &textureOverrideSectionIds,
@@ -773,8 +767,6 @@ bool DX12ModRuntimeLoad(
 	std::unordered_map<uint32_t, DX12CompiledTextureOverridePlan> compiledTextureOverridePlans;
 	std::unordered_map<std::wstring, DX12CompiledCommandListPlan> compiledCommandListPlans;
 	bool presentRuntimeEffect = false;
-	std::vector<DX12RelatedTextureOverrideCandidate> relatedTextureOverrides;
-	std::unordered_map<std::wstring, std::vector<size_t>> relatedTextureOverrideTokenIndex;
 	std::vector<DX12IaTextureOverrideCandidate> iaTextureOverrides;
 	std::unordered_map<uint32_t, std::vector<size_t>> iaIndexTextureOverrideIndex;
 	std::unordered_map<UINT64, std::vector<size_t>> iaVertexTextureOverrideIndex;
@@ -840,9 +832,6 @@ bool DX12ModRuntimeLoad(
 	}
 	BuildDx12TextureOverrideSectionIds(
 		textureOverrides, &textureOverrideSectionIds);
-	BuildDx12RelatedTextureOverrideIndex(
-		textureOverrides, textureOverridePreRuntimeEffect, textureOverrideSectionIds,
-		&relatedTextureOverrides, &relatedTextureOverrideTokenIndex);
 	BuildDx12IaTextureOverrideIndex(
 		textureOverrides,
 		textureOverrideSectionIds,
@@ -878,8 +867,6 @@ bool DX12ModRuntimeLoad(
 	gTextureOverridePreRuntimeEffect.swap(textureOverridePreRuntimeEffect);
 	gTextureOverridePostRuntimeEffect.swap(textureOverridePostRuntimeEffect);
 	gTextureOverrideSectionIds.swap(textureOverrideSectionIds);
-	gRelatedTextureOverrides.swap(relatedTextureOverrides);
-	gRelatedTextureOverrideTokenIndex.swap(relatedTextureOverrideTokenIndex);
 	gIaTextureOverrides.swap(iaTextureOverrides);
 	gIaIndexTextureOverrideIndex.swap(iaIndexTextureOverrideIndex);
 	gIaVertexTextureOverrideIndex.swap(iaVertexTextureOverrideIndex);
@@ -895,12 +882,7 @@ bool DX12ModRuntimeLoad(
 	gPreSkinMatchCsHashes.swap(preSkinMatchCsHashes);
 	gHasPreSkinVlrWithoutMatchCs = hasPreSkinVlrWithoutMatchCs;
 	ReleaseLoadedResourcesLocked();
-	gIaSkipCache.clear();
-	gIaTextureCandidateCache.clear();
-	gIaReplacementMatchCache.clear();
-	gIaReplacementPreparedFrameCache.clear();
 	gShaderOverridePsoMatchCache.clear();
-	gIaReplacementPrepareCachePresent = -1;
 	gPresentCommandListExecutedPresent = -1;
 	gPreSkinSectionAppliedPresent.clear();
 	gPreSkinCbvReadCache.clear();
@@ -1059,18 +1041,6 @@ static std::wstring ResolveResourcePathLocked(
 	const Bunny::ResourceConfig &config, bool rootFallback)
 {
 	return ResolveResourcePath(config, gBaseDir, rootFallback);
-}
-
-static void LogIaFallbackPathLimited(const char *kind, const std::wstring &section, bool inserted)
-{
-	const LONG count = InterlockedIncrement(&gIaFallbackPathLogCount);
-	if (count > kIaFallbackPathLogLimit)
-		return;
-	DX12LogDebugJsonFunc("DX12FallbackPath",
-		"\"kind\":\"%s\",\"api\":\"DX12ModRuntime::IAOverride\",\"present\":%ld,"
-		"\"section\":\"%S\",\"inserted\":%s,\"logIndex\":%ld",
-		kind ? kind : "", DX12GetPresentCount(), section.c_str(),
-		inserted ? "true" : "false", count);
 }
 
 static bool ResourceConfigLooksLikeBuffer(const Bunny::ResourceConfig &config)

@@ -2,7 +2,7 @@
 
 bool DX12DrawHookFlowNeedsModWork()
 {
-	return DX12ModNeedsPresentReplacement() || DX12ModHasAnyActiveOverrides();
+	return DX12ModNeedsPresentReplacement() || DX12ModHasActiveShaderOverrides();
 }
 
 static void ExecuteOriginalDraw(
@@ -30,10 +30,6 @@ void DX12DrawHookFlowExecute(
 	const DX12CommandListRuntimeState &runtimeState,
 	const DX12IaReplacementExecutorCallbacks &callbacks)
 {
-	// D3D12 draw hooks only record commands; centralizing the flow keeps the
-	// call order stable before later resource-target or barrier work is added.
-	// Present replacements are frame-scoped and uncommon compared to regular
-	// draws, so skip the helper call entirely unless that feature is active.
 	if (DX12ModNeedsPresentReplacement())
 		DX12IaReplacementExecutePresent(commandList, runtimeState, callbacks);
 	if (DX12IaReplacementHandleDrawOverrides(commandList, draw, runtimeState, callbacks))

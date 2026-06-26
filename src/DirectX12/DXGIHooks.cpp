@@ -408,7 +408,7 @@ static HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain *swapChain, UINT s
 		DX12BindingBeginFrame();
 		DX12ShaderDumpBeginCapture();
 	} else if (DX12FrameAnalysisIsCapturing() || DX12ShaderDumpIsCapturingFrame() ||
-	           DX12ModHasActiveTextureOverrides()) {
+	           DX12ModNeedsPreSkinningUavProbe()) {
 		DX12BindingBeginFrame();
 		LogPresentStage("Present", "afterBindingBeginFrame", swapChain, hr);
 	}
@@ -463,7 +463,7 @@ static HRESULT STDMETHODCALLTYPE HookedPresent1(
 		DX12BindingBeginFrame();
 		DX12ShaderDumpBeginCapture();
 	} else if (DX12FrameAnalysisIsCapturing() || DX12ShaderDumpIsCapturingFrame() ||
-	           DX12ModHasActiveTextureOverrides()) {
+	           DX12ModNeedsPreSkinningUavProbe()) {
 		DX12BindingBeginFrame();
 		LogPresentStage("Present1", "afterBindingBeginFrame", swapChain, hr);
 	}

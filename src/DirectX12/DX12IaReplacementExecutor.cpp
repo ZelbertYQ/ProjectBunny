@@ -27,27 +27,6 @@ static bool VertexBufferViewIsBound(const D3D12_VERTEX_BUFFER_VIEW &view)
 	return view.BufferLocation != 0 && view.SizeInBytes != 0;
 }
 
-static bool PrepareIaForMod(
-	ID3D12GraphicsCommandList *commandList,
-	DX12IaHashState *iaState,
-	const DX12IaDrawInvocation &draw,
-	const DX12CommandListRuntimeState &runtimeState,
-	DX12ModIaReplacement *replacement)
-{
-	if (!DX12ModHasActiveTextureOverrides())
-		return false;
-	if (!iaState || !DX12CommandListRuntimeBuildIaHashState(runtimeState.ia, iaState))
-		return false;
-
-	const uint32_t vertexCount = draw.indexed ? 0 : draw.vertexCount;
-	const uint32_t indexCount = draw.indexed ? draw.indexCount : 0;
-	const uint32_t firstVertex = draw.indexed ? 0 : draw.firstVertex;
-	const uint32_t firstIndex = draw.indexed ? draw.firstIndex : 0;
-	return DX12ModPrepareIaReplacement(
-		commandList, *iaState, vertexCount, indexCount, draw.instanceCount,
-		firstVertex, firstIndex, draw.firstInstance, replacement);
-}
-
 static void ApplyIaReplacement(
 	ID3D12GraphicsCommandList *commandList,
 	const DX12ModIaReplacement &replacement,
@@ -204,22 +183,12 @@ bool DX12IaReplacementApplyAndExecute(
 	const DX12IaDrawInvocation &draw,
 	const DX12IaHashState &iaState,
 	DX12ModIaReplacement *replacement,
-	bool fromShaderOverride,
 	const DX12CommandListRuntimeState &runtimeState,
 	const DX12IaReplacementExecutorCallbacks &callbacks)
 {
 	if (!commandList || !replacement)
 		return false;
 	if (replacement->skip && replacement->draws.empty() && replacement->dispatches.empty()) {
-		return true;
-	}
-
-	if (!fromShaderOverride && callbacks.shouldSuppressAutoReplacement &&
-	    callbacks.shouldSuppressAutoReplacement(
-		    commandList, iaState,
-		    draw.vertexCount, draw.indexCount, draw.instanceCount,
-		    draw.firstVertex, draw.firstIndex, draw.baseVertex,
-		    draw.firstInstance, *replacement)) {
 		return true;
 	}
 
@@ -232,16 +201,10 @@ bool DX12IaReplacementApplyAndExecute(
 	ExecuteReplacementDraws(commandList, *replacement, draw, callbacks);
 	RestoreIaReplacement(commandList, *replacement, originalIa, callbacks);
 	DX12Profiling::RecordIaApplied();
-	if (fromShaderOverride) {
-		DX12ModRunPostShaderOverrideReplacement(
-			commandList, runtimeState.pipelineState, iaState,
-			draw.vertexCount, draw.indexCount, draw.instanceCount,
-			draw.firstVertex, draw.firstIndex, replacement);
-	} else {
-		DX12ModRunPostIaReplacement(
-			commandList, iaState, draw.vertexCount, draw.indexCount, draw.instanceCount,
-			draw.firstVertex, draw.firstIndex, draw.firstInstance, replacement);
-	}
+	DX12ModRunPostShaderOverrideReplacement(
+		commandList, runtimeState.pipelineState, iaState,
+		draw.vertexCount, draw.indexCount, draw.instanceCount,
+		draw.firstVertex, draw.firstIndex, replacement);
 	return true;
 }
 
@@ -251,7 +214,7 @@ bool DX12IaReplacementHandleDrawOverrides(
 	const DX12CommandListRuntimeState &runtimeState,
 	const DX12IaReplacementExecutorCallbacks &callbacks)
 {
-	if (!DX12ModHasAnyActiveOverrides())
+	if (!DX12ModHasActiveShaderOverrides())
 		return false;
 
 	DX12Profiling::RecordIaDrawOverrideCheck();
@@ -264,29 +227,12 @@ bool DX12IaReplacementHandleDrawOverrides(
 
 	if (DX12CommandListRuntimeBuildIaHashState(runtimeState.ia, &iaState)) {
 		DX12Profiling::RecordIaHashStateResult(true);
-		if (DX12ModHasActiveShaderOverrides() &&
-		    DX12ModPrepareShaderOverrideReplacement(
-			    commandList, runtimeState.pipelineState, iaState,
-			    vertexCount, indexCount, draw.instanceCount,
-			    firstVertex, firstIndex, &iaReplacement)) {
+		if (DX12ModPrepareShaderOverrideReplacement(
+			commandList, runtimeState.pipelineState, iaState,
+			vertexCount, indexCount, draw.instanceCount,
+			firstVertex, firstIndex, &iaReplacement)) {
 			if (DX12IaReplacementApplyAndExecute(
-				commandList, draw, iaState, &iaReplacement, true,
-				runtimeState, callbacks))
-				return true;
-		}
-		const bool mayHaveTextureMatch =
-			DX12ModHasActiveTextureOverrides() &&
-			DX12ModIaMayHaveTextureOverrideMatch(iaState, draw.indexed);
-		DX12Profiling::RecordIaTextureMayMatchResult(mayHaveTextureMatch);
-		if (!mayHaveTextureMatch)
-			return false;
-		DX12Profiling::RecordIaPrepareCall();
-		if (DX12ModPrepareIaReplacement(
-			commandList, iaState, vertexCount, indexCount, draw.instanceCount,
-			firstVertex, firstIndex, draw.firstInstance, &iaReplacement)) {
-			if (DX12IaReplacementApplyAndExecute(
-				commandList, draw, iaState, &iaReplacement, false,
-				runtimeState, callbacks))
+				commandList, draw, iaState, &iaReplacement, runtimeState, callbacks))
 				return true;
 		}
 		return false;
@@ -295,11 +241,5 @@ bool DX12IaReplacementHandleDrawOverrides(
 	DX12Profiling::RecordIaHashStateResult(false);
 	if (DX12ModShouldSkipPipelineState(runtimeState.pipelineState, false))
 		return true;
-	if (!PrepareIaForMod(commandList, &iaState, draw, runtimeState, &iaReplacement))
-		return false;
-	if (iaReplacement.skip && iaReplacement.draws.empty() &&
-	    iaReplacement.dispatches.empty())
-		return false;
-	return DX12IaReplacementApplyAndExecute(
-		commandList, draw, iaState, &iaReplacement, false, runtimeState, callbacks);
+	return false;
 }

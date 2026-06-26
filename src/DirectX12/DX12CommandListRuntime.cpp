@@ -178,7 +178,6 @@ void DX12CommandListRuntimeResetIa(ID3D12GraphicsCommandList *commandList)
 	DX12CommandListRuntimeState *fastState = GetStatePtrFast(commandList);
 	if (fastState) {
 		fastState->ia = DX12ActiveIaState();
-		fastState->mayHaveIaTextureCandidate = false;
 		return;
 	}
 
@@ -186,7 +185,6 @@ void DX12CommandListRuntimeResetIa(ID3D12GraphicsCommandList *commandList)
 	AcquireSRWLockExclusive(&shard.lock);
 	DX12CommandListRuntimeState &state = shard.states[commandList];
 	state.ia = DX12ActiveIaState();
-	state.mayHaveIaTextureCandidate = false;
 	ReleaseSRWLockExclusive(&shard.lock);
 }
 
@@ -276,42 +274,6 @@ void DX12CommandListRuntimeRememberPrimitiveTopology(
 	AcquireSRWLockExclusive(&shard.lock);
 	shard.states[commandList].ia.primitiveTopology = topology;
 	ReleaseSRWLockExclusive(&shard.lock);
-}
-
-void DX12CommandListRuntimeSetMayHaveIaTextureCandidate(
-	ID3D12GraphicsCommandList *commandList, bool mayHaveCandidate)
-{
-	if (!commandList)
-		return;
-
-	DX12CommandListRuntimeState *fastState = GetStatePtrFast(commandList);
-	if (fastState) {
-		fastState->mayHaveIaTextureCandidate = mayHaveCandidate;
-		return;
-	}
-
-	RuntimeShard &shard = ShardFor(commandList);
-	AcquireSRWLockExclusive(&shard.lock);
-	shard.states[commandList].mayHaveIaTextureCandidate = mayHaveCandidate;
-	ReleaseSRWLockExclusive(&shard.lock);
-}
-
-bool DX12CommandListRuntimeMayHaveIaTextureCandidate(ID3D12GraphicsCommandList *commandList)
-{
-	if (!commandList)
-		return false;
-
-	DX12CommandListRuntimeState *fastState = GetStatePtrFast(commandList);
-	if (fastState)
-		return fastState->mayHaveIaTextureCandidate;
-
-	RuntimeShard &shard = ShardFor(commandList);
-	AcquireSRWLockShared(&shard.lock);
-	auto it = shard.states.find(commandList);
-	const bool result =
-		it != shard.states.end() && it->second.mayHaveIaTextureCandidate;
-	ReleaseSRWLockShared(&shard.lock);
-	return result;
 }
 
 void DX12CommandListRuntimeBumpComputeBindingSerial(ID3D12GraphicsCommandList *commandList)

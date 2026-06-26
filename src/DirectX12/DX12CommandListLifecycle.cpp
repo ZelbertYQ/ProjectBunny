@@ -33,7 +33,7 @@ void DX12CommandListLifecycleReset(
 		DX12BindingResetCommandList(commandList, initialState);
 	if (DX12CommandListCaptureShouldTrackPsoStateCached(commandList))
 		DX12CommandListRuntimeRememberPipelineState(commandList, initialState);
-	if (DX12ModHasActiveTextureOverrides())
+	if (DX12ModHasActiveShaderOverrides())
 		DX12CommandListRuntimeResetIa(commandList);
 	if (DX12CommandListCaptureShouldTrackPsoStateCached(commandList) ||
 	    DX12CommandListCaptureShouldTrackHuntIaCached(commandList))

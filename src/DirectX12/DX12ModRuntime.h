@@ -45,12 +45,6 @@ void DX12ModStoreCachedPreSkinningUavMatch(
 	uint64_t computeShaderHash,
 	UINT64 computeBindingSerial,
 	bool matched);
-bool DX12ModShouldSkipIa(
-	uint32_t ibHash, const uint32_t *vbHashes, size_t vbHashCount,
-	uint32_t vertexCount, uint32_t indexCount, uint32_t instanceCount);
-bool DX12ModIaHashMayHaveTextureOverrideCandidate(
-	uint32_t hash, bool indexBuffer, uint32_t vertexSlot);
-bool DX12ModIaMayHaveTextureOverrideMatch(const DX12IaHashState &iaState, bool indexedCaller);
 struct DX12ModIaReplacement
 {
 	DX12ModIaReplacement() = default;
@@ -167,21 +161,11 @@ struct DX12ModIaReplacement
 	std::vector<DispatchCall> dispatches;
 	std::vector<ID3D12Resource*> retainedResources;
 };
-bool DX12ModPrepareIaReplacement(
-	ID3D12GraphicsCommandList *commandList, const DX12IaHashState &iaState,
-	uint32_t vertexCount, uint32_t indexCount, uint32_t instanceCount,
-	uint32_t firstVertex, uint32_t firstIndex, uint32_t firstInstance,
-	DX12ModIaReplacement *replacement);
 bool DX12ModPrepareShaderOverrideReplacement(
 	ID3D12GraphicsCommandList *commandList, ID3D12PipelineState *pipelineState,
 	const DX12IaHashState &iaState,
 	uint32_t vertexCount, uint32_t indexCount, uint32_t instanceCount,
 	uint32_t firstVertex, uint32_t firstIndex,
-	DX12ModIaReplacement *replacement);
-void DX12ModRunPostIaReplacement(
-	ID3D12GraphicsCommandList *commandList, const DX12IaHashState &iaState,
-	uint32_t vertexCount, uint32_t indexCount, uint32_t instanceCount,
-	uint32_t firstVertex, uint32_t firstIndex, uint32_t firstInstance,
 	DX12ModIaReplacement *replacement);
 void DX12ModRunPostShaderOverrideReplacement(
 	ID3D12GraphicsCommandList *commandList, ID3D12PipelineState *pipelineState,

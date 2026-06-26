@@ -46,7 +46,6 @@ struct DX12CommandListRuntimeState
 	ID3D12PipelineState *pipelineState = nullptr;
 	volatile UINT64 computeBindingSerial = 0;
 	DX12ActiveIaState ia;
-	bool mayHaveIaTextureCandidate = false;
 	DX12CommandListTrackingCache trackingCache;
 
 	ID3D12DescriptorHeap *cbvSrvUavHeap = nullptr;
@@ -69,9 +68,6 @@ void DX12CommandListRuntimeRememberVertexBuffers(
 	const D3D12_VERTEX_BUFFER_VIEW *views);
 void DX12CommandListRuntimeRememberPrimitiveTopology(
 	ID3D12GraphicsCommandList *commandList, D3D12_PRIMITIVE_TOPOLOGY topology);
-void DX12CommandListRuntimeSetMayHaveIaTextureCandidate(
-	ID3D12GraphicsCommandList *commandList, bool mayHaveCandidate);
-bool DX12CommandListRuntimeMayHaveIaTextureCandidate(ID3D12GraphicsCommandList *commandList);
 void DX12CommandListRuntimeBumpComputeBindingSerial(ID3D12GraphicsCommandList *commandList);
 bool DX12CommandListRuntimeBuildIaHashState(
 	const DX12ActiveIaState &ia, DX12IaHashState *state);

@@ -27,7 +27,7 @@ bool DX12CommandListCaptureShouldTrackHuntIa()
 bool DX12CommandListCaptureShouldTrackPsoState()
 {
 	return DX12HuntIsEnabled() || DX12ModHasActiveShaderOverrides() ||
-		DX12ModHasActiveTextureOverrides() || DX12ModNeedsPreSkinningUavProbe();
+		DX12ModNeedsPreSkinningUavProbe();
 }
 
 
@@ -223,7 +223,7 @@ void DX12CommandListCaptureIndexBuffer(
 		DX12BindingSetIndexBuffer(commandList, view);
 	if (DX12CommandListCaptureShouldTrackHuntIaCached(commandList))
 		DX12HuntSetIndexBuffer(commandList, view);
-	if (DX12ModHasActiveTextureOverrides())
+	if (DX12ModHasActiveShaderOverrides())
 		DX12CommandListRuntimeRememberIndexBuffer(commandList, view);
 }
 
@@ -235,6 +235,6 @@ void DX12CommandListCaptureVertexBuffers(
 		DX12BindingSetVertexBuffers(commandList, startSlot, count, views);
 	if (DX12CommandListCaptureShouldTrackHuntIaCached(commandList))
 		DX12HuntSetVertexBuffers(commandList, startSlot, count, views);
-	if (DX12ModHasActiveTextureOverrides())
+	if (DX12ModHasActiveShaderOverrides())
 		DX12CommandListRuntimeRememberVertexBuffers(commandList, startSlot, count, views);
 }

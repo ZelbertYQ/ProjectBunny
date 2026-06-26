@@ -60,16 +60,6 @@ static std::unordered_map<std::wstring, bool> gCommandListRuntimeEffect;
 static std::unordered_map<std::wstring, bool> gTextureOverridePreRuntimeEffect;
 static std::unordered_map<std::wstring, bool> gTextureOverridePostRuntimeEffect;
 static std::unordered_map<std::wstring, uint32_t> gTextureOverrideSectionIds;
-static LONG gIaFallbackPathLogCount = 0;
-static constexpr LONG kIaFallbackPathLogLimit = 64;
-struct DX12RelatedTextureOverrideCandidate
-{
-	Bunny::TextureOverrideConfig config;
-	std::set<std::wstring> tokens;
-	uint32_t sectionId = 0;
-};
-static std::vector<DX12RelatedTextureOverrideCandidate> gRelatedTextureOverrides;
-static std::unordered_map<std::wstring, std::vector<size_t>> gRelatedTextureOverrideTokenIndex;
 struct DX12IaTextureOverrideCandidate
 {
 	Bunny::TextureOverrideConfig config;
@@ -88,130 +78,58 @@ struct DX12TriggeredTextureOverride
 	DX12TriggeredTextureOverride() = default;
 	DX12TriggeredTextureOverride(const DX12TriggeredTextureOverride &other)
 		: config(other.config),
-		  fallbackConfig(other.fallbackConfig),
 		  sectionId(other.sectionId),
 		  postRuntimeEffect(other.postRuntimeEffect),
 		  indexBuffer(other.indexBuffer),
 		  vertexSlot(other.vertexSlot),
 		  executeCommands(other.executeCommands),
-		  executeDrawActions(other.executeDrawActions),
-		  directIaAnchor(other.directIaAnchor),
-		  relatedMesh(other.relatedMesh),
-		  preSkinAnchor(other.preSkinAnchor),
-		  preSkinResource(other.preSkinResource),
-		  preSkinByteWidth(other.preSkinByteWidth),
-		  preSkinStride(other.preSkinStride),
-		  preSkinDescriptor(other.preSkinDescriptor),
-		  preSkinHasDescriptor(other.preSkinHasDescriptor)
+		  executeDrawActions(other.executeDrawActions)
 	{
-		if (preSkinResource)
-			preSkinResource->AddRef();
 	}
 	DX12TriggeredTextureOverride(DX12TriggeredTextureOverride &&other) noexcept
 		: config(other.config),
-		  fallbackConfig(std::move(other.fallbackConfig)),
 		  sectionId(other.sectionId),
 		  postRuntimeEffect(other.postRuntimeEffect),
 		  indexBuffer(other.indexBuffer),
 		  vertexSlot(other.vertexSlot),
 		  executeCommands(other.executeCommands),
-		  executeDrawActions(other.executeDrawActions),
-		  directIaAnchor(other.directIaAnchor),
-		  relatedMesh(other.relatedMesh),
-		  preSkinAnchor(other.preSkinAnchor),
-		  preSkinResource(other.preSkinResource),
-		  preSkinByteWidth(other.preSkinByteWidth),
-		  preSkinStride(other.preSkinStride),
-		  preSkinDescriptor(other.preSkinDescriptor),
-		  preSkinHasDescriptor(other.preSkinHasDescriptor)
+		  executeDrawActions(other.executeDrawActions)
 	{
-		other.preSkinResource = nullptr;
-		other.preSkinByteWidth = 0;
-		other.preSkinStride = 0;
-		other.preSkinHasDescriptor = false;
-	}
-	~DX12TriggeredTextureOverride()
-	{
-		if (preSkinResource)
-			preSkinResource->Release();
 	}
 	DX12TriggeredTextureOverride &operator=(const DX12TriggeredTextureOverride &other)
 	{
 		if (this == &other)
 			return *this;
-		if (preSkinResource)
-			preSkinResource->Release();
 		config = other.config;
-		fallbackConfig = other.fallbackConfig;
 		sectionId = other.sectionId;
 		postRuntimeEffect = other.postRuntimeEffect;
 		indexBuffer = other.indexBuffer;
 		vertexSlot = other.vertexSlot;
 		executeCommands = other.executeCommands;
 		executeDrawActions = other.executeDrawActions;
-		directIaAnchor = other.directIaAnchor;
-		relatedMesh = other.relatedMesh;
-		preSkinAnchor = other.preSkinAnchor;
-		preSkinResource = other.preSkinResource;
-		preSkinByteWidth = other.preSkinByteWidth;
-		preSkinStride = other.preSkinStride;
-		preSkinDescriptor = other.preSkinDescriptor;
-		preSkinHasDescriptor = other.preSkinHasDescriptor;
-		if (preSkinResource)
-			preSkinResource->AddRef();
 		return *this;
 	}
 	DX12TriggeredTextureOverride &operator=(DX12TriggeredTextureOverride &&other) noexcept
 	{
 		if (this == &other)
 			return *this;
-		if (preSkinResource)
-			preSkinResource->Release();
 		config = other.config;
-		fallbackConfig = std::move(other.fallbackConfig);
 		sectionId = other.sectionId;
 		postRuntimeEffect = other.postRuntimeEffect;
 		indexBuffer = other.indexBuffer;
 		vertexSlot = other.vertexSlot;
 		executeCommands = other.executeCommands;
 		executeDrawActions = other.executeDrawActions;
-		directIaAnchor = other.directIaAnchor;
-		relatedMesh = other.relatedMesh;
-		preSkinAnchor = other.preSkinAnchor;
-		preSkinResource = other.preSkinResource;
-		preSkinByteWidth = other.preSkinByteWidth;
-		preSkinStride = other.preSkinStride;
-		preSkinDescriptor = other.preSkinDescriptor;
-		preSkinHasDescriptor = other.preSkinHasDescriptor;
-		other.preSkinResource = nullptr;
-		other.preSkinByteWidth = 0;
-		other.preSkinStride = 0;
-		other.preSkinHasDescriptor = false;
 		return *this;
 	}
 	const Bunny::TextureOverrideConfig *config = nullptr;
-	Bunny::TextureOverrideConfig fallbackConfig;
 	uint32_t sectionId = 0;
 	bool postRuntimeEffect = true;
 	bool indexBuffer = false;
 	uint32_t vertexSlot = 0;
 	bool executeCommands = false;
 	bool executeDrawActions = true;
-	bool directIaAnchor = false;
-	bool relatedMesh = false;
-	bool preSkinAnchor = false;
-	ID3D12Resource *preSkinResource = nullptr;
-	UINT64 preSkinByteWidth = 0;
-	UINT preSkinStride = 0;
-	DX12DescriptorSummary preSkinDescriptor;
-	bool preSkinHasDescriptor = false;
 };
-
-static const Bunny::TextureOverrideConfig &TriggeredTextureOverrideConfig(
-	const DX12TriggeredTextureOverride &entry)
-{
-	return entry.config ? *entry.config : entry.fallbackConfig;
-}
 
 static uint64_t HashCombine64(uint64_t hash, uint64_t value)
 {
@@ -283,11 +201,6 @@ struct DX12PreSkinUavMatchCacheEntry
 };
 static std::unordered_map<ID3D12GraphicsCommandList*, DX12PreSkinUavMatchCacheEntry> gPreSkinUavMatchCache;
 static volatile LONG gDx12SafeMode = 0;
-static std::unordered_map<uint64_t, bool> gIaSkipCache;
-static std::unordered_map<uint64_t, bool> gIaTextureCandidateCache;
-static std::unordered_map<uint64_t, std::vector<DX12TriggeredTextureOverride>> gIaReplacementMatchCache;
-static std::unordered_map<uint64_t, DX12ModIaReplacement> gIaReplacementPreparedFrameCache;
-static LONG gIaReplacementPrepareCachePresent = -1;
 static volatile LONG gPresentCommandListExecutedPresent = -1;
 static UINT64 gPreSkinActiveGeneration = 1;
 static UINT64 gPreSkinSrvCacheGeneration = 1;
