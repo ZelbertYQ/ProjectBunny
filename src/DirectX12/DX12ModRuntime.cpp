@@ -1057,6 +1057,18 @@ static void RetirePreSkinDescriptorHeap(ID3D12DescriptorHeap *heap)
 	gPendingPreSkinSubmissions[nullptr].descriptorHeaps.push_back(heap);
 	ReleaseSRWLockExclusive(&gPreSkinRetireLock);
 }
+
+static void RetirePreSkinDescriptorHeapForCommandList(
+	ID3D12GraphicsCommandList *commandList, ID3D12DescriptorHeap *heap)
+{
+	if (!heap)
+		return;
+	IUnknown *identity = PreSkinCommandListIdentity(commandList);
+	AcquireSRWLockExclusive(&gPreSkinRetireLock);
+	gPendingPreSkinSubmissions[identity].descriptorHeaps.push_back(heap);
+	ReleaseSRWLockExclusive(&gPreSkinRetireLock);
+}
+
 void DX12ModNotifyCommandListsSubmitted(
 	ID3D12CommandQueue *queue, UINT numCommandLists, ID3D12CommandList *const *commandLists)
 {
@@ -1105,6 +1117,10 @@ void DX12ModNotifyCommandListsSubmitted(
 	ID3D12Fence *fence = nullptr;
 	UINT64 fenceValue = 0;
 	if (!PreparePreSkinRetireFence(queue, &fence, &fenceValue, &releaseBatch)) {
+		DX12LogDebugJsonFunc("DX12PreSkinRetireSubmit",
+			"\"status\":\"requeued\",\"reason\":\"prepare_fence_failed\",\"present\":%ld,\"queue\":\"%p\",\"resources\":%zu,\"descriptorHeaps\":%zu",
+			DX12GetPresentCount(), queue,
+			pending.resources.size(), pending.descriptorHeaps.size());
 		AcquireSRWLockExclusive(&gPreSkinRetireLock);
 		RequeuePendingPreSkinSubmissionLocked(&pending);
 		ReleaseSRWLockExclusive(&gPreSkinRetireLock);
@@ -1121,6 +1137,10 @@ void DX12ModNotifyCommandListsSubmitted(
 
 	AcquireSRWLockExclusive(&gPreSkinRetireLock);
 	if (FAILED(hr)) {
+		DX12LogDebugJsonFunc("DX12PreSkinRetireSubmit",
+			"\"status\":\"requeued\",\"reason\":\"signal_failed\",\"hr\":\"0x%lx\",\"present\":%ld,\"queue\":\"%p\",\"resources\":%zu,\"descriptorHeaps\":%zu",
+			hr, DX12GetPresentCount(), queue,
+			pending.resources.size(), pending.descriptorHeaps.size());
 		RequeuePendingPreSkinSubmissionLocked(&pending);
 		ReleaseSRWLockExclusive(&gPreSkinRetireLock);
 		fence->Release();
@@ -1172,17 +1192,20 @@ static void ReleasePreSkinDescriptorRingLocked(DX12PreSkinReleaseBatch *releaseB
 }
 
 static bool EnsurePreSkinDescriptorRingLocked(
-	ID3D12Device *device, UINT requiredDescriptors,
+	ID3D12Device *device, ID3D12GraphicsCommandList *commandList, UINT requiredDescriptors,
 	D3D12_CPU_DESCRIPTOR_HANDLE *cpuBase,
 	D3D12_GPU_DESCRIPTOR_HANDLE *gpuBase,
-	UINT *increment)
+	UINT *increment,
+	ID3D12DescriptorHeap **heapOut)
 {
-	if (!device || !requiredDescriptors || !cpuBase || !gpuBase || !increment)
+	if (!device || !requiredDescriptors || !cpuBase || !gpuBase || !increment || !heapOut)
 		return false;
+	*heapOut = nullptr;
 
 	for (;;) {
 		ID3D12DescriptorHeap *oldHeap = nullptr;
 		ID3D12Device *oldDevice = nullptr;
+		ID3D12DescriptorHeap *usedHeap = nullptr;
 		UINT capacityToCreate = 0;
 		AcquireSRWLockExclusive(&gPreSkinDescriptorRingLock);
 		const bool needsNewHeap =
@@ -1200,10 +1223,16 @@ static bool EnsurePreSkinDescriptorRingLocked(
 			gpu.ptr += static_cast<UINT64>(gPreSkinDescriptorRing.offset) *
 				gPreSkinDescriptorRing.increment;
 			gPreSkinDescriptorRing.offset += requiredDescriptors;
+			usedHeap = gPreSkinDescriptorRing.heap;
+			if (usedHeap)
+				usedHeap->AddRef();
 			*cpuBase = cpu;
 			*gpuBase = gpu;
 			*increment = gPreSkinDescriptorRing.increment;
+			*heapOut = usedHeap;
 			ReleaseSRWLockExclusive(&gPreSkinDescriptorRingLock);
+			if (usedHeap)
+				RetirePreSkinDescriptorHeapForCommandList(commandList, usedHeap);
 			return true;
 		}
 		capacityToCreate = (std::max)(
@@ -1237,22 +1266,31 @@ static bool EnsurePreSkinDescriptorRingLocked(
 		device->AddRef();
 		gPreSkinDescriptorRing.device = device;
 		gPreSkinDescriptorRing.heap = newHeap;
+		usedHeap = newHeap;
+		usedHeap->AddRef();
 		gPreSkinDescriptorRing.capacity = capacityToCreate;
-		gPreSkinDescriptorRing.offset = 0;
+		gPreSkinDescriptorRing.offset = requiredDescriptors;
 		gPreSkinDescriptorRing.increment =
 			device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 		gPreSkinDescriptorRing.present = DX12GetPresentCount();
+		*cpuBase = usedHeap->GetCPUDescriptorHandleForHeapStart();
+		*gpuBase = usedHeap->GetGPUDescriptorHandleForHeapStart();
+		*increment = gPreSkinDescriptorRing.increment;
+		*heapOut = usedHeap;
 		ReleaseSRWLockExclusive(&gPreSkinDescriptorRingLock);
 
 		if (oldHeap)
 			RetirePreSkinDescriptorHeap(oldHeap);
 		if (oldDevice)
 			oldDevice->Release();
+		if (usedHeap)
+			RetirePreSkinDescriptorHeapForCommandList(commandList, usedHeap);
 #if defined(_DEBUG)
 		DX12LogDebugJsonFunc("DX12PreSkinDescriptorRing",
 			"\"status\":\"created\",\"capacity\":%u,\"required\":%u",
 			capacityToCreate, requiredDescriptors);
 #endif
+		return true;
 	}
 }
 

@@ -1195,8 +1195,10 @@ static bool ApplyPreSkinDescriptorTablePatchLocked(
 	D3D12_CPU_DESCRIPTOR_HANDLE tempCpuBase = {};
 	D3D12_GPU_DESCRIPTOR_HANDLE tempGpuBase = {};
 	UINT tempIncrement = 0;
+	ID3D12DescriptorHeap *tempHeap = nullptr;
 	if (!EnsurePreSkinDescriptorRingLocked(
-		    device, totalDescriptors, &tempCpuBase, &tempGpuBase, &tempIncrement)) {
+		    device, commandList, totalDescriptors, &tempCpuBase, &tempGpuBase, &tempIncrement,
+		    &tempHeap)) {
 		logStage("descriptor_ring_failed", static_cast<UINT>(tables.size()), totalDescriptors);
 		return false;
 	}
@@ -1354,8 +1356,8 @@ static bool ApplyPreSkinDescriptorTablePatchLocked(
 	ID3D12DescriptorHeap *restoreSamplerHeap = nullptr;
 	DX12BindingGetCurrentDescriptorHeaps(
 		commandList, &restoreCbvSrvUavHeap, &restoreSamplerHeap);
-	if (restoreCbvSrvUavHeap != gPreSkinDescriptorRing.heap) {
-		ID3D12DescriptorHeap *heaps[2] = { gPreSkinDescriptorRing.heap, restoreSamplerHeap };
+	if (restoreCbvSrvUavHeap != tempHeap) {
+		ID3D12DescriptorHeap *heaps[2] = { tempHeap, restoreSamplerHeap };
 		logStage("before_set_heaps", static_cast<UINT>(tables.size()), totalDescriptors);
 		commandList->SetDescriptorHeaps(restoreSamplerHeap ? 2 : 1, heaps);
 		logStage("after_set_heaps", static_cast<UINT>(tables.size()), totalDescriptors);
@@ -1375,7 +1377,7 @@ static bool ApplyPreSkinDescriptorTablePatchLocked(
 		if (state.resource)
 			state.resource->AddRef();
 	}
-	state.patchHeap = gPreSkinDescriptorRing.heap;
+	state.patchHeap = tempHeap;
 	state.restoreCbvSrvUavHeap = restoreCbvSrvUavHeap;
 	state.restoreSamplerHeap = restoreSamplerHeap;
 	state.temporaryResources = temporaryResources;
@@ -1795,14 +1797,12 @@ void DX12ModRestorePreSkinningUavReplacement(ID3D12GraphicsCommandList *commandL
 	if (state.patchHeap) {
 		ID3D12DescriptorHeap *restoreCbvSrvUavHeap =
 			state.restoreCbvSrvUavHeap ? state.restoreCbvSrvUavHeap : state.originalHeap;
-		ID3D12DescriptorHeap *heaps[2] = {
-			restoreCbvSrvUavHeap, state.restoreSamplerHeap
-		};
+		ID3D12DescriptorHeap *heaps[2] = {};
 		UINT heapCount = 0;
-		if (heaps[0])
-			heapCount++;
-		if (heaps[1])
-			heapCount++;
+		if (restoreCbvSrvUavHeap)
+			heaps[heapCount++] = restoreCbvSrvUavHeap;
+		if (state.restoreSamplerHeap)
+			heaps[heapCount++] = state.restoreSamplerHeap;
 		ID3D12DescriptorHeap *currentCbvSrvUavHeap = nullptr;
 		ID3D12DescriptorHeap *currentSamplerHeap = nullptr;
 		DX12BindingGetCurrentDescriptorHeaps(
