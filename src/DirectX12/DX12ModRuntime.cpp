@@ -3627,6 +3627,49 @@ static bool HasMatchCsTextureOverrideLocked(uint64_t csHash)
 	return indexed != gPreSkinMatchCsTextureOverrideIndex.end() &&
 		!indexed->second.empty();
 }
+
+static void LogPreSkinMatchCsOutputProbeLimited(
+	uint64_t csHash,
+	const DX12UavHashTextureOverrideMatch &match,
+	const std::vector<DX12CurrentComputeUavBinding> &uavs)
+{
+#if defined(_DEBUG)
+	static SRWLOCK logLock = SRWLOCK_INIT;
+	static std::unordered_set<uint64_t> logged;
+	uint64_t key = HashCombine64(csHash, match.hash);
+	key = HashCombine64(key, uavs.size());
+	for (const DX12CurrentComputeUavBinding &uav : uavs) {
+		key = HashCombine64(key, uav.rootParameterIndex);
+		key = HashCombine64(key, uav.rangeIndex);
+		key = HashCombine64(key, uav.shaderRegister);
+		key = HashCombine64(key, uav.descriptorOffset);
+		key = HashCombine64(key, reinterpret_cast<uint64_t>(uav.descriptor.resource));
+		key = HashCombine64(key, uav.hasDescriptor ? 1 : 0);
+		key = HashCombine64(key, uav.rootDescriptor ? 1 : 0);
+		key = HashCombine64(key, uav.tableGpuStart.ptr);
+	}
+	bool emit = false;
+	AcquireSRWLockExclusive(&logLock);
+	if (logged.size() > 256)
+		logged.clear();
+	emit = logged.insert(key).second;
+	ReleaseSRWLockExclusive(&logLock);
+	if (!emit)
+		return;
+	char uavText[768] = {};
+	AppendComputeBindingHashList(uavs, false, uavText, sizeof(uavText));
+	DX12LogDebugJsonFunc("DX12PreSkinMatchCsOutput",
+		"\"status\":\"no_uav_output\",\"cs\":\"%016llx\",\"section\":\"%S\",\"targetHash\":\"%08x\",\"uavs\":%zu,\"uavList\":\"%s\"",
+		static_cast<unsigned long long>(csHash),
+		match.config.originalSection.empty() ? match.config.section.c_str() : match.config.originalSection.c_str(),
+		match.hash, uavs.size(), uavText);
+#else
+	(void)csHash;
+	(void)match;
+	(void)uavs;
+#endif
+}
+
 static bool IsPreSkinMatchCsUavCandidate(const DX12CurrentComputeUavBinding &binding)
 {
 	if (!binding.hasDescriptor || binding.rootDescriptor || !binding.descriptorIncrement ||
@@ -3662,16 +3705,9 @@ static bool FindPreSkinProducerByMatchCsLocked(
 		}
 	}
 	if (!chosenBinding) {
-		for (const DX12CurrentComputeUavBinding &srv : srvs) {
-			if (srv.hasDescriptor && !srv.rootDescriptor && srv.descriptorIncrement &&
-			    srv.tableCpuStart && srv.tableGpuStart.ptr) {
-				chosenBinding = &srv;
-				break;
-			}
-		}
-	}
-	if (!chosenBinding)
+		LogPreSkinMatchCsOutputProbeLimited(csHash, candidateMatch, uavs);
 		return false;
+	}
 
 	DX12ComputeUavProducer candidate = {};
 	candidate.rootParameterIndex = chosenBinding->rootParameterIndex;
@@ -3755,7 +3791,32 @@ static bool ApplyPreSkinDescriptorTablePatchLocked(
 {
 	if (!device || !commandList || !uavBinding.hasDescriptor || !uavBinding.tableGpuStart.ptr)
 		return false;
-	auto logStage = [](const char*, UINT = 0, UINT = 0) {};
+	auto logStage = [&config, section, triggerHash](const char *stage, UINT tables = 0, UINT descriptors = 0) {
+#if defined(_DEBUG)
+		static SRWLOCK logLock = SRWLOCK_INIT;
+		static std::unordered_set<uint64_t> logged;
+		uint64_t key = HashCombine64(triggerHash, reinterpret_cast<uint64_t>(stage));
+		key = HashCombine64(key, tables);
+		key = HashCombine64(key, descriptors);
+		bool emit = false;
+		AcquireSRWLockExclusive(&logLock);
+		if (logged.size() > 512)
+			logged.clear();
+		emit = logged.insert(key).second;
+		ReleaseSRWLockExclusive(&logLock);
+		if (!emit)
+			return;
+		DX12LogDebugJsonFunc("DX12PreSkinDescriptorPatch",
+			"\"stage\":\"%s\",\"section\":\"%S\",\"triggerHash\":\"%08x\",\"tables\":%u,\"descriptors\":%u",
+			stage ? stage : "", section ? section :
+			(config.originalSection.empty() ? config.section.c_str() : config.originalSection.c_str()),
+			triggerHash, tables, descriptors);
+#else
+		(void)stage;
+		(void)tables;
+		(void)descriptors;
+#endif
+	};
 	logStage("enter");
 
 
@@ -3875,14 +3936,10 @@ static bool ApplyPreSkinDescriptorTablePatchLocked(
 		if (!canPatchCount) {
 #if defined(_DEBUG)
 			DX12LogDebugJsonFunc("DX12PreSkinningApply",
-				"\"status\":\"skip_resized_count_unpatchable\",\"section\":\"%S\",\"triggerHash\":\"%08x\",\"old\":%u,\"new\":%u,\"cbvs\":%zu",
+				"\"status\":\"resized_count_unpatchable\",\"section\":\"%S\",\"triggerHash\":\"%08x\",\"old\":%u,\"new\":%u,\"cbvs\":%zu",
 				section ? section : L"", triggerHash,
 				originalVertexCount, overrideVertexCount, cbvs.size());
 #endif
-			if (gPreSkinDescriptorPatchAbortCache.size() > 2048)
-				gPreSkinDescriptorPatchAbortCache.clear();
-			gPreSkinDescriptorPatchAbortCache.insert(abortCacheKey);
-			return false;
 		}
 	}
 
@@ -4024,7 +4081,7 @@ static bool ApplyPreSkinDescriptorTablePatchLocked(
 		return false;
 	}
 
-	if (requiresCountPatch) {
+	if (requiresCountPatch && canPatchCount) {
 		bool patchedCountCbv = false;
 		for (const DX12CurrentComputeUavBinding &cbv : cbvs) {
 			if (!cbv.hasDescriptor || cbv.rootDescriptor || cbv.descriptor.kind != "CBV")
@@ -4047,14 +4104,10 @@ static bool ApplyPreSkinDescriptorTablePatchLocked(
 			temporaryResources.clear();
 #if defined(_DEBUG)
 			DX12LogDebugJsonFunc("DX12PreSkinningApply",
-				"\"status\":\"skip_resized_count_unpatched\",\"section\":\"%S\",\"triggerHash\":\"%08x\",\"old\":%u,\"new\":%u,\"cbvs\":%zu",
+				"\"status\":\"resized_count_unpatched\",\"section\":\"%S\",\"triggerHash\":\"%08x\",\"old\":%u,\"new\":%u,\"cbvs\":%zu",
 				section ? section : L"", triggerHash,
 				originalVertexCount, overrideVertexCount, cbvs.size());
 #endif
-			if (gPreSkinDescriptorPatchAbortCache.size() > 2048)
-				gPreSkinDescriptorPatchAbortCache.clear();
-			gPreSkinDescriptorPatchAbortCache.insert(abortCacheKey);
-			return false;
 		}
 	}
 	ID3D12DescriptorHeap *restoreCbvSrvUavHeap = nullptr;
