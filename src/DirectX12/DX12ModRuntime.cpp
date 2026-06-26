@@ -292,6 +292,7 @@ static UINT64 gPreSkinSrvCacheGeneration = 1;
 static volatile LONG gPreSkinMatchCsProbeLogCount = 0;
 static SRWLOCK gPreSkinMatchCsProbeLogLock = SRWLOCK_INIT;
 static std::unordered_set<uint64_t> gPreSkinMatchCsProbeKeys;
+static std::unordered_map<uint64_t, bool> gPreSkinMatchCsInputCache;
 struct DX12ShaderOverridePsoMatchCache
 {
 	UINT64 generation = 0;
@@ -1898,6 +1899,7 @@ bool DX12ModRuntimeLoad(
 	gPreSkinSrvPositiveCache.clear();
 	gPreSkinSrvStablePositiveCache.clear();
 	gPreSkinUavMatchCache.clear();
+	gPreSkinMatchCsInputCache.clear();
 	gPreSkinMatchCsProbeKeys.clear();
 	InterlockedExchange(&gPreSkinMatchCsProbeLogCount, 0);
 	++gPreSkinActiveGeneration;
@@ -2964,6 +2966,24 @@ static uint64_t HashComputeCbvListForProbe(
 	const std::vector<DX12CurrentComputeUavBinding> &cbvs);
 static uint64_t HashComputeRootConstantsForProbe(
 	const std::vector<DX12CurrentRootConstants> &rootConstants);
+static uint64_t MakePreSkinMatchCsInputCacheKey(
+	uint64_t csHash, const DX12PreSkinTextureOverrideCandidate &candidate,
+	UINT64 uavViewBytes,
+	const std::vector<DX12CurrentComputeUavBinding> &uavs,
+	const std::vector<DX12CurrentComputeUavBinding> &srvs,
+	const std::vector<DX12CurrentComputeUavBinding> &cbvs,
+	const std::vector<DX12CurrentRootConstants> &rootConstants)
+{
+	uint64_t key = HashCombine64(gReloadGeneration, csHash);
+	key = HashCombine64(key, candidate.hash);
+	key = HashCombine64(key, uavViewBytes);
+	key = HashCombine64(key, HashComputeBindingListForProbe(uavs, false));
+	key = HashCombine64(key, HashComputeBindingListForProbe(srvs, true));
+	key = HashCombine64(key, HashComputeCbvListForProbe(cbvs));
+	key = HashCombine64(key, HashComputeRootConstantsForProbe(rootConstants));
+	return key;
+}
+
 static void LogPreSkinMatchCsProbeLimited(
 	uint64_t csHash, const DX12PreSkinTextureOverrideCandidate &candidate,
 	UINT64 uavViewBytes, bool inputMatched,
@@ -2972,12 +2992,8 @@ static void LogPreSkinMatchCsProbeLimited(
 	const std::vector<DX12CurrentComputeUavBinding> &cbvs,
 	const std::vector<DX12CurrentRootConstants> &rootConstants)
 {
-	uint64_t probeKey = HashCombine64(csHash, candidate.hash);
-	probeKey = HashCombine64(probeKey, uavViewBytes);
-	probeKey = HashCombine64(probeKey, HashComputeBindingListForProbe(uavs, false));
-	probeKey = HashCombine64(probeKey, HashComputeBindingListForProbe(srvs, true));
-	probeKey = HashCombine64(probeKey, HashComputeCbvListForProbe(cbvs));
-	probeKey = HashCombine64(probeKey, HashComputeRootConstantsForProbe(rootConstants));
+	const uint64_t probeKey = MakePreSkinMatchCsInputCacheKey(
+		csHash, candidate, uavViewBytes, uavs, srvs, cbvs, rootConstants);
 	bool emit = false;
 	AcquireSRWLockExclusive(&gPreSkinMatchCsProbeLogLock);
 	if (gPreSkinMatchCsProbeLogCount < 256 &&
@@ -2988,6 +3004,7 @@ static void LogPreSkinMatchCsProbeLimited(
 	ReleaseSRWLockExclusive(&gPreSkinMatchCsProbeLogLock);
 	if (!emit)
 		return;
+#if defined(_DEBUG)
 	char uavText[512] = {};
 	char srvText[768] = {};
 	char cbvText[768] = {};
@@ -3004,6 +3021,7 @@ static void LogPreSkinMatchCsProbeLimited(
 		static_cast<unsigned long long>(uavViewBytes),
 		candidate.config.hasMatchUavBytes ? static_cast<unsigned long long>(candidate.config.matchUavBytes) : 0ull,
 		inputMatched ? "true" : "false", uavText, srvText, cbvText, rootText);
+#endif
 }
 static void AppendComputeCbvList(
 	const std::vector<DX12CurrentComputeUavBinding> &cbvs, char *text, size_t textSize)
@@ -3262,7 +3280,18 @@ static bool FindMatchCsTextureOverrideLocked(
 		const Bunny::TextureOverrideConfig &config = candidate.config;
 		if (!IsComputePreSkinTextureOverride(config) || config.matchCs != csHash)
 			continue;
-		const bool inputMatched = MatchComputeInputSrvsTextureOverrideLocked(srvs, config);
+		const uint64_t inputKey = MakePreSkinMatchCsInputCacheKey(
+			csHash, candidate, 0, uavs, srvs, cbvs, rootConstants);
+		bool inputMatched = false;
+		auto cachedInput = gPreSkinMatchCsInputCache.find(inputKey);
+		if (cachedInput != gPreSkinMatchCsInputCache.end()) {
+			inputMatched = cachedInput->second;
+		} else {
+			inputMatched = MatchComputeInputSrvsTextureOverrideLocked(srvs, config);
+			if (gPreSkinMatchCsInputCache.size() > 4096)
+				gPreSkinMatchCsInputCache.clear();
+			gPreSkinMatchCsInputCache[inputKey] = inputMatched;
+		}
 		LogPreSkinMatchCsProbeLimited(csHash, candidate, 0, inputMatched, uavs, srvs, cbvs, rootConstants);
 		if (!inputMatched)
 			continue;

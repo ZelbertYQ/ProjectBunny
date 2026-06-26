@@ -114,6 +114,15 @@ static void PreparePreSkinProbe(
 		return;
 	}
 	probe->computeBindingSerial = computeBindingSerial;
+	bool cachedMatch = false;
+	if (DX12ModHasCachedPreSkinningUavMatch(
+		    commandList, probe->computeShaderHash, computeBindingSerial, &cachedMatch) &&
+	    !cachedMatch) {
+		LogPreSkinDispatchProbeReason(
+			"cached_no_uav_match", probe->computeShaderHash,
+			computeBindingSerial, 0);
+		return;
+	}
 #if defined(_DEBUG)
 	probe->shouldLog = true;
 #endif
@@ -139,6 +148,9 @@ static void PreparePreSkinProbe(
 		probe->rootConstantsFound ? probe->rootConstants : kEmptyRootConstants,
 		&probe->originalVertexCount, &probe->overrideVertexCount,
 		&probe->dispatchOverride);
+	DX12ModStoreCachedPreSkinningUavMatch(
+		commandList, probe->computeShaderHash, computeBindingSerial,
+		probe->applied);
 }
 
 static void FinishPreSkinProbe(
