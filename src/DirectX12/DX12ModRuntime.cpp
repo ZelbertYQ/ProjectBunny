@@ -442,8 +442,52 @@ struct DX12PreSkinSrvPositiveCacheValue
 static std::map<DX12PreSkinCbvReadCacheKey, DX12PreSkinCbvReadCacheValue> gPreSkinCbvReadCache;
 static std::set<UINT64> gPreSkinSrvNegativeCache;
 static std::set<UINT64> gPreSkinSrvStableNegativeCache;
+static std::set<UINT64> gPreSkinDescriptorPatchAbortCache;
 static std::map<UINT64, DX12PreSkinSrvPositiveCacheValue> gPreSkinSrvPositiveCache;
 static std::map<UINT64, DX12PreSkinSrvPositiveCacheValue> gPreSkinSrvStablePositiveCache;
+
+static UINT64 DescriptorViewSize(const DX12DescriptorSummary &descriptor);
+static uint64_t HashComputeCbvListForProbe(
+	const std::vector<DX12CurrentComputeUavBinding> &cbvs);
+
+static UINT64 HashWideString(UINT64 key, const std::wstring &text)
+{
+	for (wchar_t ch : text) {
+		key = HashCombine64(key, static_cast<UINT64>(ch & 0xffff));
+	}
+	return key;
+}
+
+static UINT64 MakePreSkinDescriptorPatchAbortCacheKey(
+	const Bunny::TextureOverrideConfig &config,
+	const std::vector<DX12PreSkinSrvReplacementBinding> &srvReplacements,
+	const std::vector<DX12CurrentComputeUavBinding> &srvs,
+	const std::vector<DX12CurrentComputeUavBinding> &cbvs)
+{
+	UINT64 key = HashCombine64(gPreSkinSrvCacheGeneration, 0x7d9a4c6b2f1e8351ull);
+	key = HashWideString(key, config.section);
+	key = HashCombine64(key, srvReplacements.size());
+	for (const DX12PreSkinSrvReplacementBinding &replacement : srvReplacements) {
+		key = HashCombine64(key, replacement.replaceSlot);
+		key = HashCombine64(key, replacement.shaderRegister);
+		key = HashWideString(key, replacement.resource);
+	}
+	key = HashCombine64(key, srvs.size());
+	for (const DX12CurrentComputeUavBinding &srv : srvs) {
+		key = HashCombine64(key, srv.rootParameterIndex);
+		key = HashCombine64(key, srv.rangeIndex);
+		key = HashCombine64(key, srv.shaderRegister);
+		key = HashCombine64(key, srv.registerSpace);
+		key = HashCombine64(key, srv.descriptorOffset);
+		key = HashCombine64(key, srv.descriptor.viewDimension);
+		key = HashCombine64(key, srv.descriptor.structureByteStride);
+		key = HashCombine64(key, srv.descriptor.gpuVirtualAddress);
+		key = HashCombine64(key, DescriptorViewSize(srv.descriptor));
+		key = HashCombine64(key, reinterpret_cast<UINT64>(srv.descriptor.resource));
+	}
+	key = HashCombine64(key, HashComputeCbvListForProbe(cbvs));
+	return key;
+}
 
 static UINT64 MakePreSkinSrvStableProbeCacheKey(
 	const DX12CurrentComputeUavBinding &srv,
@@ -1202,6 +1246,7 @@ static void ClearPreSkinRuntimeState()
 	gPreSkinCbvReadCache.clear();
 	gPreSkinSrvNegativeCache.clear();
 	gPreSkinSrvStableNegativeCache.clear();
+	gPreSkinDescriptorPatchAbortCache.clear();
 	gPreSkinSrvPositiveCache.clear();
 	gPreSkinSrvStablePositiveCache.clear();
 	++gPreSkinSrvCacheGeneration;
@@ -1909,6 +1954,7 @@ bool DX12ModRuntimeLoad(
 	gPreSkinCbvReadCache.clear();
 	gPreSkinSrvNegativeCache.clear();
 	gPreSkinSrvStableNegativeCache.clear();
+	gPreSkinDescriptorPatchAbortCache.clear();
 	gPreSkinSrvPositiveCache.clear();
 	gPreSkinSrvStablePositiveCache.clear();
 	gPreSkinUavMatchCache.clear();
@@ -3706,6 +3752,14 @@ static bool ApplyPreSkinDescriptorTablePatchLocked(
 		return false;
 	}
 
+	const UINT64 abortCacheKey = MakePreSkinDescriptorPatchAbortCacheKey(
+		config, srvReplacements, srvs, cbvs);
+	if (gPreSkinDescriptorPatchAbortCache.find(abortCacheKey) !=
+	    gPreSkinDescriptorPatchAbortCache.end()) {
+		logStage("abort_cache_hit", static_cast<UINT>(tables.size()), totalDescriptors);
+		return false;
+	}
+
 	D3D12_CPU_DESCRIPTOR_HANDLE tempCpuBase = {};
 	D3D12_GPU_DESCRIPTOR_HANDLE tempGpuBase = {};
 	UINT tempIncrement = 0;
@@ -3882,6 +3936,9 @@ static bool ApplyPreSkinDescriptorTablePatchLocked(
 				section ? section : L"", triggerHash,
 				originalVertexCount, overrideVertexCount, cbvs.size());
 #endif
+			if (gPreSkinDescriptorPatchAbortCache.size() > 2048)
+				gPreSkinDescriptorPatchAbortCache.clear();
+			gPreSkinDescriptorPatchAbortCache.insert(abortCacheKey);
 			return false;
 		}
 	}
