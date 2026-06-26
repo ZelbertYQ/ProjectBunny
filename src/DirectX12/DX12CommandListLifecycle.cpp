@@ -14,7 +14,8 @@ void DX12CommandListLifecycleRegister(
 		return;
 
 	DX12CommandListRuntimeRegister(commandList);
-	if (DX12CommandListCaptureShouldTrackBindingsCached(commandList)) {
+	if (DX12CommandListCaptureShouldTrackBindingsCached(commandList) ||
+	    DX12ModNeedsPreSkinningUavProbe()) {
 		DX12BindingRegisterCommandList(commandList);
 		DX12BindingResetCommandList(commandList, initialState);
 	}
@@ -27,7 +28,8 @@ void DX12CommandListLifecycleReset(
 	if (!commandList)
 		return;
 
-	if (DX12CommandListCaptureShouldTrackBindingsCached(commandList))
+	if (DX12CommandListCaptureShouldTrackBindingsCached(commandList) ||
+	    DX12ModNeedsPreSkinningUavProbe())
 		DX12BindingResetCommandList(commandList, initialState);
 	if (DX12CommandListCaptureShouldTrackPsoStateCached(commandList))
 		DX12CommandListRuntimeRememberPipelineState(commandList, initialState);
@@ -47,6 +49,8 @@ void DX12CommandListLifecycleClearState(
 
 	if (DX12CommandListCaptureShouldRecordBindingEventsCached(commandList))
 		DX12BindingRecordStateEvent(commandList, "clear_state");
+	if (DX12ModNeedsPreSkinningUavProbe())
+		DX12BindingResetCommandList(commandList, pipelineState);
 	if (DX12CommandListCaptureShouldTrackPsoStateCached(commandList))
 		DX12CommandListRuntimeRememberPipelineState(commandList, pipelineState);
 	if (DX12CommandListCaptureShouldTrackHuntIaCached(commandList))

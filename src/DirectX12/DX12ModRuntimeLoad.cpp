@@ -1402,21 +1402,22 @@ static DX12LoadedResource *EnsureLoadedResourceForPreSkin(
 static bool EnsureResourceUavLocked(
 	ID3D12Device *device, ID3D12GraphicsCommandList *commandList,
 	DX12LoadedResource *resource, UINT elementStride, UINT64 minByteWidth = 0,
-	bool allowInactiveExplicitMatchCs = false, bool forceNewResource = false)
+	bool allowInactiveExplicitMatchCs = false)
 {
 	if (!device || !commandList || !resource || !resource->resource)
 		return false;
 	if (!allowInactiveExplicitMatchCs &&
 	    ResourceBlockedByInactiveExplicitMatchCsLocked(resource->name))
 		return false;
-	const UINT64 uavByteWidth = (std::max)(resource->byteWidth, minByteWidth);
-	if (!forceNewResource && resource->uavHeap && resource->uavResource && resource->uavByteWidth >= uavByteWidth)
-		return true;
-
 	if (!elementStride)
 		elementStride = resource->stride ? resource->stride : 4;
 	if (!elementStride)
 		return false;
+	const UINT64 uavByteWidth = (std::max)(resource->byteWidth, minByteWidth);
+	if (resource->uavHeap && resource->uavResource &&
+	    resource->uavByteWidth >= uavByteWidth &&
+	    resource->uavStride == elementStride)
+		return true;
 
 	if (resource->uavResource) {
 		RetirePreSkinResourceForCommandList(commandList, resource->uavResource);
@@ -1432,6 +1433,7 @@ static bool EnsureResourceUavLocked(
 	resource->uavWritten = false;
 	resource->uavValid = false;
 	resource->uavByteWidth = 0;
+	resource->uavStride = 0;
 	resource->uavState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
 
 	D3D12_DESCRIPTOR_HEAP_DESC heapDesc = {};
@@ -1492,6 +1494,7 @@ static bool EnsureResourceUavLocked(
 	resource->uavHeap = heap;
 	resource->uavResource = uavResource;
 	resource->uavByteWidth = uavByteWidth;
+	resource->uavStride = elementStride;
 	resource->uavInitialized = true;
 	resource->uavState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
 	DX12LogDebugJsonFunc("DX12PreSkinningUav",
@@ -1697,4 +1700,3 @@ static bool ResourceMatchesVlrTarget(
 		return false;
 	return true;
 }
-

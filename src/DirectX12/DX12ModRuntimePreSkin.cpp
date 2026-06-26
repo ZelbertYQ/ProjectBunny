@@ -538,6 +538,8 @@ static void LogPreSkinMatchCsProbeLimited(
 	const std::vector<DX12CurrentComputeUavBinding> &cbvs,
 	const std::vector<DX12CurrentRootConstants> &rootConstants)
 {
+	if (!inputMatched)
+		return;
 	const uint64_t probeKey = MakePreSkinMatchCsInputCacheKey(
 		csHash, candidate, uavViewBytes, uavs, srvs, cbvs, rootConstants);
 	bool emit = false;
@@ -1446,6 +1448,18 @@ static bool ApplyPreSkinBindingPatchLocked(
 	if (!device || !commandList || !replacement || !replacement->uavResource ||
 	    !replacement->uavCpu.ptr || !binding.hasDescriptor || !binding.tableGpuStart.ptr)
 		return false;
+	if (replacement->uavState != D3D12_RESOURCE_STATE_UNORDERED_ACCESS) {
+		D3D12_RESOURCE_BARRIER barrier = {};
+		barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+		barrier.Transition.pResource = replacement->uavResource;
+		barrier.Transition.StateBefore = replacement->uavState;
+		barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+		barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+		commandList->ResourceBarrier(1, &barrier);
+		replacement->uavState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+	}
+	replacement->uavWritten = false;
+	replacement->uavValid = false;
 
 	bool alreadyPatched = false;
 	AcquireSRWLockExclusive(&gPreSkinLock);
@@ -1669,7 +1683,7 @@ bool DX12ModApplyPreSkinningUavReplacement(
 		if (replacement && EnsureResourceUavLocked(
 			device, commandList, replacement,
 			vlr.uavByteStride ? vlr.uavByteStride : vlr.overrideByteStride,
-			0, true, true)) {
+			0, true)) {
 			const DX12CurrentComputeUavBinding *binding = nullptr;
 			for (const DX12CurrentComputeUavBinding &uav : uavs) {
 				if (uav.rootParameterIndex == producer.rootParameterIndex &&
@@ -1845,4 +1859,3 @@ void DX12ModRestorePreSkinningUavReplacement(ID3D12GraphicsCommandList *commandL
 		restoredDescriptorCount, restoredTableCount);
 #endif
 }
-

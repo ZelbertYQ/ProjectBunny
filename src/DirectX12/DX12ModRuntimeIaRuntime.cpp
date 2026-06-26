@@ -73,8 +73,10 @@ static bool TextureOverrideMatchCsSatisfiedLocked(const Bunny::TextureOverrideCo
 void DX12ModBeginFrame()
 {
 	AcquireSRWLockExclusive(&gModLock);
-	for (auto &item : gLoadedResources)
+	for (auto &item : gLoadedResources) {
 		item.second.uavWritten = false;
+		item.second.uavValid = false;
+	}
 	gPreSkinSectionAppliedPresent.clear();
 	AcquireSRWLockExclusive(&gPreSkinLock);
 	ClearActivePreSkinTextureOverridesLocked();

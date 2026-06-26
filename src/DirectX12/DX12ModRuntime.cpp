@@ -627,6 +627,7 @@ struct DX12LoadedResource
 	bool uavValid = false;
 	bool uavBarrierPending = false;
 	UINT64 uavByteWidth = 0;
+	UINT uavStride = 0;
 	UINT64 srvByteWidth = 0;
 	UINT srvStride = 0;
 	D3D12_RESOURCE_STATES uavState = D3D12_RESOURCE_STATE_COPY_DEST;
