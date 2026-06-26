@@ -214,9 +214,7 @@ bool DX12IaReplacementApplyAndExecute(
 	if (!commandList || !replacement)
 		return false;
 	if (replacement->skip && replacement->draws.empty() && replacement->dispatches.empty()) {
-		if (fromShaderOverride)
-			return true;
-		return false;
+		return true;
 	}
 
 	if (!fromShaderOverride && callbacks.shouldSuppressAutoReplacement &&
