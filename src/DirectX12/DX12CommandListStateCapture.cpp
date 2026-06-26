@@ -79,9 +79,10 @@ ID3D12PipelineState *DX12CommandListCapturePipelineState(
 			activePipelineState = replacement;
 	}
 
-	if (DX12CommandListCaptureShouldTrackBindingsCached(commandList)) {
+	const bool trackBindings = DX12CommandListCaptureShouldTrackBindingsCached(commandList);
+	if (trackBindings || DX12ModNeedsPreSkinningUavProbe()) {
 		DX12BindingSetPipelineState(commandList, activePipelineState);
-		if (DX12CommandListCaptureShouldRecordBindingEventsCached(commandList))
+		if (trackBindings && DX12CommandListCaptureShouldRecordBindingEventsCached(commandList))
 			DX12BindingRecordStateEvent(commandList, "set_pso");
 	}
 	if (DX12CommandListCaptureShouldTrackPsoStateCached(commandList))
