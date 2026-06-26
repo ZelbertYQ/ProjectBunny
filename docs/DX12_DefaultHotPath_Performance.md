@@ -78,6 +78,24 @@ Several fallback designs remain and should be replaced by single resolution mode
 
 If GPU utilization remains low after this change, the next hypothesis should test command-list original lookup, hook coverage, and forwarding overhead under safe mode with diagnostics disabled.
 
+### Debug Runtime Check Failure
+
+The next test crashed with MSVC runtime check failure:
+
+`Stack around the variable '_profile_timer' was corrupted.`
+
+The failing variable is created by `DX12_PROFILE_SCOPE`. The prior change added a `bool` member to `DX12Profiling::ScopedTimer`, which changed the stack object size used by every hook translation unit. A clean rebuild fixes that class of mismatch, but the safer design is to avoid changing this hot-path object's layout at all.
+
+`ScopedTimer` now uses the existing `mStart` sentinel to represent inactive collection. The class layout is back to the old two-field shape: counter reference plus `LARGE_INTEGER`.
+
+This also documents a build-system hazard: header-only layout changes in hook hot-path RAII objects must be treated as clean-rebuild changes. The safer architectural rule is to avoid adding state to these stack objects unless the benefit is essential.
+
+### Debug Logging Policy
+
+DEBUG builds now enable DX12 diagnostic logging unconditionally. The `MIGOTO_DX12_DIAGNOSTIC_LOGS` environment switch and the DEBUG hook-call noisy API filter were removed from the active code path.
+
+DEBUG logging still uses the background log queue instead of synchronous hook-side disk writes. The queue capacity is larger in DEBUG so full hook logging is less likely to drop lines during diagnosis.
+
 ### References
 
 - https://learn.microsoft.com/en-us/windows/win32/api/winnt/nf-winnt-interlockedincrement

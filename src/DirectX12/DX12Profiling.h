@@ -101,7 +101,6 @@ public:
 private:
 	Counter &mCounter;
 	LARGE_INTEGER mStart;
-	bool mActive;
 };
 
 }

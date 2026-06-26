@@ -61,13 +61,11 @@ wchar_t gOverlayText[2048] = L"";
 
 ScopedTimer::ScopedTimer(Counter &counter)
 	: mCounter(counter)
-	, mActive(false)
 {
 	if (!ShouldCollectCounters()) {
 		mStart.QuadPart = 0;
 		return;
 	}
-	mActive = true;
 	InterlockedIncrement(&mCounter.calls);
 	mStart.QuadPart = 0;
 	if (gMode == Mode::SUMMARY)
@@ -76,7 +74,7 @@ ScopedTimer::ScopedTimer(Counter &counter)
 
 ScopedTimer::~ScopedTimer()
 {
-	if (!mActive || mStart.QuadPart == 0)
+	if (mStart.QuadPart == 0)
 		return;
 	LARGE_INTEGER endTime;
 	QueryPerformanceCounter(&endTime);

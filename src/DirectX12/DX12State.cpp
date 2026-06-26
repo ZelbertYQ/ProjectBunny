@@ -34,7 +34,6 @@ static COLORREF gOverlayStatusColor = RGB(0, 255, 0);
 static DWORD gOverlayStatusExpireTick = 0;
 static ID3D12CommandQueue *gCommandQueue = nullptr;
 static SRWLOCK gStateLock = SRWLOCK_INIT;
-static std::atomic<bool> gDiagnosticsLogging{ false };
 #if !defined(_DEBUG)
 static std::atomic<bool> gReleaseStartupLogging{ true };
 #endif
@@ -48,53 +47,10 @@ volatile LONG gDX12HotPathTrackResourceMetadata = 0;
 static thread_local UINT tDX12InternalReplayDepth = 0;
 
 #if defined(_DEBUG)
-struct DX12HookCallLogBudget
-{
-	LONG present = -1;
-	LONG count = 0;
-};
-
-static constexpr LONG kHookCallLogBudgetPerApiPerPresent = 16;
-static SRWLOCK gHookCallLogBudgetLock = SRWLOCK_INIT;
-static std::unordered_map<std::string, DX12HookCallLogBudget> gHookCallLogBudgets;
-
-static bool DX12IsNoisyHookCallApi(const char *api)
-{
-	static const char *const noisyApis[] = {
-		"ID3D12Device::CopyDescriptors",
-		"ID3D12Device::CopyDescriptorsSimple",
-		"ID3D12Device::CreateConstantBufferView",
-		"ID3D12GraphicsCommandList::Dispatch",
-		"ID3D12GraphicsCommandList::DrawInstanced",
-		"ID3D12GraphicsCommandList::DrawIndexedInstanced",
-		"ID3D12GraphicsCommandList::SetPipelineState",
-		"ID3D12GraphicsCommandList::SetComputeRootDescriptorTable",
-		"ID3D12GraphicsCommandList::SetGraphicsRootDescriptorTable",
-		"ID3D12GraphicsCommandList::SetComputeRoot32BitConstant",
-		"ID3D12GraphicsCommandList::SetGraphicsRoot32BitConstant",
-		"ID3D12GraphicsCommandList::SetComputeRoot32BitConstants",
-		"ID3D12GraphicsCommandList::SetGraphicsRoot32BitConstants",
-		"ID3D12GraphicsCommandList::SetComputeRootConstantBufferView",
-		"ID3D12GraphicsCommandList::SetGraphicsRootConstantBufferView",
-		"ID3D12GraphicsCommandList::SetComputeRootShaderResourceView",
-		"ID3D12GraphicsCommandList::SetGraphicsRootShaderResourceView",
-		"ID3D12GraphicsCommandList::SetComputeRootUnorderedAccessView",
-		"ID3D12GraphicsCommandList::SetGraphicsRootUnorderedAccessView",
-		"ID3D12GraphicsCommandList::IASetIndexBuffer",
-		"ID3D12GraphicsCommandList::IASetVertexBuffers",
-		"ID3D12GraphicsCommandList::ResourceBarrier",
-		"ID3D12GraphicsCommandList::Reset",
-		"ID3D12CommandQueue::ExecuteCommandLists"
-	};
-	for (const char *noisyApi : noisyApis) {
-		if (!strcmp(api, noisyApi))
-			return true;
-	}
-	return false;
-}
-#endif
-
+static constexpr size_t kMaxQueuedLogLines = 262144;
+#else
 static constexpr size_t kMaxQueuedLogLines = 8192;
+#endif
 
 void DX12EnterInternalReplay()
 {
@@ -146,27 +102,9 @@ void DX12HotPathUpdate()
 bool DX12ShouldLogHookCall(const char *api)
 {
 #if defined(_DEBUG)
-	if (!DX12DiagnosticsLoggingEnabled() || !api || !api[0] || DX12IsInternalReplay())
+	if (!api || !api[0] || DX12IsInternalReplay())
 		return false;
-	if (DX12IsNoisyHookCallApi(api))
-		return false;
-
-	const LONG present = DX12GetPresentCount();
-	bool shouldLog = false;
-	AcquireSRWLockExclusive(&gHookCallLogBudgetLock);
-	DX12HookCallLogBudget &budget = gHookCallLogBudgets[api];
-	if (budget.present != present) {
-		budget.present = present;
-		budget.count = 0;
-	}
-	if (budget.count < kHookCallLogBudgetPerApiPerPresent) {
-		++budget.count;
-		shouldLog = true;
-	}
-	if (gHookCallLogBudgets.size() > 256)
-		gHookCallLogBudgets.clear();
-	ReleaseSRWLockExclusive(&gHookCallLogBudgetLock);
-	return shouldLog;
+	return true;
 #else
 	(void)api;
 	return false;
@@ -183,21 +121,13 @@ HINSTANCE DX12GetModule()
 	return gModule;
 }
 
-static bool ReadDiagnosticsLoggingEnabled()
-{
-	wchar_t value[32] = {};
-	const DWORD chars = GetEnvironmentVariableW(L"MIGOTO_DX12_DIAGNOSTIC_LOGS", value, ARRAYSIZE(value));
-	if (chars == 0 || chars >= ARRAYSIZE(value))
-		return false;
-	return !_wcsicmp(value, L"1") ||
-		!_wcsicmp(value, L"true") ||
-		!_wcsicmp(value, L"on") ||
-		!_wcsicmp(value, L"yes");
-}
-
 bool DX12DiagnosticsLoggingEnabled()
 {
-	return gDiagnosticsLogging.load(std::memory_order_relaxed);
+#if defined(_DEBUG)
+	return true;
+#else
+	return false;
+#endif
 }
 
 static DWORD WINAPI DX12LogThreadProc(void*)
@@ -243,7 +173,6 @@ bool DX12OpenLogFile()
 #if !defined(_DEBUG)
 	gReleaseStartupLogging.store(true, std::memory_order_relaxed);
 #endif
-	gDiagnosticsLogging.store(ReadDiagnosticsLoggingEnabled(), std::memory_order_relaxed);
 	wchar_t path[MAX_PATH];
 	if (!GetModuleFileNameW(gModule, path, MAX_PATH))
 		return false;
