@@ -74,6 +74,7 @@ void BunnyDX12RuntimeInitialize(HINSTANCE module, DX12LoadRealD3D12Fn loadRealD3
 		if (overlayThread)
 			CloseHandle(overlayThread);
 	}
+	DX12EndReleaseStartupLogging();
 }
 
 void BunnyDX12RuntimeShutdown()

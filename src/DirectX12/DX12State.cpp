@@ -1,8 +1,10 @@
 #include "DX12State.h"
 
 #include <Shlwapi.h>
+#include <atomic>
 #include <stdarg.h>
 #include <stdio.h>
+#include <string.h>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -23,6 +25,9 @@ static COLORREF gOverlayStatusColor = RGB(0, 255, 0);
 static DWORD gOverlayStatusExpireTick = 0;
 static ID3D12CommandQueue *gCommandQueue = nullptr;
 static SRWLOCK gStateLock = SRWLOCK_INIT;
+#if !defined(_DEBUG)
+static std::atomic<bool> gReleaseStartupLogging{ true };
+#endif
 static CNktHookLib gHookMgr;
 static std::unordered_set<void*> gHookedFunctions;
 static std::unordered_map<void*, void*> gOriginalFunctions;
@@ -90,6 +95,9 @@ HINSTANCE DX12GetModule()
 
 bool DX12OpenLogFile()
 {
+#if !defined(_DEBUG)
+	gReleaseStartupLogging.store(true, std::memory_order_relaxed);
+#endif
 	wchar_t path[MAX_PATH];
 	if (!GetModuleFileNameW(gModule, path, MAX_PATH))
 		return false;
@@ -100,6 +108,24 @@ bool DX12OpenLogFile()
 	gLogLineNo = 0;
 	return gLog != nullptr;
 }
+
+#if !defined(_DEBUG)
+void DX12EndReleaseStartupLogging()
+{
+	gReleaseStartupLogging.store(false, std::memory_order_relaxed);
+}
+
+static bool DX12ReleaseShouldLogFunction(const char *func)
+{
+	if (gReleaseStartupLogging.load(std::memory_order_relaxed))
+		return true;
+	return func && strcmp(func, "DX12ModRuntimeReload") == 0;
+}
+#else
+void DX12EndReleaseStartupLogging()
+{
+}
+#endif
 
 static void MakeLogTime(char *buffer, size_t bufferSize)
 {
@@ -148,6 +174,10 @@ void DX12Log(const char *fmt, ...)
 {
 	if (!gLog)
 		return;
+#if !defined(_DEBUG)
+	if (!DX12ReleaseShouldLogFunction("Log"))
+		return;
+#endif
 
 	va_list args;
 	char message[2048];
@@ -170,6 +200,10 @@ void DX12LogJsonFunc(const char *func, const char *fmt, ...)
 {
 	if (!gLog)
 		return;
+#if !defined(_DEBUG)
+	if (!DX12ReleaseShouldLogFunction(func))
+		return;
+#endif
 
 	char funcJson[512];
 	char extra[4096];
@@ -191,6 +225,10 @@ void DX12LogJsonFuncFlush(const char *func, const char *fmt, ...)
 {
 	if (!gLog)
 		return;
+#if !defined(_DEBUG)
+	if (!DX12ReleaseShouldLogFunction(func))
+		return;
+#endif
 
 	char funcJson[512];
 	char extra[4096];
