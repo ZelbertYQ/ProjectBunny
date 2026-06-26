@@ -7,18 +7,9 @@
 #include "DX12ShaderDump.h"
 #include "DX12ShaderHunt.h"
 
-// --- global (uncached) predicates ---
-// Used during initialisation and at frame boundaries where no single
-// command-list pointer is the right scope.
 
 bool DX12CommandListCaptureShouldTrackBindings()
 {
-	// Texture overrides do NOT require the full BindingTracker â€?they only need
-	// descriptor-heap pointers, which are tracked separately in RuntimeState.
-	// Including DX12ModHasActiveTextureOverrides() here forced the entire
-	// BindingTracker (62 lock sites, root-table tracking, event recording) to
-	// activate whenever any texture override was defined, even for simple
-	// unconditional replacements.  That was the #1 cause of the 3 % GPU issue.
 	return DX12FrameAnalysisIsCapturing() || DX12ShaderDumpIsCapturingFrame();
 }
 
@@ -29,7 +20,7 @@ bool DX12CommandListCaptureShouldRecordBindingEvents()
 
 bool DX12CommandListCaptureShouldTrackHuntIa()
 {
-	return DX12HuntIsEnabled() || DX12ModHasActiveTextureOverrides();
+	return DX12HuntIsEnabled();
 }
 
 bool DX12CommandListCaptureShouldTrackPsoState()
@@ -38,9 +29,6 @@ bool DX12CommandListCaptureShouldTrackPsoState()
 		DX12ModHasActiveTextureOverrides();
 }
 
-// --- per-command-list cached predicates ---
-// Hot-path call sites pass the command-list pointer so the answer comes from
-// the per-list cache instead of re-evaluating the global flags every time.
 
 bool DX12CommandListCaptureShouldTrackBindingsCached(ID3D12GraphicsCommandList *commandList)
 {
@@ -70,7 +58,6 @@ bool DX12CommandListCaptureShouldTrackPsoStateCached(ID3D12GraphicsCommandList *
 	return DX12CommandListRuntimeGetTrackPsoState(commandList);
 }
 
-// --- capture helpers (use cached predicates on the hot path) ---
 
 void DX12CommandListCapturePrimitiveTopology(
 	ID3D12GraphicsCommandList *commandList, D3D12_PRIMITIVE_TOPOLOGY topology)
@@ -92,8 +79,6 @@ ID3D12PipelineState *DX12CommandListCapturePipelineState(
 			activePipelineState = replacement;
 	}
 
-	// SetPipelineState changes the PSO recorded into the command list. Keep
-	// replacement resolution and capture in one place so callers use one PSO.
 	if (DX12CommandListCaptureShouldTrackBindingsCached(commandList)) {
 		DX12BindingSetPipelineState(commandList, activePipelineState);
 		if (DX12CommandListCaptureShouldRecordBindingEventsCached(commandList))

@@ -2,14 +2,34 @@
 
 #include <Windows.h>
 #include <d3d12.h>
+#include <stdint.h>
+
+#include <vector>
 
 struct DX12ActiveIaState
 {
 	bool hasIndexBuffer = false;
 	D3D12_INDEX_BUFFER_VIEW indexBuffer = {};
+	uint32_t indexHash = 0;
 	bool hasVertexBuffer[32] = {};
 	D3D12_VERTEX_BUFFER_VIEW vertexBuffers[32] = {};
+	uint32_t vertexHashes[32] = {};
 	D3D12_PRIMITIVE_TOPOLOGY primitiveTopology = D3D_PRIMITIVE_TOPOLOGY_UNDEFINED;
+};
+
+struct DX12IaBufferHash
+{
+	UINT slot = 0;
+	uint32_t hash = 0;
+	D3D12_VERTEX_BUFFER_VIEW vertexView = {};
+};
+
+struct DX12IaHashState
+{
+	bool hasIndexBuffer = false;
+	uint32_t indexHash = 0;
+	D3D12_INDEX_BUFFER_VIEW indexView = {};
+	std::vector<DX12IaBufferHash> vertexBuffers;
 };
 
 struct DX12CommandListTrackingCache
@@ -53,6 +73,10 @@ void DX12CommandListRuntimeSetMayHaveIaTextureCandidate(
 	ID3D12GraphicsCommandList *commandList, bool mayHaveCandidate);
 bool DX12CommandListRuntimeMayHaveIaTextureCandidate(ID3D12GraphicsCommandList *commandList);
 void DX12CommandListRuntimeBumpComputeBindingSerial(ID3D12GraphicsCommandList *commandList);
+bool DX12CommandListRuntimeBuildIaHashState(
+	const DX12ActiveIaState &ia, DX12IaHashState *state);
+bool DX12CommandListRuntimeGetIaHashState(
+	ID3D12GraphicsCommandList *commandList, DX12IaHashState *state);
 ID3D12PipelineState *DX12CommandListRuntimeGetPipelineState(
 	ID3D12GraphicsCommandList *commandList);
 DX12CommandListRuntimeState DX12CommandListRuntimeGetState(

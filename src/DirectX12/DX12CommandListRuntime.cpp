@@ -5,6 +5,7 @@
 #include "DX12CommandListStateCapture.h"
 #include "DX12FrameAnalysis.h"
 #include "DX12ModRuntime.h"
+#include "DX12ResourceTracker.h"
 #include "DX12ShaderDump.h"
 #include "DX12ShaderHunt.h"
 
@@ -195,10 +196,15 @@ void DX12CommandListRuntimeRememberIndexBuffer(
 	if (!commandList)
 		return;
 
+	const uint32_t hash = view ?
+		DX12HashIaBufferView(
+			view->BufferLocation, view->SizeInBytes, 0, static_cast<UINT>(view->Format), 0) :
+		0;
 	DX12CommandListRuntimeState *fastState = GetStatePtrFast(commandList);
 	if (fastState) {
 		fastState->ia.hasIndexBuffer = view != nullptr;
 		fastState->ia.indexBuffer = view ? *view : D3D12_INDEX_BUFFER_VIEW();
+		fastState->ia.indexHash = hash;
 		return;
 	}
 
@@ -207,6 +213,7 @@ void DX12CommandListRuntimeRememberIndexBuffer(
 	DX12ActiveIaState &state = shard.states[commandList].ia;
 	state.hasIndexBuffer = view != nullptr;
 	state.indexBuffer = view ? *view : D3D12_INDEX_BUFFER_VIEW();
+	state.indexHash = hash;
 	ReleaseSRWLockExclusive(&shard.lock);
 }
 
@@ -217,12 +224,25 @@ void DX12CommandListRuntimeRememberVertexBuffers(
 	if (!commandList)
 		return;
 
+	uint32_t hashes[32] = {};
+	for (UINT i = 0; i < count && startSlot + i < ARRAYSIZE(hashes); ++i) {
+		const UINT slot = startSlot + i;
+		const D3D12_VERTEX_BUFFER_VIEW *view = views ? &views[i] : nullptr;
+		hashes[slot] = view ?
+			DX12HashIaBufferView(
+				view->BufferLocation, view->SizeInBytes, view->StrideInBytes, 0, slot) :
+			0;
+	}
+
 	DX12CommandListRuntimeState *fastState = GetStatePtrFast(commandList);
 	if (fastState) {
 		DX12ActiveIaState &state = fastState->ia;
 		for (UINT i = 0; i < count && startSlot + i < ARRAYSIZE(state.vertexBuffers); ++i) {
-			state.hasVertexBuffer[startSlot + i] = views != nullptr;
-			state.vertexBuffers[startSlot + i] = views ? views[i] : D3D12_VERTEX_BUFFER_VIEW();
+			const UINT slot = startSlot + i;
+			const D3D12_VERTEX_BUFFER_VIEW *view = views ? &views[i] : nullptr;
+			state.hasVertexBuffer[slot] = view != nullptr;
+			state.vertexBuffers[slot] = view ? *view : D3D12_VERTEX_BUFFER_VIEW();
+			state.vertexHashes[slot] = hashes[slot];
 		}
 		return;
 	}
@@ -231,8 +251,11 @@ void DX12CommandListRuntimeRememberVertexBuffers(
 	AcquireSRWLockExclusive(&shard.lock);
 	DX12ActiveIaState &state = shard.states[commandList].ia;
 	for (UINT i = 0; i < count && startSlot + i < ARRAYSIZE(state.vertexBuffers); ++i) {
-		state.hasVertexBuffer[startSlot + i] = views != nullptr;
-		state.vertexBuffers[startSlot + i] = views ? views[i] : D3D12_VERTEX_BUFFER_VIEW();
+		const UINT slot = startSlot + i;
+		const D3D12_VERTEX_BUFFER_VIEW *view = views ? &views[i] : nullptr;
+		state.hasVertexBuffer[slot] = view != nullptr;
+		state.vertexBuffers[slot] = view ? *view : D3D12_VERTEX_BUFFER_VIEW();
+		state.vertexHashes[slot] = hashes[slot];
 	}
 	ReleaseSRWLockExclusive(&shard.lock);
 }
@@ -310,6 +333,59 @@ void DX12CommandListRuntimeBumpComputeBindingSerial(ID3D12GraphicsCommandList *c
 		InterlockedIncrement64(
 			reinterpret_cast<volatile LONG64*>(&it->second.computeBindingSerial));
 	ReleaseSRWLockShared(&shard.lock);
+}
+
+bool DX12CommandListRuntimeBuildIaHashState(
+	const DX12ActiveIaState &ia, DX12IaHashState *state)
+{
+	if (!state)
+		return false;
+	*state = DX12IaHashState();
+
+	if (ia.hasIndexBuffer && ia.indexHash) {
+		state->hasIndexBuffer = true;
+		state->indexHash = ia.indexHash;
+		state->indexView = ia.indexBuffer;
+	}
+
+	for (UINT slot = 0; slot < ARRAYSIZE(ia.vertexBuffers); ++slot) {
+		if (!ia.hasVertexBuffer[slot] || !ia.vertexHashes[slot])
+			continue;
+		DX12IaBufferHash item;
+		item.slot = slot;
+		item.hash = ia.vertexHashes[slot];
+		item.vertexView = ia.vertexBuffers[slot];
+		state->vertexBuffers.push_back(item);
+	}
+
+	return state->hasIndexBuffer || !state->vertexBuffers.empty();
+}
+
+bool DX12CommandListRuntimeGetIaHashState(
+	ID3D12GraphicsCommandList *commandList, DX12IaHashState *state)
+{
+	if (state)
+		*state = DX12IaHashState();
+	if (!commandList || !state)
+		return false;
+
+	DX12CommandListRuntimeState *fastState = GetStatePtrFast(commandList);
+	if (fastState)
+		return DX12CommandListRuntimeBuildIaHashState(fastState->ia, state);
+
+	RuntimeShard &shard = ShardFor(commandList);
+	DX12ActiveIaState ia;
+	bool found = false;
+	AcquireSRWLockShared(&shard.lock);
+	auto it = shard.states.find(commandList);
+	if (it != shard.states.end()) {
+		ia = it->second.ia;
+		found = true;
+	}
+	ReleaseSRWLockShared(&shard.lock);
+	if (!found)
+		return false;
+	return DX12CommandListRuntimeBuildIaHashState(ia, state);
 }
 
 ID3D12PipelineState *DX12CommandListRuntimeGetPipelineState(

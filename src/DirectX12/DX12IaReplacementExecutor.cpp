@@ -1,7 +1,6 @@
 #include "DX12IaReplacementExecutor.h"
 
 #include "DX12Profiling.h"
-#include "DX12ShaderHunt.h"
 
 static thread_local int tIaReplacementDrawDepth = 0;
 
@@ -32,11 +31,12 @@ static bool PrepareIaForMod(
 	ID3D12GraphicsCommandList *commandList,
 	DX12IaHashState *iaState,
 	const DX12IaDrawInvocation &draw,
+	const DX12CommandListRuntimeState &runtimeState,
 	DX12ModIaReplacement *replacement)
 {
 	if (!DX12ModHasActiveTextureOverrides())
 		return false;
-	if (!iaState || !DX12HuntGetIaHashState(commandList, iaState))
+	if (!iaState || !DX12CommandListRuntimeBuildIaHashState(runtimeState.ia, iaState))
 		return false;
 
 	const uint32_t vertexCount = draw.indexed ? 0 : draw.vertexCount;
@@ -262,7 +262,7 @@ bool DX12IaReplacementHandleDrawOverrides(
 	const uint32_t firstVertex = draw.indexed ? 0 : draw.firstVertex;
 	const uint32_t firstIndex = draw.indexed ? draw.firstIndex : 0;
 
-	if (DX12HuntGetIaHashState(commandList, &iaState)) {
+	if (DX12CommandListRuntimeBuildIaHashState(runtimeState.ia, &iaState)) {
 		DX12Profiling::RecordIaHashStateResult(true);
 		if (DX12ModHasActiveShaderOverrides() &&
 		    DX12ModPrepareShaderOverrideReplacement(
@@ -295,7 +295,7 @@ bool DX12IaReplacementHandleDrawOverrides(
 	DX12Profiling::RecordIaHashStateResult(false);
 	if (DX12ModShouldSkipPipelineState(runtimeState.pipelineState, false))
 		return true;
-	if (!PrepareIaForMod(commandList, &iaState, draw, &iaReplacement))
+	if (!PrepareIaForMod(commandList, &iaState, draw, runtimeState, &iaReplacement))
 		return false;
 	if (iaReplacement.skip && iaReplacement.draws.empty() &&
 	    iaReplacement.dispatches.empty())

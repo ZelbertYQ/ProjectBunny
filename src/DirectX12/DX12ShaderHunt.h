@@ -4,7 +4,7 @@
 #include <dxgi.h>
 #include <stdint.h>
 
-#include <vector>
+#include "DX12CommandListRuntime.h"
 
 void DX12HuntResetCommandList(ID3D12GraphicsCommandList *commandList, ID3D12PipelineState *pipelineState);
 void DX12HuntSetPipelineState(ID3D12GraphicsCommandList *commandList, ID3D12PipelineState *pipelineState);
@@ -23,19 +23,6 @@ bool DX12HuntShouldDrawOverlay();
 bool DX12HuntGetIaHashes(
 	ID3D12GraphicsCommandList *commandList, uint32_t *ibHash,
 	uint32_t *vbHashes, size_t vbHashCount, size_t *vbHashWritten);
-struct DX12IaBufferHash
-{
-	UINT slot = 0;
-	uint32_t hash = 0;
-	D3D12_VERTEX_BUFFER_VIEW vertexView = {};
-};
-struct DX12IaHashState
-{
-	bool hasIndexBuffer = false;
-	uint32_t indexHash = 0;
-	D3D12_INDEX_BUFFER_VIEW indexView = {};
-	std::vector<DX12IaBufferHash> vertexBuffers;
-};
 bool DX12HuntGetIaHashState(ID3D12GraphicsCommandList *commandList, DX12IaHashState *state);
 bool DX12HuntHashIndexBufferView(const D3D12_INDEX_BUFFER_VIEW *view, uint32_t *hash);
 bool DX12HuntHashVertexBufferView(UINT slot, const D3D12_VERTEX_BUFFER_VIEW *view, uint32_t *hash);

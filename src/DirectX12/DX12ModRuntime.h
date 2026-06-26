@@ -9,7 +9,7 @@
 #include <vector>
 
 #include "DX12BindingTracker.h"
-#include "DX12ShaderHunt.h"
+#include "DX12CommandListRuntime.h"
 
 bool DX12ModRuntimeLoad(
 	const wchar_t *configPath,

@@ -2,16 +2,11 @@
 
 #include <d3d12.h>
 
-// Global checks — still used during initialisation and at frame boundaries
-// where no single command-list is the right context.
 bool DX12CommandListCaptureShouldTrackBindings();
 bool DX12CommandListCaptureShouldRecordBindingEvents();
 bool DX12CommandListCaptureShouldTrackHuntIa();
 bool DX12CommandListCaptureShouldTrackPsoState();
 
-// Per-command-list cached variants — use these on the recording hot path.
-// They consult the per-list cache (refreshed at Reset) instead of re-evaluating
-// the global flags on every call, saving 3-4 interlocked reads per hook.
 bool DX12CommandListCaptureShouldTrackBindingsCached(ID3D12GraphicsCommandList *commandList);
 bool DX12CommandListCaptureShouldRecordBindingEventsCached(ID3D12GraphicsCommandList *commandList);
 bool DX12CommandListCaptureShouldTrackHuntIaCached(ID3D12GraphicsCommandList *commandList);

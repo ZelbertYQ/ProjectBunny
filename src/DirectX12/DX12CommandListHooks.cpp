@@ -292,7 +292,7 @@ static void UpdateIaTextureCandidateFlag(ID3D12GraphicsCommandList *commandList)
 
 	DX12IaHashState iaState;
 	bool mayHaveCandidate = false;
-	if (DX12HuntGetIaHashState(commandList, &iaState)) {
+	if (DX12CommandListRuntimeGetIaHashState(commandList, &iaState)) {
 		if (iaState.hasIndexBuffer) {
 			mayHaveCandidate = DX12ModIaHashMayHaveTextureOverrideCandidate(
 				iaState.indexHash, true, 0);
@@ -317,42 +317,27 @@ static bool TestIaTextureCandidateHash(uint32_t hash, bool indexed, UINT slot)
 	return hit;
 }
 
-static bool UpdateIaTextureCandidateFromIndexView(
-	ID3D12GraphicsCommandList *commandList, const D3D12_INDEX_BUFFER_VIEW *view)
+static bool UpdateIaTextureCandidateFromState(ID3D12GraphicsCommandList *commandList)
 {
 	if (!commandList || !DX12ModHasActiveTextureOverrides()) {
 		DX12CommandListRuntimeSetMayHaveIaTextureCandidate(commandList, false);
 		return false;
 	}
 
-	uint32_t hash = 0;
-	const bool candidate =
-		DX12HuntHashIndexBufferView(view, &hash) &&
-		TestIaTextureCandidateHash(hash, true, 0);
-	if (candidate)
-		DX12CommandListRuntimeSetMayHaveIaTextureCandidate(commandList, true);
-	return candidate;
-}
-
-static bool UpdateIaTextureCandidateFromVertexViews(
-	ID3D12GraphicsCommandList *commandList, UINT startSlot, UINT count,
-	const D3D12_VERTEX_BUFFER_VIEW *views)
-{
-	if (!commandList || !DX12ModHasActiveTextureOverrides()) {
+	DX12IaHashState iaState;
+	if (!DX12CommandListRuntimeGetIaHashState(commandList, &iaState)) {
 		DX12CommandListRuntimeSetMayHaveIaTextureCandidate(commandList, false);
 		return false;
 	}
 
-	bool candidate = false;
-	for (UINT i = 0; i < count; ++i) {
-		uint32_t hash = 0;
-		const UINT slot = startSlot + i;
-		if (DX12HuntHashVertexBufferView(slot, views ? &views[i] : nullptr, &hash) &&
-		    TestIaTextureCandidateHash(hash, false, slot)) {
-			candidate = true;
+	bool candidate = iaState.hasIndexBuffer &&
+		TestIaTextureCandidateHash(iaState.indexHash, true, 0);
+	for (const DX12IaBufferHash &buffer : iaState.vertexBuffers) {
+		if (candidate)
 			break;
-		}
+		candidate = TestIaTextureCandidateHash(buffer.hash, false, buffer.slot);
 	}
+
 	if (candidate)
 		DX12CommandListRuntimeSetMayHaveIaTextureCandidate(commandList, true);
 	return candidate;
@@ -366,19 +351,6 @@ static bool DX12ShouldBypassIaTextureDrawWork(ID3D12GraphicsCommandList *command
 		!DX12ModNeedsPresentReplacement() &&
 		!DX12HuntIsEnabled() &&
 		!DX12CommandListRuntimeMayHaveIaTextureCandidate(commandList);
-}
-
-static void SyncHuntIaFromRuntimeState(
-	ID3D12GraphicsCommandList *commandList, const DX12ActiveIaState &ia)
-{
-	DX12Profiling::RecordIaHuntIaUpdate();
-	DX12HuntSetIndexBuffer(commandList, ia.hasIndexBuffer ? &ia.indexBuffer : nullptr);
-
-	D3D12_VERTEX_BUFFER_VIEW views[ARRAYSIZE(ia.vertexBuffers)] = {};
-	for (UINT i = 0; i < ARRAYSIZE(ia.vertexBuffers); ++i)
-		views[i] = ia.hasVertexBuffer[i] ? ia.vertexBuffers[i] : D3D12_VERTEX_BUFFER_VIEW();
-	DX12Profiling::RecordIaHuntIaUpdate();
-	DX12HuntSetVertexBuffers(commandList, 0, ARRAYSIZE(views), views);
 }
 
 static void LogDX12Call(const char *api, const void *object, const char *fmt = nullptr, ...)
@@ -670,6 +642,19 @@ static void LogQueueStage(
 		api ? api : "", stage ? stage : "", DX12GetPresentCount(), queue,
 		count, fence, static_cast<unsigned long long>(value), hr,
 		static_cast<unsigned long long>(elapsedMs));
+}
+
+static void LogCommandListStage(
+	const char *api, const char *stage, ID3D12GraphicsCommandList *commandList,
+	HRESULT hr = S_OK, ULONGLONG elapsedMs = 0)
+{
+	if (SUCCEEDED(hr) && elapsedMs < 4)
+		return;
+	DX12LogDebugJsonFunc("DX12CommandListStage",
+		"\"api\":\"%s\",\"stage\":\"%s\",\"present\":%ld,\"commandList\":\"%p\","
+		"\"hr\":\"0x%lx\",\"elapsedMs\":%llu",
+		api ? api : "", stage ? stage : "", DX12GetPresentCount(), commandList,
+		hr, static_cast<unsigned long long>(elapsedMs));
 }
 
 template <typename T>
@@ -991,10 +976,19 @@ static HRESULT STDMETHODCALLTYPE HookedResetCommandList(
 	DX12_PROFILE_SCOPE(ResetCommandList);
 	LogDX12Call("ID3D12GraphicsCommandList::Reset", commandList,
 		" allocator=%p initialPso=%p", allocator, initialState);
+	ULONGLONG startTick = GetTickCount64();
+	ULONGLONG stageTick = startTick;
 	DX12CommandListLifecycleReset(commandList, initialState);
+	LogCommandListStage("Reset", "afterLifecycle", commandList, S_OK, GetTickCount64() - stageTick);
+	stageTick = GetTickCount64();
 	DX12CommandListRuntimeReset(commandList, initialState);
+	LogCommandListStage("Reset", "afterRuntime", commandList, S_OK, GetTickCount64() - stageTick);
 	PFN_RESET_COMMAND_LIST original = DX12_CL_ORIG(commandList, 10, PFN_RESET_COMMAND_LIST, ResetCommandList);
-	return original ? original(commandList, allocator, initialState) : E_FAIL;
+	stageTick = GetTickCount64();
+	HRESULT hr = original ? original(commandList, allocator, initialState) : E_FAIL;
+	LogCommandListStage("Reset", "afterOriginal", commandList, hr, GetTickCount64() - stageTick);
+	LogCommandListStage("Reset", "end", commandList, hr, GetTickCount64() - startTick);
+	return hr;
 }
 
 static void STDMETHODCALLTYPE HookedClearState(
@@ -1071,8 +1065,6 @@ static void STDMETHODCALLTYPE HookedDrawInstanced(
 		return;
 	}
 	const DX12CommandListRuntimeState runtimeState = DX12CommandListRuntimeGetState(commandList);
-	if (DX12ModHasActivePreSkinTextureOverrides())
-		SyncHuntIaFromRuntimeState(commandList, runtimeState.ia);
 	const DX12IaReplacementExecutorCallbacks iaCallbacks =
 		MakeIaReplacementCallbacks(commandList);
 	DX12IaDrawInvocation draw = {};
@@ -1153,8 +1145,6 @@ static void STDMETHODCALLTYPE HookedDrawIndexedInstanced(
 		return;
 	}
 	const DX12CommandListRuntimeState runtimeState = DX12CommandListRuntimeGetState(commandList);
-	if (DX12ModHasActivePreSkinTextureOverrides())
-		SyncHuntIaFromRuntimeState(commandList, runtimeState.ia);
 	const DX12IaReplacementExecutorCallbacks iaCallbacks =
 		MakeIaReplacementCallbacks(commandList);
 	DX12IaDrawInvocation draw = {};
@@ -1824,9 +1814,7 @@ static void STDMETHODCALLTYPE HookedIASetIndexBuffer(
 				DX12CommandListRuntimeMayHaveIaTextureCandidate(commandList);
 			DX12CommandListRuntimeRememberIndexBuffer(commandList, view);
 			if (!DX12HuntIsEnabled() && (hadCandidate ||
-			    UpdateIaTextureCandidateFromIndexView(commandList, view))) {
-				SyncHuntIaFromRuntimeState(
-					commandList, DX12CommandListRuntimeGetState(commandList).ia);
+			    UpdateIaTextureCandidateFromState(commandList))) {
 				UpdateIaTextureCandidateFlag(commandList);
 			}
 		}
@@ -1857,10 +1845,8 @@ static void STDMETHODCALLTYPE HookedIASetVertexBuffers(
 			const bool hadCandidate =
 				DX12CommandListRuntimeMayHaveIaTextureCandidate(commandList);
 			DX12CommandListRuntimeRememberVertexBuffers(commandList, startSlot, count, views);
-			if (!DX12HuntIsEnabled() && (hadCandidate || UpdateIaTextureCandidateFromVertexViews(
-				   commandList, startSlot, count, views))) {
-				SyncHuntIaFromRuntimeState(
-					commandList, DX12CommandListRuntimeGetState(commandList).ia);
+			if (!DX12HuntIsEnabled() && (hadCandidate ||
+			    UpdateIaTextureCandidateFromState(commandList))) {
 				UpdateIaTextureCandidateFlag(commandList);
 			}
 		}
