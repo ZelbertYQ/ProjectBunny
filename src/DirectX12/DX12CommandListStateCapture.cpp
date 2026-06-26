@@ -10,7 +10,8 @@
 
 bool DX12CommandListCaptureShouldTrackBindings()
 {
-	return DX12FrameAnalysisIsCapturing() || DX12ShaderDumpIsCapturingFrame();
+	return DX12FrameAnalysisIsCapturing() || DX12ShaderDumpIsCapturingFrame() ||
+		DX12ModNeedsPreSkinningUavProbe();
 }
 
 bool DX12CommandListCaptureShouldRecordBindingEvents()
@@ -26,7 +27,7 @@ bool DX12CommandListCaptureShouldTrackHuntIa()
 bool DX12CommandListCaptureShouldTrackPsoState()
 {
 	return DX12HuntIsEnabled() || DX12ModHasActiveShaderOverrides() ||
-		DX12ModHasActiveTextureOverrides();
+		DX12ModHasActiveTextureOverrides() || DX12ModNeedsPreSkinningUavProbe();
 }
 
 
@@ -80,7 +81,7 @@ ID3D12PipelineState *DX12CommandListCapturePipelineState(
 	}
 
 	const bool trackBindings = DX12CommandListCaptureShouldTrackBindingsCached(commandList);
-	if (trackBindings || DX12ModNeedsPreSkinningUavProbe()) {
+	if (trackBindings) {
 		DX12BindingSetPipelineState(commandList, activePipelineState);
 		if (trackBindings && DX12CommandListCaptureShouldRecordBindingEventsCached(commandList))
 			DX12BindingRecordStateEvent(commandList, "set_pso");

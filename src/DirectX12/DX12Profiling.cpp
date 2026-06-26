@@ -4,7 +4,6 @@
 
 namespace DX12Profiling {
 
-// --- counter definitions ---
 Counter gDrawInstanced;
 Counter gDrawIndexedInstanced;
 Counter gDispatch;
@@ -59,7 +58,6 @@ LARGE_INTEGER gFrameStartTime = {};
 LARGE_INTEGER gPerfFrequency = {};
 wchar_t gOverlayText[2048] = L"";
 
-// --- scoped timer ---
 ScopedTimer::ScopedTimer(Counter &counter)
 	: mCounter(counter)
 {
@@ -78,7 +76,6 @@ ScopedTimer::~ScopedTimer()
 	InterlockedAdd64(&mCounter.cpuTicks, endTime.QuadPart - mStart.QuadPart);
 }
 
-// --- helpers ---
 static void ResetCounter(Counter &c)
 {
 	InterlockedExchange(&c.calls, 0);
@@ -155,7 +152,6 @@ static void ResetFrame()
 	ResetCounter(gPreSkinDispatchResized);
 }
 
-// --- lifecycle ---
 void Init()
 {
 	QueryPerformanceFrequency(&gPerfFrequency);
@@ -174,14 +170,11 @@ void EndFrame()
 	InterlockedIncrement(&gFramePresentCount);
 
 	if (gMode == Mode::SUMMARY) {
-		// Detailed timing summary (F11 enabled).
 		FlushFrame();
 	} else {
-		// Lightweight per-frame counts (always on, no timing overhead).
 		LogFrameStats();
 	}
 
-	// Reset counters for the next frame.
 	ResetFrame();
 }
 
@@ -277,7 +270,6 @@ void RecordPreSkinDispatchResized()
 	InterlockedIncrement(&gPreSkinDispatchResized.calls);
 }
 
-// --- lightweight per-frame stats (always on, no timing overhead) ---
 void LogFrameStats()
 {
 	LONG present = gFramePresentCount;
@@ -327,7 +319,6 @@ void LogFrameStats()
 		gPreSkinApplied.calls, gPreSkinDispatchResized.calls);
 }
 
-// --- frame output ---
 void FlushFrame()
 {
 	if (gMode != Mode::SUMMARY)
@@ -434,4 +425,4 @@ void FlushFrame()
 		all.calls > 0 ? (double)gFastForwardHits.calls * 100.0 / (double)all.calls : 0.0);
 }
 
-} // namespace DX12Profiling
+}

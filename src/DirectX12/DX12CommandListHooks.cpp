@@ -269,19 +269,6 @@ static void ForgetRegisteredCommandListPointer(void *commandList)
 	ReleaseSRWLockExclusive(&gRegisteredListLock);
 }
 
-static bool DX12ShouldTrackComputeBindingsForPreSkin(ID3D12GraphicsCommandList *commandList)
-{
-	if (!commandList || !DX12ModNeedsPreSkinningUavProbe())
-		return false;
-	return true;
-}
-
-static bool DX12ShouldTrackComputeBindingsDirectForPreSkin(ID3D12GraphicsCommandList *commandList)
-{
-	return DX12ShouldTrackComputeBindingsForPreSkin(commandList) &&
-		!DX12CommandListCaptureShouldTrackBindingsCached(commandList);
-}
-
 static void UpdateIaTextureCandidateFlag(ID3D12GraphicsCommandList *commandList)
 {
 	if (!commandList || !DX12ModHasActiveTextureOverrides()) {

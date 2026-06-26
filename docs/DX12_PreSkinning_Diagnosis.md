@@ -44,7 +44,7 @@ The expected direction is:
 
 `DX12ModRuntimeIaRuntime.cpp` still contains section-id fallback paths such as `fallbackSeen` and `fallbackConfig`. They were not the root cause of this PreSkin failure, but they are special fallback logic and should be replaced with a single section identity model.
 
-`DX12BindingTracker.cpp` is over 2000 lines and mixes live binding state, event recording, and frame-analysis export. It should be split by responsibility after the PreSkin fix is validated.
+`DX12BindingTracker.cpp` used to be over 2000 lines and mixed live binding state, event recording, and frame-analysis export. It should remain split by responsibility so future PreSkin fixes do not reintroduce hidden coupling.
 
 ### Second Failure
 
@@ -65,3 +65,42 @@ Once the command list continued recording, `DX12BindingGetCurrentComputeSrvs` co
 `DX12ModRestorePreSkinningUavReplacement` now always restores the real descriptor heaps after a PreSkin patch and then synchronizes the DX12 runtime and binding tracker mirrors to the restored heap and root table state.
 
 The `post_dispatch` log now includes the texture override section and present number so the next test can directly correlate PreSkin output with IA replacement in the same frame sequence.
+
+### Third Failure
+
+The latest runtime log again showed `DX12PreSkinDispatchProbe` with `reason:"no_compute_srvs"` for CS `93db774c5ca9a3ea`. Unlike the first failure, many probes had `uavs:1`, so the command list state was only partially visible.
+
+Frame stats kept reporting non-zero `preSkinCsTests` and `preSkinUavTests`, while `preSkinUavHits`, `preSkinApplied`, and IA replacement all stayed zero. IA replacement was still suppressed by `inactive_preskin_dependency`.
+
+### Third Cause
+
+The previous fixes kept PreSkin alive through a special direct compute-binding tracker path while normal binding capture stayed disabled outside FrameAnalysis and ShaderDump.
+
+`DX12HotPathUpdate` still set `gDX12HotPathSkipBindings` from heavy capture needs only. During normal gameplay with PreSkin enabled, many root binding hooks could stay in the fast path. Some fast paths wrote directly into `DX12BindingTracker`, but that special path did not share the same top-level tracking semantics as the normal capture path.
+
+This split design let PSO, descriptor heaps, root signatures, tables, descriptors, constants, and runtime serials drift by hook and by frame. The visible symptom was exactly a partial state snapshot: the CS hash and sometimes the UAV table were visible, but SRV descriptor tables were not reliably expandable.
+
+### Third Fix
+
+PreSkin UAV probing is now treated as a normal reason to track command-list binding state.
+
+`DX12CommandListCaptureShouldTrackBindings` includes `DX12ModNeedsPreSkinningUavProbe`, and `DX12HotPathUpdate` keeps binding hooks active when PreSkin needs them. `DX12CommandListCaptureShouldTrackPsoState` also includes PreSkin, so Dispatch CS lookup and binding expansion use the same runtime state model.
+
+The special direct PreSkin compute-binding branch was removed from command-list hooks. Descriptor heaps, compute root signatures, descriptor tables, root descriptors, and root constants now enter `DX12BindingTracker` through the same capture path used by FrameAnalysis, while binding event recording remains gated by FrameAnalysis and ShaderDump.
+
+### Third Verification
+
+After rebuilding, retest the same Mod and check `D:\SSMTCacheFolder\3Dmigoto\ZZMIDX12\d3d12_log.jsonl`.
+
+The expected direction is:
+
+- `DX12PreSkinDispatchProbe` should stop repeating `no_compute_srvs` for configured PreSkin CS `93db774c5ca9a3ea`
+- `DX12PreSkinMatchCsProbe` should show `cs-t0` and `cs-t1` hash checks for `dbc98878` and `bfa79855`
+- `preSkinUavHits` and `preSkinApplied` should become non-zero on matching frames
+- IA replacement for `dffb91a3` should stop reporting `inactive_preskin_dependency`
+
+### Third Follow-up Risk
+
+`DX12BindingTracker.cpp` was split into live tracking, frame export, resource export, and shared private helpers after this fix. The split keeps each cpp below 1000 lines and makes future binding-state changes easier to review without mixing runtime capture with frame-analysis output.
+
+The remaining section-id fallback paths in `DX12ModRuntimeIaRuntime.cpp` are still architectural debt. They were not changed here because the reproduced failure was in command-list binding state tracking, not texture override identity resolution.

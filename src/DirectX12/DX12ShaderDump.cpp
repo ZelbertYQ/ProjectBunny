@@ -1401,7 +1401,6 @@ static void SnapshotFrameShadersAndPsos(
 			shaders->push_back(it->second);
 	}
 
-	// Some older paths only track VS/PS/CS in the frame info. Use them as a fallback.
 	for (const DX12PsoShaderInfo &info : frameInfos) {
 		for (const auto &item : gShaders) {
 			if (!ShaderInfoContainsHash(info, item.second))

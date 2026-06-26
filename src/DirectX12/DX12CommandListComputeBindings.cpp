@@ -25,8 +25,6 @@ static void STDMETHODCALLTYPE HookedSetDescriptorHeaps(
 		}
 	}
 	DX12CommandListRuntimeSetDescriptorHeaps(commandList, cbvSrvUav, sampler);
-	if (DX12ShouldTrackComputeBindingsDirectForPreSkin(commandList))
-		DX12BindingSetDescriptorHeaps(commandList, count, heaps);
 
 	if (gDX12HotPathSkipBindings) {
 		DX12_PROFILE_FAST_FORWARD();
@@ -53,8 +51,6 @@ static void STDMETHODCALLTYPE HookedSetComputeRootSignature(
 
 	if (gDX12HotPathSkipBindings) {
 		DX12_PROFILE_FAST_FORWARD();
-		if (DX12ShouldTrackComputeBindingsDirectForPreSkin(commandList))
-			DX12BindingSetComputeRootSignature(commandList, rootSignature);
 		PFN_SET_ROOT_SIGNATURE original =
 			DX12_CL_ORIG(commandList, 29, PFN_SET_ROOT_SIGNATURE, SetComputeRootSignature);
 		if (original)
@@ -64,8 +60,6 @@ static void STDMETHODCALLTYPE HookedSetComputeRootSignature(
 
 	LogDX12Call("ID3D12GraphicsCommandList::SetComputeRootSignature", commandList,
 		" rootSignature=%p", rootSignature);
-	if (DX12ShouldTrackComputeBindingsDirectForPreSkin(commandList))
-		DX12BindingSetComputeRootSignature(commandList, rootSignature);
 	DX12CommandListCaptureComputeRootSignature(commandList, rootSignature);
 	DX12CommandListRuntimeBumpComputeBindingSerial(commandList);
 	PFN_SET_ROOT_SIGNATURE original =
@@ -112,9 +106,6 @@ static void STDMETHODCALLTYPE HookedSetComputeRootDescriptorTable(
 
 	if (gDX12HotPathSkipBindings) {
 		DX12_PROFILE_FAST_FORWARD();
-		if (DX12ShouldTrackComputeBindingsDirectForPreSkin(commandList))
-			DX12BindingSetComputeRootDescriptorTable(
-				commandList, rootParameterIndex, baseDescriptor);
 		PFN_SET_ROOT_DESCRIPTOR_TABLE original =
 			DX12_CL_ORIG(commandList, 31, PFN_SET_ROOT_DESCRIPTOR_TABLE, SetComputeRootDescriptorTable);
 		if (original)
@@ -125,9 +116,6 @@ static void STDMETHODCALLTYPE HookedSetComputeRootDescriptorTable(
 	LogDX12Call("ID3D12GraphicsCommandList::SetComputeRootDescriptorTable", commandList,
 		" root=%u gpu=0x%llx", rootParameterIndex,
 		static_cast<unsigned long long>(baseDescriptor.ptr));
-	if (DX12ShouldTrackComputeBindingsDirectForPreSkin(commandList))
-		DX12BindingSetComputeRootDescriptorTable(
-			commandList, rootParameterIndex, baseDescriptor);
 	DX12CommandListCaptureComputeRootDescriptorTable(
 		commandList, rootParameterIndex, baseDescriptor);
 	DX12CommandListRuntimeBumpComputeBindingSerial(commandList);
@@ -168,10 +156,6 @@ static void STDMETHODCALLTYPE HookedSetComputeRoot32BitConstant(
 {
 	if (gDX12HotPathSkipBindings) {
 		DX12_PROFILE_FAST_FORWARD();
-		if (DX12ShouldTrackComputeBindingsDirectForPreSkin(commandList)) {
-			DX12BindingSetComputeRoot32BitConstant(
-				commandList, rootParameterIndex, destOffset, srcData);
-		}
 		PFN_SET_ROOT_32BIT_CONSTANT original =
 			DX12_CL_ORIG(commandList, 33, PFN_SET_ROOT_32BIT_CONSTANT, SetComputeRoot32BitConstant);
 		if (original)
@@ -181,9 +165,6 @@ static void STDMETHODCALLTYPE HookedSetComputeRoot32BitConstant(
 
 	LogDX12Call("ID3D12GraphicsCommandList::SetComputeRoot32BitConstant", commandList,
 		" root=%u destOffset=%u", rootParameterIndex, destOffset);
-	if (DX12ShouldTrackComputeBindingsDirectForPreSkin(commandList))
-		DX12BindingSetComputeRoot32BitConstant(
-			commandList, rootParameterIndex, destOffset, srcData);
 	DX12CommandListCaptureComputeRoot32BitConstant(
 		commandList, rootParameterIndex, srcData, destOffset);
 	DX12CommandListRuntimeBumpComputeBindingSerial(commandList);
@@ -212,10 +193,6 @@ static void STDMETHODCALLTYPE HookedSetComputeRoot32BitConstants(
 {
 	if (gDX12HotPathSkipBindings) {
 		DX12_PROFILE_FAST_FORWARD();
-		if (DX12ShouldTrackComputeBindingsDirectForPreSkin(commandList)) {
-			DX12BindingSetComputeRoot32BitConstants(
-				commandList, rootParameterIndex, destOffset, num32BitValuesToSet, srcData);
-		}
 		PFN_SET_ROOT_32BIT_CONSTANTS original =
 			DX12_CL_ORIG(commandList, 35, PFN_SET_ROOT_32BIT_CONSTANTS, SetComputeRoot32BitConstants);
 		if (original)
@@ -225,10 +202,6 @@ static void STDMETHODCALLTYPE HookedSetComputeRoot32BitConstants(
 
 	LogDX12Call("ID3D12GraphicsCommandList::SetComputeRoot32BitConstants", commandList,
 		" root=%u values=%u destOffset=%u", rootParameterIndex, num32BitValuesToSet, destOffset);
-	if (DX12ShouldTrackComputeBindingsDirectForPreSkin(commandList)) {
-		DX12BindingSetComputeRoot32BitConstants(
-			commandList, rootParameterIndex, destOffset, num32BitValuesToSet, srcData);
-	}
 	DX12CommandListCaptureComputeRoot32BitConstants(
 		commandList, rootParameterIndex, num32BitValuesToSet, srcData, destOffset);
 	DX12CommandListRuntimeBumpComputeBindingSerial(commandList);
@@ -259,9 +232,6 @@ static void STDMETHODCALLTYPE HookedSetComputeRootConstantBufferView(
 
 	if (gDX12HotPathSkipBindings) {
 		DX12_PROFILE_FAST_FORWARD();
-		if (DX12ShouldTrackComputeBindingsDirectForPreSkin(commandList))
-			DX12BindingSetComputeRootDescriptor(
-				commandList, rootParameterIndex, D3D12_ROOT_PARAMETER_TYPE_CBV, address);
 		PFN_SET_ROOT_GPU_VA original =
 			DX12_CL_ORIG(commandList, 37, PFN_SET_ROOT_GPU_VA, SetComputeRootConstantBufferView);
 		if (original)
@@ -271,9 +241,6 @@ static void STDMETHODCALLTYPE HookedSetComputeRootConstantBufferView(
 
 	LogDX12Call("ID3D12GraphicsCommandList::SetComputeRootConstantBufferView", commandList,
 		" root=%u gpu=0x%llx", rootParameterIndex, static_cast<unsigned long long>(address));
-	if (DX12ShouldTrackComputeBindingsDirectForPreSkin(commandList))
-		DX12BindingSetComputeRootDescriptor(
-			commandList, rootParameterIndex, D3D12_ROOT_PARAMETER_TYPE_CBV, address);
 	DX12CommandListCaptureComputeRootDescriptor(
 		commandList, rootParameterIndex, D3D12_ROOT_PARAMETER_TYPE_CBV, address);
 	DX12CommandListRuntimeBumpComputeBindingSerial(commandList);
@@ -314,9 +281,6 @@ static void STDMETHODCALLTYPE HookedSetComputeRootShaderResourceView(
 
 	if (gDX12HotPathSkipBindings) {
 		DX12_PROFILE_FAST_FORWARD();
-		if (DX12ShouldTrackComputeBindingsDirectForPreSkin(commandList))
-			DX12BindingSetComputeRootDescriptor(
-				commandList, rootParameterIndex, D3D12_ROOT_PARAMETER_TYPE_SRV, address);
 		PFN_SET_ROOT_GPU_VA original =
 			DX12_CL_ORIG(commandList, 39, PFN_SET_ROOT_GPU_VA, SetComputeRootShaderResourceView);
 		if (original)
@@ -326,9 +290,6 @@ static void STDMETHODCALLTYPE HookedSetComputeRootShaderResourceView(
 
 	LogDX12Call("ID3D12GraphicsCommandList::SetComputeRootShaderResourceView", commandList,
 		" root=%u gpu=0x%llx", rootParameterIndex, static_cast<unsigned long long>(address));
-	if (DX12ShouldTrackComputeBindingsDirectForPreSkin(commandList))
-		DX12BindingSetComputeRootDescriptor(
-			commandList, rootParameterIndex, D3D12_ROOT_PARAMETER_TYPE_SRV, address);
 	DX12CommandListCaptureComputeRootDescriptor(
 		commandList, rootParameterIndex, D3D12_ROOT_PARAMETER_TYPE_SRV, address);
 	DX12CommandListRuntimeBumpComputeBindingSerial(commandList);
@@ -369,9 +330,6 @@ static void STDMETHODCALLTYPE HookedSetComputeRootUnorderedAccessView(
 
 	if (gDX12HotPathSkipBindings) {
 		DX12_PROFILE_FAST_FORWARD();
-		if (DX12ShouldTrackComputeBindingsDirectForPreSkin(commandList))
-			DX12BindingSetComputeRootDescriptor(
-				commandList, rootParameterIndex, D3D12_ROOT_PARAMETER_TYPE_UAV, address);
 		PFN_SET_ROOT_GPU_VA original =
 			DX12_CL_ORIG(commandList, 41, PFN_SET_ROOT_GPU_VA, SetComputeRootUnorderedAccessView);
 		if (original)
@@ -381,9 +339,6 @@ static void STDMETHODCALLTYPE HookedSetComputeRootUnorderedAccessView(
 
 	LogDX12Call("ID3D12GraphicsCommandList::SetComputeRootUnorderedAccessView", commandList,
 		" root=%u gpu=0x%llx", rootParameterIndex, static_cast<unsigned long long>(address));
-	if (DX12ShouldTrackComputeBindingsDirectForPreSkin(commandList))
-		DX12BindingSetComputeRootDescriptor(
-			commandList, rootParameterIndex, D3D12_ROOT_PARAMETER_TYPE_UAV, address);
 	DX12CommandListCaptureComputeRootDescriptor(
 		commandList, rootParameterIndex, D3D12_ROOT_PARAMETER_TYPE_UAV, address);
 	DX12CommandListRuntimeBumpComputeBindingSerial(commandList);

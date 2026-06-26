@@ -4,6 +4,8 @@
 add_library(DirectX12 SHARED
     D3D12Wrapper.cpp
     DX12BindingTracker.cpp
+    DX12BindingTrackerFrameExport.cpp
+    DX12BindingTrackerResourceExport.cpp
     DX12CommandListCommandRecorder.cpp
     DX12CommandListLifecycle.cpp
     DX12CommandListStateCapture.cpp

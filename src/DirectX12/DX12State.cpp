@@ -128,12 +128,15 @@ void DX12HotPathUpdate()
 		DX12ModNeedsPresentReplacement() ||
 		DX12ModHasAnyActiveOverrides() ||
 		DX12ModNeedsPreSkinningUavProbe();
+	const bool needsBindingState =
+		needsHeavyTracking ||
+		DX12ModNeedsPreSkinningUavProbe();
 
 	InterlockedExchange(&gDX12HotPathSkipAll,
 		(needsHeavyTracking || needsRecordWork) ? 0 : 1);
 
 	InterlockedExchange(&gDX12HotPathSkipBindings,
-		needsHeavyTracking ? 0 : 1);
+		needsBindingState ? 0 : 1);
 
 	InterlockedExchange(&gDX12HotPathTrackResourceMetadata,
 		(needsHeavyTracking || DX12ModNeedsPreSkinningUavProbe()) ? 1 : 0);
