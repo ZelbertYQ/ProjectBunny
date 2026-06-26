@@ -1,3 +1,4 @@
+#include <algorithm>
 #include "DX12DispatchHookFlow.h"
 
 #include <cstring>
@@ -57,6 +58,9 @@ struct DX12DispatchPreSkinProbe
 	bool shouldLog = false;
 	uint64_t computeShaderHash = 0;
 	UINT64 computeBindingSerial = 0;
+	UINT originalVertexCount = 0;
+	UINT overrideVertexCount = 0;
+	DX12PreSkinDispatchOverride dispatchOverride;
 };
 
 static DX12DispatchPreSkinProbe &GetDispatchPreSkinProbeScratch()
@@ -74,6 +78,9 @@ static DX12DispatchPreSkinProbe &GetDispatchPreSkinProbeScratch()
 	probe.shouldLog = false;
 	probe.computeShaderHash = 0;
 	probe.computeBindingSerial = 0;
+	probe.originalVertexCount = 0;
+	probe.overrideVertexCount = 0;
+	probe.dispatchOverride = DX12PreSkinDispatchOverride();
 	return probe;
 }
 
@@ -107,58 +114,39 @@ static void PreparePreSkinProbe(
 		return;
 	}
 	probe->computeBindingSerial = computeBindingSerial;
-	bool cachedMatch = false;
-	if (DX12ModHasCachedPreSkinningUavMatch(
-		commandList, probe->computeShaderHash, computeBindingSerial, &cachedMatch)) {
-		probe->uavsFound = cachedMatch;
-		if (!cachedMatch) {
-			LogPreSkinDispatchProbeReason(
-				"cached_no_uav_match", probe->computeShaderHash,
-				computeBindingSerial, 0);
-			return;
-		}
-	}
-
 #if defined(_DEBUG)
 	probe->shouldLog = true;
 #endif
 	if (!probe->uavsFound)
 		probe->uavsFound = DX12BindingGetCurrentComputeUavs(commandList, &probe->uavs);
-	if (!probe->uavsFound) {
+	probe->srvsFound = DX12BindingGetCurrentComputeSrvs(commandList, &probe->srvs);
+	probe->cbvsFound = DX12BindingGetCurrentComputeCbvs(commandList, &probe->cbvs);
+	probe->rootConstantsFound =
+		DX12BindingGetCurrentComputeRootConstants(commandList, &probe->rootConstants);
+	if (!probe->srvsFound) {
 		LogPreSkinDispatchProbeReason(
-			"no_compute_uavs", probe->computeShaderHash,
+			"no_compute_srvs", probe->computeShaderHash,
 			computeBindingSerial, probe->uavs.size());
 		return;
 	}
 
-	// Keep SRV/CBV/root-constant table walking behind the cheap UAV producer
-	// filter. Those lookups take tracker locks and can dominate compute-heavy
-	// frames when no pre-skin override can match.
-	if (probe->uavsFound &&
-	    DX12ModPreSkinningUavProducerMayMatch(probe->computeShaderHash, probe->uavs)) {
-		probe->srvsFound = DX12BindingGetCurrentComputeSrvs(commandList, &probe->srvs);
-		probe->cbvsFound = DX12BindingGetCurrentComputeCbvs(commandList, &probe->cbvs);
-		probe->rootConstantsFound =
-			DX12BindingGetCurrentComputeRootConstants(commandList, &probe->rootConstants);
-
-		static const std::vector<DX12CurrentComputeUavBinding> kEmptyComputeBindings;
-		static const std::vector<DX12CurrentRootConstants> kEmptyRootConstants;
-		probe->applied = DX12ModApplyPreSkinningUavReplacement(
-			commandList, probe->computeShaderHash, probe->uavs,
-			probe->srvsFound ? probe->srvs : kEmptyComputeBindings,
-			probe->cbvsFound ? probe->cbvs : kEmptyComputeBindings,
-			probe->rootConstantsFound ? probe->rootConstants : kEmptyRootConstants,
-			nullptr, nullptr);
-	} else {
-		LogPreSkinDispatchProbeReason(
-			"uav_filter_miss", probe->computeShaderHash,
-			computeBindingSerial, probe->uavs.size());
-	}
-
+	static const std::vector<DX12CurrentComputeUavBinding> kEmptyComputeBindings;
+	static const std::vector<DX12CurrentRootConstants> kEmptyRootConstants;
+	probe->applied = DX12ModApplyPreSkinningUavReplacement(
+		commandList, probe->computeShaderHash,
+		probe->uavsFound ? probe->uavs : kEmptyComputeBindings,
+		probe->srvs,
+		probe->cbvsFound ? probe->cbvs : kEmptyComputeBindings,
+		probe->rootConstantsFound ? probe->rootConstants : kEmptyRootConstants,
+		&probe->originalVertexCount, &probe->overrideVertexCount,
+		&probe->dispatchOverride);
 }
 
 static void FinishPreSkinProbe(
 	ID3D12GraphicsCommandList *commandList,
+	UINT originalThreadGroupCountX,
+	UINT originalThreadGroupCountY,
+	UINT originalThreadGroupCountZ,
 	UINT threadGroupCountX,
 	UINT threadGroupCountY,
 	UINT threadGroupCountZ,
@@ -168,22 +156,21 @@ static void FinishPreSkinProbe(
 		DX12ModRestorePreSkinningUavReplacement(commandList);
 	if (probe.uavsFound)
 		DX12ModRecordComputeUavs(commandList, probe.uavs);
-	if (probe.computeBindingSerial)
-		DX12ModStoreCachedPreSkinningUavMatch(
-			commandList, probe.computeShaderHash, probe.computeBindingSerial,
-			probe.uavsFound);
 	if (!probe.applied)
 		return;
 
 	DX12_DISPATCH_DEBUG_VERBOSE_LOG(
 		DX12LogDebugJsonFunc("DX12DispatchUavProbe",
-			"\"found\":%s,\"uavs\":%zu,\"srvs\":%zu,\"cbvs\":%zu,\"rootConstants\":%zu,\"preSkinApplied\":%s,\"cs\":\"%016llx\",\"groups\":\"%u,%u,%u\"",
+			"\"found\":%s,\"uavs\":%zu,\"srvs\":%zu,\"cbvs\":%zu,\"rootConstants\":%zu,\"preSkinApplied\":%s,\"handlingSkip\":%s,\"explicitDispatch\":%s,\"cs\":\"%016llx\",\"originalGroups\":\"%u,%u,%u\",\"groups\":\"%u,%u,%u\"",
 			probe.uavsFound ? "true" : "false", probe.uavs.size(),
 			probe.srvsFound ? probe.srvs.size() : 0,
 			probe.cbvsFound ? probe.cbvs.size() : 0,
 			probe.rootConstantsFound ? probe.rootConstants.size() : 0,
 			probe.applied ? "true" : "false",
+			probe.dispatchOverride.handlingSkip ? "true" : "false",
+			probe.dispatchOverride.hasDispatch ? "true" : "false",
 			static_cast<unsigned long long>(probe.computeShaderHash),
+			originalThreadGroupCountX, originalThreadGroupCountY, originalThreadGroupCountZ,
 			threadGroupCountX, threadGroupCountY, threadGroupCountZ));
 }
 
@@ -216,6 +203,25 @@ void DX12DispatchHookFlowExecute(
 
 	DX12DispatchPreSkinProbe &probe = GetDispatchPreSkinProbeScratch();
 	PreparePreSkinProbe(commandList, runtimeState, &probe);
-	originalDispatch(commandList, threadGroupCountX, threadGroupCountY, threadGroupCountZ);
-	FinishPreSkinProbe(commandList, threadGroupCountX, threadGroupCountY, threadGroupCountZ, probe);
+	UINT dispatchGroupX = threadGroupCountX;
+	UINT dispatchGroupY = threadGroupCountY;
+	UINT dispatchGroupZ = threadGroupCountZ;
+	if (probe.applied && probe.dispatchOverride.handlingSkip) {
+		if (probe.dispatchOverride.hasDispatch) {
+			dispatchGroupX = probe.dispatchOverride.groupsX;
+			dispatchGroupY = probe.dispatchOverride.groupsY;
+			dispatchGroupZ = probe.dispatchOverride.groupsZ;
+			originalDispatch(commandList, dispatchGroupX, dispatchGroupY, dispatchGroupZ);
+		}
+		FinishPreSkinProbe(
+			commandList,
+			threadGroupCountX, threadGroupCountY, threadGroupCountZ,
+			dispatchGroupX, dispatchGroupY, dispatchGroupZ, probe);
+		return;
+	}
+	originalDispatch(commandList, dispatchGroupX, dispatchGroupY, dispatchGroupZ);
+	FinishPreSkinProbe(
+		commandList,
+		threadGroupCountX, threadGroupCountY, threadGroupCountZ,
+		dispatchGroupX, dispatchGroupY, dispatchGroupZ, probe);
 }

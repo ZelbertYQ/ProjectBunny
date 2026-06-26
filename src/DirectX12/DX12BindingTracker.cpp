@@ -1217,8 +1217,8 @@ static const FlatBufferRow *GetOrAddBufferRow(
 
 	DX12BufferResourceSummary resource;
 	const bool resolved = DX12ResolveBufferResourceByGpuVa(gpuVa, size, &resource);
-	const uint32_t huntHash = DX12HashBufferResourceView(
-		resolved ? &resource : nullptr, gpuVa, size);
+	const uint32_t huntHash = DX12HashBufferView(
+		resolved ? &resource : nullptr, gpuVa, size, stride, format, slot);
 	std::string key = MakeBufferKey(role, huntHash);
 	auto found = rowByKey->find(key);
 	if (found != rowByKey->end() && found->second < rows->size())
@@ -1323,8 +1323,8 @@ static void AddFrameIaBufferRow(
 	row.slot = slot;
 	row.format = format;
 	row.resolved = DX12ResolveBufferResourceByGpuVa(gpuVa, size, &row.resource);
-	row.huntHash = DX12HashBufferResourceView(
-		row.resolved ? &row.resource : nullptr, gpuVa, size);
+	row.huntHash = DX12HashBufferView(
+		row.resolved ? &row.resource : nullptr, gpuVa, size, stride, format, slot);
 	rows->push_back(row);
 }
 

@@ -13,6 +13,42 @@ static bool StartsWithI(const std::wstring &value, const wchar_t *prefix)
 	return lower.rfind(lowerPrefix, 0) == 0;
 }
 
+static bool ParseSrvIndexedKey(
+	const std::wstring &key, const wchar_t *prefix, const wchar_t *suffix,
+	uint32_t *index)
+{
+	if (!index || !StartsWithI(key, prefix))
+		return false;
+
+	const size_t prefixLength = wcslen(prefix);
+	const size_t suffixLength = suffix ? wcslen(suffix) : 0;
+	if (key.size() <= prefixLength + suffixLength)
+		return false;
+	if (suffixLength) {
+		std::wstring keySuffix = key.substr(key.size() - suffixLength);
+		if (ToLower(keySuffix) != ToLower(suffix))
+			return false;
+	}
+
+	const std::wstring digits = key.substr(
+		prefixLength, key.size() - prefixLength - suffixLength);
+	if (digits.empty())
+		return false;
+
+	uint32_t parsed = 0;
+	for (wchar_t ch : digits) {
+		if (ch < L'0' || ch > L'9')
+			return false;
+		const uint32_t digit = static_cast<uint32_t>(ch - L'0');
+		if (parsed > (UINT32_MAX - digit) / 10)
+			return false;
+		parsed = parsed * 10 + digit;
+	}
+
+	*index = parsed;
+	return true;
+}
+
 bool ParseTextureOverrideHash(const std::wstring &text, uint32_t *value)
 {
 	if (!value)
@@ -287,6 +323,33 @@ void ParseTextureOverrideSections(
 					config.matchUavBytes = value;
 					config.hasMatchUavBytes = true;
 				}
+				continue;
+			}
+
+			uint32_t srvIndex = 0;
+			if (ParseSrvIndexedKey(key, L"match_cs_t", L"_hash", &srvIndex)) {
+				uint32_t value = 0;
+				if (ParseTextureOverrideHash(entry.value, &value))
+					config.preSkinMatchCsSrvHashes[srvIndex] = value;
+				continue;
+			}
+
+			if (ParseSrvIndexedKey(key, L"match_srv", L"_hash", &srvIndex)) {
+				uint32_t value = 0;
+				if (ParseTextureOverrideHash(entry.value, &value))
+					config.preSkinMatchCsSrvHashes[srvIndex] = value;
+				continue;
+			}
+
+			if (ParseSrvIndexedKey(key, L"cs-t", L"", &srvIndex)) {
+				config.preSkinCsSrvResources[srvIndex] =
+					ResolveResourceReference(Trim(entry.value), entry.iniNamespace);
+				continue;
+			}
+
+			if (ParseSrvIndexedKey(key, L"srv", L"", &srvIndex)) {
+				config.preSkinCsSrvResources[srvIndex] =
+					ResolveResourceReference(Trim(entry.value), entry.iniNamespace);
 				continue;
 			}
 

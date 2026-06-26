@@ -15,6 +15,19 @@
 #include "DX12Json.h"
 #include "DX12ModRuntime.h"
 #include "DX12State.h"
+#include "crc32c.h"
+
+static uint32_t HashBytes(uint32_t seed, const void *data, size_t size)
+{
+	if (!data || size == 0)
+		return seed;
+	__try {
+		return crc32c_append(seed, static_cast<const uint8_t*>(data), size);
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER) {
+		return 0;
+	}
+}
 
 static void GetSummaryDirectory(const wchar_t *dir, wchar_t *path, size_t pathCount)
 {
@@ -1727,22 +1740,74 @@ uint32_t DX12HashBufferResourceView(
 	const DX12BufferResourceSummary *summary, UINT64 fallbackGpuVirtualAddress,
 	UINT64 fallbackSize)
 {
-	uint32_t hash = 2166136261u;
+	uint32_t hash = 0;
 	const uint32_t tag = MakeTrackerFourCC('D', 'X', 'B', 'V');
-	hash = Fnv1a32Append(hash, &tag, sizeof(tag));
+	hash = HashBytes(hash, &tag, sizeof(tag));
 
 	if (summary && summary->hasResourceDesc) {
 		D3D12_RESOURCE_DESC desc = summary->resourceDesc;
 		desc.Alignment = 0;
-		hash = Fnv1a32Append(hash, &desc, sizeof(desc));
+		hash = HashBytes(hash, &desc, sizeof(desc));
 		if (summary->hasResourceHeapType)
-			hash = Fnv1a32Append(hash, &summary->resourceHeapType, sizeof(summary->resourceHeapType));
+			hash = HashBytes(hash, &summary->resourceHeapType, sizeof(summary->resourceHeapType));
 	} else {
-		hash = Fnv1a32Append(hash, &fallbackSize, sizeof(fallbackSize));
+		hash = HashBytes(hash, &fallbackSize, sizeof(fallbackSize));
 	}
 
 	if (!hash)
-		hash = Fnv1a32(&fallbackGpuVirtualAddress, sizeof(fallbackGpuVirtualAddress));
+		hash = HashBytes(0, &fallbackGpuVirtualAddress, sizeof(fallbackGpuVirtualAddress));
+	return hash;
+}
+
+uint32_t DX12HashBufferView(
+	const DX12BufferResourceSummary *summary, UINT64 fallbackGpuVirtualAddress,
+	UINT64 fallbackSize, UINT stride, UINT format, UINT slot)
+{
+	uint32_t hash = DX12HashBufferResourceView(summary, fallbackGpuVirtualAddress, fallbackSize);
+	const uint32_t tag = MakeTrackerFourCC('D', 'X', 'I', 'A');
+	hash = HashBytes(hash, &tag, sizeof(tag));
+	hash = HashBytes(hash, &fallbackGpuVirtualAddress, sizeof(fallbackGpuVirtualAddress));
+	hash = HashBytes(hash, &fallbackSize, sizeof(fallbackSize));
+	hash = HashBytes(hash, &stride, sizeof(stride));
+	hash = HashBytes(hash, &format, sizeof(format));
+	hash = HashBytes(hash, &slot, sizeof(slot));
+	return hash;
+}
+
+uint32_t DX12HashDescriptorBufferView(
+	const DX12DescriptorSummary *descriptor, UINT64 fallbackGpuVirtualAddress,
+	UINT64 fallbackSize)
+{
+	DX12BufferResourceSummary summary = {};
+	if (descriptor) {
+		summary.resource = descriptor->resource;
+		summary.resourceDesc = descriptor->resourceDesc;
+		summary.hasResourceDesc = descriptor->hasResourceDesc;
+		summary.resourceHeapType = descriptor->resourceHeapType;
+		summary.hasResourceHeapType = descriptor->hasResourceHeapType;
+		summary.gpuVirtualAddress = descriptor->gpuVirtualAddress;
+		summary.resourceOffset = descriptor->resourceOffset;
+		summary.viewSize = descriptor->viewSize;
+		summary.currentState = descriptor->currentState;
+		summary.hasCurrentState = descriptor->hasCurrentState;
+	}
+
+	uint32_t hash = DX12HashBufferResourceView(
+		descriptor ? &summary : nullptr, fallbackGpuVirtualAddress, fallbackSize);
+	const uint32_t tag = MakeTrackerFourCC('D', 'X', 'D', 'V');
+	hash = HashBytes(hash, &tag, sizeof(tag));
+	if (descriptor) {
+		hash = HashBytes(hash, descriptor->kind.data(), descriptor->kind.size());
+		hash = HashBytes(hash, &descriptor->viewFormat, sizeof(descriptor->viewFormat));
+		hash = HashBytes(hash, &descriptor->viewDimension, sizeof(descriptor->viewDimension));
+		hash = HashBytes(hash, &descriptor->firstElement, sizeof(descriptor->firstElement));
+		hash = HashBytes(hash, &descriptor->numElements, sizeof(descriptor->numElements));
+		hash = HashBytes(hash, &descriptor->structureByteStride, sizeof(descriptor->structureByteStride));
+		hash = HashBytes(hash, &descriptor->bufferViewOffset, sizeof(descriptor->bufferViewOffset));
+		hash = HashBytes(hash, &descriptor->bufferViewBytes, sizeof(descriptor->bufferViewBytes));
+	}
+	hash = HashBytes(hash, &fallbackGpuVirtualAddress, sizeof(fallbackGpuVirtualAddress));
+	hash = HashBytes(hash, &fallbackSize, sizeof(fallbackSize));
 	return hash;
 }
 

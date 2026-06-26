@@ -147,9 +147,9 @@ static HuntIaBuffer ResolveIaViewCached(
 		buffer.resource = summary.resource;
 		buffer.resourceGpuVa = summary.gpuVirtualAddress;
 		buffer.resourceBytes = summary.hasResourceDesc ? summary.resourceDesc.Width : 0;
-		buffer.hash = DX12HashBufferResourceView(&summary, gpuVa, size);
+		buffer.hash = DX12HashBufferView(&summary, gpuVa, size, stride, format, slot);
 	} else {
-		buffer.hash = DX12HashBufferResourceView(nullptr, gpuVa, size);
+		buffer.hash = DX12HashBufferView(nullptr, gpuVa, size, stride, format, slot);
 	}
 
 	// IA bindings are command-list hot path state. D3D12 records these bindings

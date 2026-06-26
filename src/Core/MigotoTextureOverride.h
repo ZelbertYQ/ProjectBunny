@@ -48,6 +48,8 @@ struct TextureOverrideConfig
 	bool hasMatchFirstInstance = false;
 	bool hasMatchCs = false;
 	bool hasMatchUavBytes = false;
+	std::map<uint32_t, uint32_t> preSkinMatchCsSrvHashes;
+	std::map<uint32_t, std::wstring> preSkinCsSrvResources;
 	NumericMatch matchVertexCount;
 	NumericMatch matchIndexCount;
 	NumericMatch matchInstanceCount;

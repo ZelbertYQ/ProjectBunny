@@ -116,6 +116,12 @@ bool DX12ResolveBufferResourceByGpuVa(
 uint32_t DX12HashBufferResourceView(
 	const DX12BufferResourceSummary *summary, UINT64 fallbackGpuVirtualAddress,
 	UINT64 fallbackSize);
+uint32_t DX12HashBufferView(
+	const DX12BufferResourceSummary *summary, UINT64 fallbackGpuVirtualAddress,
+	UINT64 fallbackSize, UINT stride, UINT format, UINT slot);
+uint32_t DX12HashDescriptorBufferView(
+	const DX12DescriptorSummary *descriptor, UINT64 fallbackGpuVirtualAddress,
+	UINT64 fallbackSize);
 bool DX12GetRootSignatureSummary(
 	ID3D12RootSignature *rootSignature, DX12RootSignatureSummary *summary);
 bool DX12GetPsoRootSignature(UINT64 psoIndex, ID3D12RootSignature **rootSignature);

@@ -119,7 +119,11 @@ static bool DX12ReleaseShouldLogFunction(const char *func)
 {
 	if (gReleaseStartupLogging.load(std::memory_order_relaxed))
 		return true;
-	return func && strcmp(func, "DX12ModRuntimeReload") == 0;
+	if (!func)
+		return false;
+	return strcmp(func, "DX12ModRuntimeReload") == 0 ||
+		strcmp(func, "DX12PreSkinMatchCsProbe") == 0 ||
+		strcmp(func, "DX12PreSkinMatchCsApply") == 0;
 }
 #else
 void DX12EndReleaseStartupLogging()

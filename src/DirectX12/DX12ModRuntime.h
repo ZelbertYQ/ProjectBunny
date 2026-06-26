@@ -199,6 +199,14 @@ ID3D12PipelineState *DX12ModGetReplacementPipelineState(ID3D12PipelineState *pip
 bool DX12ModShouldSkipPipelineState(ID3D12PipelineState *pipelineState, bool dispatch);
 void DX12ModRecordComputeUavs(
 	ID3D12GraphicsCommandList *commandList, const std::vector<DX12CurrentComputeUavBinding> &uavs);
+struct DX12PreSkinDispatchOverride
+{
+	bool handlingSkip = false;
+	bool hasDispatch = false;
+	UINT groupsX = 0;
+	UINT groupsY = 0;
+	UINT groupsZ = 0;
+};
 bool DX12ModApplyPreSkinningUavReplacement(
 	ID3D12GraphicsCommandList *commandList,
 	uint64_t computeShaderHash,
@@ -207,7 +215,8 @@ bool DX12ModApplyPreSkinningUavReplacement(
 	const std::vector<DX12CurrentComputeUavBinding> &cbvs,
 	const std::vector<DX12CurrentRootConstants> &rootConstants,
 	UINT *originalVertexCount = nullptr,
-	UINT *overrideVertexCount = nullptr);
+	UINT *overrideVertexCount = nullptr,
+	DX12PreSkinDispatchOverride *dispatchOverride = nullptr);
 bool DX12ModApplyKnownPreSkinningUavPatches(ID3D12GraphicsCommandList *commandList);
 void DX12ModRestorePreSkinningUavReplacement(ID3D12GraphicsCommandList *commandList);
 void DX12ModNotifyCommandListsSubmitted(
