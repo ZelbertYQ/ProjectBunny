@@ -6,6 +6,7 @@
 
 #include "DX12FrameAnalysis.h"
 #include "DX12Json.h"
+#include "DX12ResourceTracker.h"
 #include "DX12ShaderDump.h"
 
 static const char *ResourceDimensionName(D3D12_RESOURCE_DIMENSION dimension)
@@ -292,18 +293,20 @@ void DX12FrameAnalysisManifestWriteIaBinding(
 {
 	char vs[32], ps[32], cs[32], hash[16];
 	char huntHash[16];
+	char fileHash[16];
 	char producerCs[32];
 	FormatShaderHash(buffer.shaderInfo.vs, buffer.shaderInfo.hasVS, vs, ARRAYSIZE(vs));
 	FormatShaderHash(buffer.shaderInfo.ps, buffer.shaderInfo.hasPS, ps, ARRAYSIZE(ps));
 	FormatShaderHash(buffer.shaderInfo.cs, buffer.shaderInfo.hasCS, cs, ARRAYSIZE(cs));
 	FormatShaderHash(buffer.producerShaderInfo.cs, buffer.producerShaderInfo.hasCS,
 		producerCs, ARRAYSIZE(producerCs));
-	FormatFileHash(filePath, hash, ARRAYSIZE(hash));
+	FormatFileHash(filePath, fileHash, ARRAYSIZE(fileHash));
 	sprintf_s(huntHash, sizeof(huntHash), "%08x", buffer.huntHash);
+	sprintf_s(hash, sizeof(hash), "%08x", buffer.huntHash);
 
 	char vsJson[64], psJson[64], csJson[64], producerCsJson[64];
 	char roleJson[32], dimJson[32], fmtNameJson[64], skinSourceJson[64];
-	char producerBindJson[64], hashJson[32], huntHashJson[32], fileJson[512], resourceJson[32];
+	char producerBindJson[64], hashJson[32], huntHashJson[32], fileHashJson[32], fileJson[512], resourceJson[32];
 	DX12JsonEscapeString(vsJson, sizeof(vsJson), vs);
 	DX12JsonEscapeString(psJson, sizeof(psJson), ps);
 	DX12JsonEscapeString(csJson, sizeof(csJson), cs);
@@ -317,6 +320,7 @@ void DX12FrameAnalysisManifestWriteIaBinding(
 		buffer.producerBindSpace.empty() ? "-" : buffer.producerBindSpace.c_str());
 	DX12JsonEscapeString(hashJson, sizeof(hashJson), hash);
 	DX12JsonEscapeString(huntHashJson, sizeof(huntHashJson), huntHash);
+	DX12JsonEscapeString(fileHashJson, sizeof(fileHashJson), fileHash);
 	DX12JsonEscapeWString(fileJson, sizeof(fileJson), DedupedFileName(filePath));
 	sprintf_s(resourceJson, sizeof(resourceJson), "\"%p\"", buffer.resource.resource);
 
@@ -349,7 +353,8 @@ void DX12FrameAnalysisManifestWriteIaBinding(
 		"\"producer_reg\":%u,"
 		"\"file\":%s,"
 		"\"hunt_hash\":%s,"
-		"\"hash\":%s",
+		"\"hash\":%s,"
+		"\"file_hash\":%s",
 		static_cast<unsigned long long>(buffer.eventSerial),
 		static_cast<unsigned long long>(buffer.psoIndex),
 		vsJson,
@@ -376,7 +381,8 @@ void DX12FrameAnalysisManifestWriteIaBinding(
 		buffer.producerShaderRegister,
 		fileJson,
 		huntHashJson,
-		hashJson);
+		hashJson,
+		fileHashJson);
 
 	DX12FrameAnalysisLogJsonFields(buffer2);
 }
@@ -390,6 +396,7 @@ void DX12FrameAnalysisManifestWriteResourceBinding(
 	DX12PsoShaderSummary shaders;
 	const bool hasShaders = DX12GetPsoShaderSummary(binding.psoIndex, &shaders);
 	char vs[32], ps[32], cs[32], hash[16];
+	char fileHash[16];
 	const bool hasVS = binding.shaderInfo.hasVS || (hasShaders && shaders.hasVS);
 	const bool hasPS = binding.shaderInfo.hasPS || (hasShaders && shaders.hasPS);
 	const bool hasCS = binding.shaderInfo.hasCS || (hasShaders && shaders.hasCS);
@@ -399,13 +406,19 @@ void DX12FrameAnalysisManifestWriteResourceBinding(
 	FormatShaderHash(vsHash, hasVS, vs, ARRAYSIZE(vs));
 	FormatShaderHash(psHash, hasPS, ps, ARRAYSIZE(ps));
 	FormatShaderHash(csHash, hasCS, cs, ARRAYSIZE(cs));
-	FormatFileHash(filePath, hash, ARRAYSIZE(hash));
+	FormatFileHash(filePath, fileHash, ARRAYSIZE(fileHash));
 
 	const DX12DescriptorSummary &descriptor = binding.descriptor;
+	const UINT64 fallbackGpuVa = descriptor.gpuVirtualAddress ?
+		descriptor.gpuVirtualAddress : binding.gpuVirtualAddress;
+	const UINT64 fallbackSize = descriptor.viewSize ? descriptor.viewSize : copyBytes;
+	const uint32_t viewHash = DX12HashDescriptorBufferView(
+		binding.hasDescriptor ? &descriptor : nullptr, fallbackGpuVa, fallbackSize);
+	sprintf_s(hash, sizeof(hash), "%08x", viewHash);
 
 	char vsJson[64], psJson[64], csJson[64];
 	char bindJson[64], kindJson[32], dimJson[32], fmtNameJson[64];
-	char hashJson[32], fileJson[512], resourceJson[32];
+	char hashJson[32], fileHashJson[32], fileJson[512], resourceJson[32];
 	DX12JsonEscapeString(vsJson, sizeof(vsJson), vs);
 	DX12JsonEscapeString(psJson, sizeof(psJson), ps);
 	DX12JsonEscapeString(csJson, sizeof(csJson), cs);
@@ -414,6 +427,7 @@ void DX12FrameAnalysisManifestWriteResourceBinding(
 	DX12JsonEscapeString(dimJson, sizeof(dimJson), ResourceDimensionName(desc.Dimension));
 	DX12JsonEscapeString(fmtNameJson, sizeof(fmtNameJson), DxgiFormatName(static_cast<UINT>(desc.Format)));
 	DX12JsonEscapeString(hashJson, sizeof(hashJson), hash);
+	DX12JsonEscapeString(fileHashJson, sizeof(fileHashJson), fileHash);
 	DX12JsonEscapeWString(fileJson, sizeof(fileJson), DedupedFileName(filePath));
 	sprintf_s(resourceJson, sizeof(resourceJson), "\"%p\"", descriptor.resource);
 
@@ -450,7 +464,8 @@ void DX12FrameAnalysisManifestWriteResourceBinding(
 		"\"state\":\"0x%x\","
 		"\"state_known\":%s,"
 		"\"file\":%s,"
-		"\"hash\":%s",
+		"\"hash\":%s,"
+		"\"file_hash\":%s",
 		static_cast<unsigned long long>(binding.eventSerial),
 		static_cast<unsigned long long>(binding.psoIndex),
 		vsJson,
@@ -481,7 +496,8 @@ void DX12FrameAnalysisManifestWriteResourceBinding(
 		static_cast<UINT>(sourceState),
 		hasCurrentState ? "true" : "false",
 		fileJson,
-		hashJson);
+		hashJson,
+		fileHashJson);
 
 	DX12FrameAnalysisLogJsonFields(buffer);
 }

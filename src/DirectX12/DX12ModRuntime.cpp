@@ -280,6 +280,14 @@ struct DX12PreSkinCbvReadCacheValue
 	std::vector<unsigned char> bytes;
 };
 
+struct DX12PreSkinSrvHashResult
+{
+	uint32_t descriptorHash = 0;
+	UINT64 sourceOffset = 0;
+	UINT64 viewBytes = 0;
+	UINT stride = 0;
+};
+
 struct DX12LoadedResource;
 
 struct DX12PreSkinSrvPositiveCacheValue
@@ -2942,7 +2950,7 @@ static bool FindComputeSrvByRegister(
 	const std::vector<DX12CurrentComputeUavBinding> &srvs,
 	uint32_t shaderRegister,
 	const DX12CurrentComputeUavBinding **bindingOut,
-	uint32_t *hashOut)
+	DX12PreSkinSrvHashResult *hashOut)
 {
 	for (const DX12CurrentComputeUavBinding &srv : srvs) {
 		if (!srv.hasDescriptor || srv.descriptor.kind != "SRV" ||
@@ -2950,7 +2958,14 @@ static bool FindComputeSrvByRegister(
 			continue;
 		if (srv.shaderRegister != shaderRegister)
 			continue;
-		const uint32_t hash = HashComputeBufferBinding(srv);
+		DX12PreSkinSrvHashResult hash = {};
+		hash.descriptorHash = HashComputeBufferBinding(srv);
+		hash.sourceOffset = srv.descriptor.resourceOffset ?
+			srv.descriptor.resourceOffset : srv.descriptor.bufferViewOffset;
+		hash.viewBytes = DescriptorViewSize(srv.descriptor);
+		if (!hash.viewBytes && srv.descriptor.bufferViewBytes)
+			hash.viewBytes = srv.descriptor.bufferViewBytes;
+		hash.stride = srv.descriptor.structureByteStride;
 		if (bindingOut)
 			*bindingOut = &srv;
 		if (hashOut)
@@ -2960,6 +2975,55 @@ static bool FindComputeSrvByRegister(
 	return false;
 }
 
+static void LogPreSkinSrvHashProbeLimited(
+	const Bunny::TextureOverrideConfig &config, uint32_t shaderRegister,
+	uint32_t expectedHash, const DX12CurrentComputeUavBinding *binding,
+	const DX12PreSkinSrvHashResult *hash, bool matched, const char *status)
+{
+#if defined(_DEBUG)
+	static SRWLOCK logLock = SRWLOCK_INIT;
+	static std::unordered_set<uint64_t> logged;
+	uint64_t key = 0x6e47f2cb0d45a31bull;
+	key = HashCombine64(key, DX12GetPresentCount());
+	key = HashCombine64(key, shaderRegister);
+	key = HashCombine64(key, expectedHash);
+	key = HashCombine64(key, hash ? hash->descriptorHash : 0);
+	key = HashCombine64(key, binding ? reinterpret_cast<uint64_t>(binding->descriptor.resource) : 0);
+	key = HashCombine64(key, binding ? binding->descriptor.resourceOffset : 0);
+	key = HashCombine64(key, hash ? hash->viewBytes : 0);
+	bool emit = false;
+	AcquireSRWLockExclusive(&logLock);
+	if (logged.size() > 512)
+		logged.clear();
+	emit = logged.insert(key).second;
+	ReleaseSRWLockExclusive(&logLock);
+	if (!emit)
+		return;
+	DX12LogDebugJsonFunc("DX12PreSkinSrvHashProbe",
+		"\"section\":\"%S\",\"status\":\"%s\",\"tRegister\":%u,\"expected\":\"%08x\",\"matched\":%s,\"descriptorHash\":\"%08x\",\"offset\":%llu,\"bytes\":%llu,\"stride\":%u,\"root\":%u,\"range\":%u,\"space\":%u,\"descriptorOffset\":%u,\"resource\":\"%p\"",
+		config.originalSection.empty() ? config.section.c_str() : config.originalSection.c_str(),
+		status ? status : "",
+		shaderRegister, expectedHash, matched ? "true" : "false",
+		hash ? hash->descriptorHash : 0,
+		hash ? static_cast<unsigned long long>(hash->sourceOffset) : 0ull,
+		hash ? static_cast<unsigned long long>(hash->viewBytes) : 0ull,
+		hash ? hash->stride : 0,
+		binding ? binding->rootParameterIndex : UINT_MAX,
+		binding ? binding->rangeIndex : UINT_MAX,
+		binding ? binding->registerSpace : UINT_MAX,
+		binding ? binding->descriptorOffset : UINT_MAX,
+		binding ? binding->descriptor.resource : nullptr);
+#else
+	(void)config;
+	(void)shaderRegister;
+	(void)expectedHash;
+	(void)binding;
+	(void)hash;
+	(void)matched;
+	(void)status;
+#endif
+}
+
 static bool MatchComputeInputSrvsTextureOverrideLocked(
 	const std::vector<DX12CurrentComputeUavBinding> &srvs,
 	const Bunny::TextureOverrideConfig &config)
@@ -2967,10 +3031,19 @@ static bool MatchComputeInputSrvsTextureOverrideLocked(
 	if (config.preSkinMatchCsSrvHashes.empty())
 		return false;
 	for (const auto &expected : config.preSkinMatchCsSrvHashes) {
-		uint32_t actualHash = 0;
-		if (!FindComputeSrvByRegister(srvs, expected.first, nullptr, &actualHash))
+		const DX12CurrentComputeUavBinding *binding = nullptr;
+		DX12PreSkinSrvHashResult actual = {};
+		if (!FindComputeSrvByRegister(srvs, expected.first, &binding, &actual)) {
+			LogPreSkinSrvHashProbeLimited(
+				config, expected.first, expected.second, nullptr, nullptr,
+				false, "missing_srv");
 			return false;
-		if (actualHash != expected.second)
+		}
+		const bool matched = actual.descriptorHash == expected.second;
+		LogPreSkinSrvHashProbeLimited(
+			config, expected.first, expected.second, binding, &actual,
+			matched, actual.descriptorHash ? "descriptor_hash" : "hash_failed");
+		if (!matched)
 			return false;
 	}
 	return true;
@@ -2990,10 +3063,14 @@ static bool BuildPreSkinSrvReplacementBindingsTextureOverrideLocked(
 
 	for (const auto &expected : config.preSkinMatchCsSrvHashes) {
 		const DX12CurrentComputeUavBinding *binding = nullptr;
-		uint32_t actualHash = 0;
-		if (!FindComputeSrvByRegister(srvs, expected.first, &binding, &actualHash))
+		DX12PreSkinSrvHashResult actual = {};
+		if (!FindComputeSrvByRegister(srvs, expected.first, &binding, &actual))
 			return false;
-		if (actualHash != expected.second)
+		const bool matched = actual.descriptorHash == expected.second;
+		LogPreSkinSrvHashProbeLimited(
+			config, expected.first, expected.second, binding, &actual,
+			matched, actual.descriptorHash ? "descriptor_hash" : "hash_failed");
+		if (!matched)
 			return false;
 	}
 
@@ -3719,6 +3796,7 @@ bool DX12ModApplyPreSkinningUavReplacement(
 		}
 	}
 	ReleaseSRWLockExclusive(&gModLock);
+	DX12Profiling::RecordPreSkinUavTest(applied);
 	device->Release();
 	return applied;
 }

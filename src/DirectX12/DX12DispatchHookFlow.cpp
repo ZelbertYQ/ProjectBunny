@@ -127,7 +127,6 @@ static void PreparePreSkinProbe(
 		LogPreSkinDispatchProbeReason(
 			"no_compute_srvs", probe->computeShaderHash,
 			computeBindingSerial, probe->uavs.size());
-		return;
 	}
 
 	static const std::vector<DX12CurrentComputeUavBinding> kEmptyComputeBindings;

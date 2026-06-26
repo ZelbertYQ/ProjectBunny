@@ -876,6 +876,14 @@ static void STDMETHODCALLTYPE HookedQueueCopyTileMappings(
 static void STDMETHODCALLTYPE HookedQueueExecuteCommandLists(
 	ID3D12CommandQueue *queue, UINT numCommandLists, ID3D12CommandList *const *commandLists)
 {
+	if (DX12IsInternalReplay()) {
+		PFN_QUEUE_EXECUTE_COMMAND_LISTS original =
+			DX12_QUEUE_ORIG(queue, 10, PFN_QUEUE_EXECUTE_COMMAND_LISTS, ExecuteCommandLists);
+		if (original)
+			original(queue, numCommandLists, commandLists);
+		return;
+	}
+
 	DX12_PROFILE_SCOPE(ExecuteCommandLists);
 	LogDX12Call("ID3D12CommandQueue::ExecuteCommandLists", queue, " count=%u", numCommandLists);
 	for (UINT i = 0; commandLists && i < numCommandLists; ++i)
