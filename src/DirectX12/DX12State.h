@@ -44,6 +44,7 @@ ID3D12CommandQueue *DX12AcquireCommandQueue();
 
 extern volatile LONG gDX12HotPathSkipAll;
 extern volatile LONG gDX12HotPathSkipBindings;
+extern volatile LONG gDX12HotPathTrackResourceMetadata;
 
 void DX12HotPathUpdate();
 bool DX12ShouldLogHookCall(const char *api);

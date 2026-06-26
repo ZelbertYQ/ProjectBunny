@@ -924,6 +924,16 @@ static void RecordDescriptor(DescriptorRecord &&record)
 	ReleaseSRWLockExclusive(&gResourceLock);
 }
 
+static bool ShouldTrackFullDescriptorMetadata()
+{
+	return InterlockedCompareExchange(&gDX12HotPathSkipBindings, 0, 0) == 0;
+}
+
+static bool ShouldTrackComputeDescriptorMetadata()
+{
+	return InterlockedCompareExchange(&gDX12HotPathTrackResourceMetadata, 0, 0) != 0;
+}
+
 static bool FindLatestDescriptorLocked(SIZE_T cpuHandle, DescriptorRecord *record)
 {
 	if (!record)
@@ -1059,6 +1069,8 @@ static void STDMETHODCALLTYPE HookedCreateConstantBufferView(
 		return;
 	}
 	original(device, desc, destDescriptor);
+	if (!ShouldTrackComputeDescriptorMetadata())
+		return;
 	if (desc) {
 		DescriptorRecord record;
 		record.kind = "CBV";
@@ -1086,6 +1098,8 @@ static void STDMETHODCALLTYPE HookedCreateShaderResourceView(
 		return;
 	}
 	original(device, resource, desc, destDescriptor);
+	if (!ShouldTrackComputeDescriptorMetadata())
+		return;
 	DescriptorRecord record;
 	record.kind = "SRV";
 	record.cpuHandle = destDescriptor.ptr;
@@ -1119,6 +1133,8 @@ static void STDMETHODCALLTYPE HookedCreateUnorderedAccessView(
 			descToUse = &adjustedDesc;
 	}
 	original(device, resource, counterResource, descToUse, destDescriptor);
+	if (!ShouldTrackComputeDescriptorMetadata())
+		return;
 	DescriptorRecord record;
 	record.kind = "UAV";
 	record.cpuHandle = destDescriptor.ptr;
@@ -1146,6 +1162,8 @@ static void STDMETHODCALLTYPE HookedCreateRenderTargetView(
 		return;
 	}
 	original(device, resource, desc, destDescriptor);
+	if (!ShouldTrackFullDescriptorMetadata())
+		return;
 	DescriptorRecord record;
 	record.kind = "RTV";
 	record.cpuHandle = destDescriptor.ptr;
@@ -1171,6 +1189,8 @@ static void STDMETHODCALLTYPE HookedCreateDepthStencilView(
 		return;
 	}
 	original(device, resource, desc, destDescriptor);
+	if (!ShouldTrackFullDescriptorMetadata())
+		return;
 	DescriptorRecord record;
 	record.kind = "DSV";
 	record.cpuHandle = destDescriptor.ptr;
@@ -1196,6 +1216,8 @@ static void STDMETHODCALLTYPE HookedCreateSampler(
 		return;
 	}
 	original(device, desc, destDescriptor);
+	if (!ShouldTrackFullDescriptorMetadata())
+		return;
 	if (desc) {
 		DescriptorRecord record;
 		record.kind = "Sampler";
@@ -1228,6 +1250,8 @@ static void STDMETHODCALLTYPE HookedCopyDescriptors(
 		destDescriptorRangeSizes, numSrcDescriptorRanges, srcDescriptorRangeStarts,
 		srcDescriptorRangeSizes, descriptorHeapsType);
 
+	if (!ShouldTrackComputeDescriptorMetadata())
+		return;
 	if (!destDescriptorRangeStarts || !srcDescriptorRangeStarts)
 		return;
 
@@ -1279,6 +1303,8 @@ static void STDMETHODCALLTYPE HookedCopyDescriptorsSimple(
 	}
 	original(device, numDescriptors, destDescriptorRangeStart,
 		srcDescriptorRangeStart, descriptorHeapsType);
+	if (!ShouldTrackComputeDescriptorMetadata())
+		return;
 	RecordDescriptorCopyRange(device, descriptorHeapsType, destDescriptorRangeStart,
 		srcDescriptorRangeStart, numDescriptors);
 }

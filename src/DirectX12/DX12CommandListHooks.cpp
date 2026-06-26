@@ -863,9 +863,12 @@ static void STDMETHODCALLTYPE HookedQueueExecuteCommandLists(
 		LogQueueStage("ExecuteCommandLists", "beforeOriginal", queue, numCommandLists);
 		ULONGLONG startTick = GetTickCount64();
 		original(queue, numCommandLists, commandLists);
-		DX12ModNotifyCommandListsSubmitted(queue, numCommandLists, commandLists);
+		ULONGLONG originalEndTick = GetTickCount64();
 		LogQueueStage("ExecuteCommandLists", "afterOriginal", queue, numCommandLists,
-			nullptr, 0, S_OK, GetTickCount64() - startTick);
+			nullptr, 0, S_OK, originalEndTick - startTick);
+		DX12ModNotifyCommandListsSubmitted(queue, numCommandLists, commandLists);
+		LogQueueStage("ExecuteCommandLists", "afterNotify", queue, numCommandLists,
+			nullptr, 0, S_OK, GetTickCount64() - originalEndTick);
 	}
 }
 

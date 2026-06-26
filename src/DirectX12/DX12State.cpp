@@ -43,6 +43,7 @@ static std::unordered_map<void*, void*> gOriginalFunctions;
 
 volatile LONG gDX12HotPathSkipAll = 0;
 volatile LONG gDX12HotPathSkipBindings = 0;
+volatile LONG gDX12HotPathTrackResourceMetadata = 1;
 static thread_local UINT tDX12InternalReplayDepth = 0;
 
 #if defined(_DEBUG)
@@ -55,6 +56,41 @@ struct DX12HookCallLogBudget
 static constexpr LONG kHookCallLogBudgetPerApiPerPresent = 16;
 static SRWLOCK gHookCallLogBudgetLock = SRWLOCK_INIT;
 static std::unordered_map<std::string, DX12HookCallLogBudget> gHookCallLogBudgets;
+
+static bool DX12IsNoisyHookCallApi(const char *api)
+{
+	static const char *const noisyApis[] = {
+		"ID3D12Device::CopyDescriptors",
+		"ID3D12Device::CopyDescriptorsSimple",
+		"ID3D12Device::CreateConstantBufferView",
+		"ID3D12GraphicsCommandList::Dispatch",
+		"ID3D12GraphicsCommandList::DrawInstanced",
+		"ID3D12GraphicsCommandList::DrawIndexedInstanced",
+		"ID3D12GraphicsCommandList::SetPipelineState",
+		"ID3D12GraphicsCommandList::SetComputeRootDescriptorTable",
+		"ID3D12GraphicsCommandList::SetGraphicsRootDescriptorTable",
+		"ID3D12GraphicsCommandList::SetComputeRoot32BitConstant",
+		"ID3D12GraphicsCommandList::SetGraphicsRoot32BitConstant",
+		"ID3D12GraphicsCommandList::SetComputeRoot32BitConstants",
+		"ID3D12GraphicsCommandList::SetGraphicsRoot32BitConstants",
+		"ID3D12GraphicsCommandList::SetComputeRootConstantBufferView",
+		"ID3D12GraphicsCommandList::SetGraphicsRootConstantBufferView",
+		"ID3D12GraphicsCommandList::SetComputeRootShaderResourceView",
+		"ID3D12GraphicsCommandList::SetGraphicsRootShaderResourceView",
+		"ID3D12GraphicsCommandList::SetComputeRootUnorderedAccessView",
+		"ID3D12GraphicsCommandList::SetGraphicsRootUnorderedAccessView",
+		"ID3D12GraphicsCommandList::IASetIndexBuffer",
+		"ID3D12GraphicsCommandList::IASetVertexBuffers",
+		"ID3D12GraphicsCommandList::ResourceBarrier",
+		"ID3D12GraphicsCommandList::Reset",
+		"ID3D12CommandQueue::ExecuteCommandLists"
+	};
+	for (const char *noisyApi : noisyApis) {
+		if (!strcmp(api, noisyApi))
+			return true;
+	}
+	return false;
+}
 #endif
 
 static constexpr size_t kMaxQueuedLogLines = 8192;
@@ -98,12 +134,17 @@ void DX12HotPathUpdate()
 
 	InterlockedExchange(&gDX12HotPathSkipBindings,
 		needsHeavyTracking ? 0 : 1);
+
+	InterlockedExchange(&gDX12HotPathTrackResourceMetadata,
+		(needsHeavyTracking || DX12ModNeedsPreSkinningUavProbe()) ? 1 : 0);
 }
 
 bool DX12ShouldLogHookCall(const char *api)
 {
 #if defined(_DEBUG)
 	if (!api || !api[0] || DX12IsInternalReplay())
+		return false;
+	if (DX12IsNoisyHookCallApi(api))
 		return false;
 
 	const LONG present = DX12GetPresentCount();
