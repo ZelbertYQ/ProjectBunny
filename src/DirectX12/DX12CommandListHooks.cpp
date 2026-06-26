@@ -622,6 +622,16 @@ struct ThreadLocalCommandListOriginal
 static thread_local ThreadLocalCommandListOriginal tCommandListOriginals[64];
 static thread_local ThreadLocalCommandListOriginal tCommandQueueOriginals[32];
 
+static void LogOriginalFallback(const char *api, const void *object, UINT slot, const void *fallback)
+{
+	if (!DX12ShouldLogHookCall(api))
+		return;
+	DX12LogDebugJsonFunc("DX12FallbackPath",
+		"\"kind\":\"original_lookup\",\"api\":\"%s\",\"present\":%ld,\"this\":\"%p\","
+		"\"slot\":%u,\"fallback\":\"%p\"",
+		api ? api : "", DX12GetPresentCount(), object, slot, fallback);
+}
+
 template <typename T>
 static T GetVTableOriginal(void *object, UINT slot, T fallback, const char *name)
 {
@@ -635,8 +645,10 @@ static T GetVTableOriginal(void *object, UINT slot, T fallback, const char *name
 		}
 	}
 
-	if (fallback)
+	if (fallback) {
+		LogOriginalFallback(name, object, slot, reinterpret_cast<const void*>(fallback));
 		return fallback;
+	}
 
 	DX12LogJsonFunc(name ? name : "D3D12::Unknown",
 		"\"event\":\"MissingOriginal\",\"this\":\"%p\",\"slot\":%u",
@@ -666,8 +678,10 @@ static T GetCommandQueueOriginal(ID3D12CommandQueue *queue, UINT slot, T fallbac
 		}
 	}
 
-	if (fallback)
+	if (fallback) {
+		LogOriginalFallback(name, queue, slot, reinterpret_cast<const void*>(fallback));
 		return fallback;
+	}
 
 	DX12LogJsonFunc(name ? name : "ID3D12CommandQueue::Unknown",
 		"\"event\":\"MissingOriginal\",\"this\":\"%p\",\"slot\":%u",
@@ -709,8 +723,10 @@ static T GetCommandListOriginal(
 		}
 	}
 
-	if (fallback)
+	if (fallback) {
+		LogOriginalFallback(name, commandList, slot, reinterpret_cast<const void*>(fallback));
 		return fallback;
+	}
 
 	DX12LogJsonFunc(name ? name : "ID3D12GraphicsCommandList::Unknown",
 		"\"event\":\"MissingOriginal\",\"this\":\"%p\",\"slot\":%u",

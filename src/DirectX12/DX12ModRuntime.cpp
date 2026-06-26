@@ -60,6 +60,8 @@ static std::unordered_map<std::wstring, bool> gCommandListRuntimeEffect;
 static std::unordered_map<std::wstring, bool> gTextureOverridePreRuntimeEffect;
 static std::unordered_map<std::wstring, bool> gTextureOverridePostRuntimeEffect;
 static std::unordered_map<std::wstring, uint32_t> gTextureOverrideSectionIds;
+static LONG gIaFallbackPathLogCount = 0;
+static constexpr LONG kIaFallbackPathLogLimit = 64;
 struct DX12RelatedTextureOverrideCandidate
 {
 	Bunny::TextureOverrideConfig config;
@@ -289,6 +291,7 @@ static LONG gIaReplacementPrepareCachePresent = -1;
 static volatile LONG gPresentCommandListExecutedPresent = -1;
 static UINT64 gPreSkinActiveGeneration = 1;
 static UINT64 gPreSkinSrvCacheGeneration = 1;
+static volatile LONG gPreSkinDescriptorAbortCacheHitLogCount = 0;
 static volatile LONG gPreSkinMatchCsProbeLogCount = 0;
 static SRWLOCK gPreSkinMatchCsProbeLogLock = SRWLOCK_INIT;
 static std::unordered_set<uint64_t> gPreSkinMatchCsProbeKeys;
@@ -447,6 +450,7 @@ static std::map<UINT64, DX12PreSkinSrvPositiveCacheValue> gPreSkinSrvPositiveCac
 static std::map<UINT64, DX12PreSkinSrvPositiveCacheValue> gPreSkinSrvStablePositiveCache;
 
 static UINT64 DescriptorViewSize(const DX12DescriptorSummary &descriptor);
+static uint32_t HashComputeBufferBinding(const DX12CurrentComputeUavBinding &binding);
 static uint64_t HashComputeCbvListForProbe(
 	const std::vector<DX12CurrentComputeUavBinding> &cbvs);
 
@@ -455,6 +459,38 @@ static UINT64 HashWideString(UINT64 key, const std::wstring &text)
 	for (wchar_t ch : text) {
 		key = HashCombine64(key, static_cast<UINT64>(ch & 0xffff));
 	}
+	return key;
+}
+
+static UINT64 HashComputeBindingLayout(
+	UINT64 key, const DX12CurrentComputeUavBinding &binding, bool includeDescriptorHash)
+{
+	key = HashCombine64(key, binding.rootParameterIndex);
+	key = HashCombine64(key, binding.rangeIndex);
+	key = HashCombine64(key, binding.shaderRegister);
+	key = HashCombine64(key, binding.registerSpace);
+	key = HashCombine64(key, binding.descriptorOffset);
+	key = HashCombine64(key, binding.descriptor.viewDimension);
+	key = HashCombine64(key, binding.descriptor.viewFormat);
+	key = HashCombine64(key, binding.descriptor.firstElement);
+	key = HashCombine64(key, binding.descriptor.numElements);
+	key = HashCombine64(key, binding.descriptor.structureByteStride);
+	key = HashCombine64(key, binding.descriptor.bufferViewOffset);
+	key = HashCombine64(key, binding.descriptor.bufferViewBytes);
+	key = HashCombine64(key, binding.descriptor.cbvSize);
+	key = HashCombine64(key, DescriptorViewSize(binding.descriptor));
+	if (includeDescriptorHash)
+		key = HashCombine64(key, HashComputeBufferBinding(binding));
+	return key;
+}
+
+static uint64_t HashComputeCbvLayoutList(
+	const std::vector<DX12CurrentComputeUavBinding> &cbvs)
+{
+	uint64_t key = 0xb5316b20a34bf779ull;
+	const size_t maxItems = 8;
+	for (size_t i = 0; i < cbvs.size() && i < maxItems; ++i)
+		key = HashComputeBindingLayout(key, cbvs[i], false);
 	return key;
 }
 
@@ -473,19 +509,9 @@ static UINT64 MakePreSkinDescriptorPatchAbortCacheKey(
 		key = HashWideString(key, replacement.resource);
 	}
 	key = HashCombine64(key, srvs.size());
-	for (const DX12CurrentComputeUavBinding &srv : srvs) {
-		key = HashCombine64(key, srv.rootParameterIndex);
-		key = HashCombine64(key, srv.rangeIndex);
-		key = HashCombine64(key, srv.shaderRegister);
-		key = HashCombine64(key, srv.registerSpace);
-		key = HashCombine64(key, srv.descriptorOffset);
-		key = HashCombine64(key, srv.descriptor.viewDimension);
-		key = HashCombine64(key, srv.descriptor.structureByteStride);
-		key = HashCombine64(key, srv.descriptor.gpuVirtualAddress);
-		key = HashCombine64(key, DescriptorViewSize(srv.descriptor));
-		key = HashCombine64(key, reinterpret_cast<UINT64>(srv.descriptor.resource));
-	}
-	key = HashCombine64(key, HashComputeCbvListForProbe(cbvs));
+	for (const DX12CurrentComputeUavBinding &srv : srvs)
+		key = HashComputeBindingLayout(key, srv, true);
+	key = HashCombine64(key, HashComputeCbvLayoutList(cbvs));
 	return key;
 }
 
@@ -1249,6 +1275,7 @@ static void ClearPreSkinRuntimeState()
 	gPreSkinDescriptorPatchAbortCache.clear();
 	gPreSkinSrvPositiveCache.clear();
 	gPreSkinSrvStablePositiveCache.clear();
+	InterlockedExchange(&gPreSkinDescriptorAbortCacheHitLogCount, 0);
 	++gPreSkinSrvCacheGeneration;
 	ReleaseSRWLockExclusive(&gPreSkinLock);
 
@@ -1957,6 +1984,7 @@ bool DX12ModRuntimeLoad(
 	gPreSkinDescriptorPatchAbortCache.clear();
 	gPreSkinSrvPositiveCache.clear();
 	gPreSkinSrvStablePositiveCache.clear();
+	InterlockedExchange(&gPreSkinDescriptorAbortCacheHitLogCount, 0);
 	gPreSkinUavMatchCache.clear();
 	gPreSkinMatchCsInputCache.clear();
 	gPreSkinMatchCsProbeKeys.clear();
@@ -2078,6 +2106,18 @@ static std::wstring ResolveResourcePathLocked(
 	return ResolveResourcePath(config, gBaseDir, rootFallback);
 }
 
+static void LogIaFallbackPathLimited(const char *kind, const std::wstring &section, bool inserted)
+{
+	const LONG count = InterlockedIncrement(&gIaFallbackPathLogCount);
+	if (count > kIaFallbackPathLogLimit)
+		return;
+	DX12LogDebugJsonFunc("DX12FallbackPath",
+		"\"kind\":\"%s\",\"api\":\"DX12ModRuntime::IAOverride\",\"present\":%ld,"
+		"\"section\":\"%S\",\"inserted\":%s,\"logIndex\":%ld",
+		kind ? kind : "", DX12GetPresentCount(), section.c_str(),
+		inserted ? "true" : "false", count);
+}
+
 static bool ResourceConfigLooksLikeBuffer(const Bunny::ResourceConfig &config)
 {
 	std::wstring type = Bunny::ToLower(Bunny::Trim(config.type));
@@ -2113,7 +2153,13 @@ static bool LoadResourceBytes(
 			if (fallbackPath != resolvedPath) {
 				if (path)
 					*path = fallbackPath;
-				return ReadFileBytes(fallbackPath.c_str(), bytes);
+				const bool fallbackOk = ReadFileBytes(fallbackPath.c_str(), bytes);
+				DX12LogJsonFunc("DX12FallbackPath",
+					"\"kind\":\"resource_path_root\",\"api\":\"DX12ModRuntime::LoadResourceBytes\","
+					"\"section\":\"%S\",\"primary\":\"%S\",\"fallback\":\"%S\",\"success\":%s",
+					config.section.c_str(), resolvedPath.c_str(), fallbackPath.c_str(),
+					fallbackOk ? "true" : "false");
+				return fallbackOk;
 			}
 		}
 		return false;
@@ -3194,7 +3240,6 @@ static uint64_t HashComputeBindingListForProbe(
 		key = HashCombine64(key, binding.descriptorOffset);
 		key = HashCombine64(key, srvs ? HashComputeBufferBinding(binding) : HashComputeUavBinding(binding));
 		key = HashCombine64(key, DescriptorViewSize(binding.descriptor));
-		key = HashCombine64(key, reinterpret_cast<uint64_t>(binding.descriptor.resource));
 	}
 	return key;
 }
@@ -3336,8 +3381,8 @@ static uint64_t HashComputeCbvListForProbe(
 		key = HashCombine64(key, cbv.registerSpace);
 		key = HashCombine64(key, cbv.descriptorOffset);
 		key = HashCombine64(key, DescriptorViewSize(cbv.descriptor));
-		key = HashCombine64(key, reinterpret_cast<uint64_t>(cbv.descriptor.resource));
-		key = HashCombine64(key, cbv.descriptor.gpuVirtualAddress);
+		key = HashCombine64(key, cbv.descriptor.resourceOffset);
+		key = HashCombine64(key, cbv.descriptor.cbvSize);
 	}
 	return key;
 }
@@ -3757,6 +3802,15 @@ static bool ApplyPreSkinDescriptorTablePatchLocked(
 	if (gPreSkinDescriptorPatchAbortCache.find(abortCacheKey) !=
 	    gPreSkinDescriptorPatchAbortCache.end()) {
 		logStage("abort_cache_hit", static_cast<UINT>(tables.size()), totalDescriptors);
+#if defined(_DEBUG)
+		const LONG hitLogCount = InterlockedIncrement(&gPreSkinDescriptorAbortCacheHitLogCount);
+		if (hitLogCount <= 32) {
+			DX12LogDebugJsonFunc("DX12PreSkinningApply",
+				"\"status\":\"abort_cache_hit\",\"section\":\"%S\",\"triggerHash\":\"%08x\",\"tables\":%zu,\"descriptors\":%u,\"cbvs\":%zu",
+				section ? section : L"", triggerHash,
+				tables.size(), totalDescriptors, cbvs.size());
+		}
+#endif
 		return false;
 	}
 
@@ -5656,8 +5710,11 @@ static void AppendTextureOverridesForHashLocked(
 		if (candidate.sectionId) {
 			if (!seen->insert(candidate.sectionId).second)
 				continue;
-		} else if (!fallbackSeen->insert(config.section).second) {
-			continue;
+		} else {
+			const bool inserted = fallbackSeen->insert(config.section).second;
+			LogIaFallbackPathLimited("ia_section_id_missing", config.section, inserted);
+			if (!inserted)
+				continue;
 		}
 		DX12TriggeredTextureOverride entry;
 		// IA match caches keep a stable pointer into gIaTextureOverrides rather
@@ -5729,8 +5786,11 @@ static void AppendActivePreSkinTextureOverridesLocked(
 		if (sectionId) {
 			if (!seen->insert(sectionId).second)
 				continue;
-		} else if (!fallbackSeen->insert(config.section).second) {
-			continue;
+		} else {
+			const bool inserted = fallbackSeen->insert(config.section).second;
+			LogIaFallbackPathLimited("preskin_section_id_missing", config.section, inserted);
+			if (!inserted)
+				continue;
 		}
 
 		DX12TriggeredTextureOverride entry;
@@ -6032,8 +6092,11 @@ static void AppendRelatedMeshTextureOverridesLocked(
 		if (candidate.sectionId) {
 			if (!seen->insert(candidate.sectionId).second)
 				continue;
-		} else if (!fallbackSeen->insert(config.section).second) {
-			continue;
+		} else {
+			const bool inserted = fallbackSeen->insert(config.section).second;
+			LogIaFallbackPathLimited("related_section_id_missing", config.section, inserted);
+			if (!inserted)
+				continue;
 		}
 		DX12TriggeredTextureOverride entry;
 		entry.config = &candidate.config;

@@ -126,8 +126,18 @@ static void LogResourceHookCall(const char *api, const void *object)
 		api ? api : "", DX12GetPresentCount(), object);
 }
 
+static void LogResourceOriginalFallback(const char *api, const void *object, UINT slot, const void *fallback)
+{
+	if (!DX12ShouldLogHookCall(api))
+		return;
+	DX12LogDebugJsonFunc("DX12FallbackPath",
+		"\"kind\":\"original_lookup\",\"api\":\"%s\",\"present\":%ld,\"this\":\"%p\","
+		"\"slot\":%u,\"fallback\":\"%p\"",
+		api ? api : "", DX12GetPresentCount(), object, slot, fallback);
+}
+
 template <typename T>
-static T GetDeviceOriginal(void *device, UINT slot, T, const char *name)
+static T GetDeviceOriginal(void *device, UINT slot, T fallback, const char *name)
 {
 	if (device) {
 		void **vtable = *reinterpret_cast<void***>(device);
@@ -136,6 +146,10 @@ static T GetDeviceOriginal(void *device, UINT slot, T, const char *name)
 			if (original)
 				return reinterpret_cast<T>(original);
 		}
+	}
+	if (fallback) {
+		LogResourceOriginalFallback(name, device, slot, reinterpret_cast<const void*>(fallback));
+		return fallback;
 	}
 	DX12LogJsonFunc(name ? name : "ID3D12Device::Unknown",
 		"\"event\":\"MissingOriginal\",\"this\":\"%p\",\"slot\":%u",

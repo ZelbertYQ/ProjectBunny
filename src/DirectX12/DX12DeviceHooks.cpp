@@ -34,6 +34,16 @@ static void LogDeviceHookCall(const char *api, const void *object)
 		api ? api : "", DX12GetPresentCount(), object);
 }
 
+static void LogDeviceOriginalFallback(const char *api, const void *object, UINT slot, const void *fallback)
+{
+	if (!DX12ShouldLogHookCall(api))
+		return;
+	DX12LogDebugJsonFunc("DX12FallbackPath",
+		"\"kind\":\"original_lookup\",\"api\":\"%s\",\"present\":%ld,\"this\":\"%p\","
+		"\"slot\":%u,\"fallback\":\"%p\"",
+		api ? api : "", DX12GetPresentCount(), object, slot, fallback);
+}
+
 struct DX12GraphicsPsoReplacement
 {
 	D3D12_GRAPHICS_PIPELINE_STATE_DESC desc = {};
@@ -63,8 +73,10 @@ static T GetDeviceOriginal(void *object, UINT slot, T fallback, const char *name
 				return reinterpret_cast<T>(original);
 		}
 	}
-	if (fallback)
+	if (fallback) {
+		LogDeviceOriginalFallback(name, object, slot, reinterpret_cast<const void*>(fallback));
 		return fallback;
+	}
 	DX12LogJsonFunc(name ? name : "ID3D12Device::Unknown",
 		"\"event\":\"MissingOriginal\",\"this\":\"%p\",\"slot\":%u",
 		object, slot);

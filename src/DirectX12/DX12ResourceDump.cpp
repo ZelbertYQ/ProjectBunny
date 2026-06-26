@@ -1066,6 +1066,8 @@ static size_t ExecuteCopyTasksWithFallback(
 		"\"tasks\":%zu",
 		tasks->size());
 	size_t copied = 0;
+	size_t failed = 0;
+	bool stopped = false;
 	for (DumpTask &task : *tasks) {
 		if (!task.ready || !task.readback)
 			continue;
@@ -1073,16 +1075,21 @@ static size_t ExecuteCopyTasksWithFallback(
 			DX12FrameAnalysisLogJsonFunc("ResourceCopyFallbackStopped",
 				"\"reason\":\"device_removed\",\"copied\":%zu,\"tasks\":%zu",
 				copied, tasks->size());
+			stopped = true;
 			break;
 		}
 		if (ExecuteCopyTask(device, queue, &task)) {
 			copied++;
 			continue;
 		}
+		failed++;
 		task.copied = false;
 		if (!task.skipNote)
 			task.skipNote = "copy_failed";
 	}
+	DX12FrameAnalysisLogJsonFunc("ResourceCopyFallbackComplete",
+		"\"tasks\":%zu,\"copied\":%zu,\"failed\":%zu,\"stopped\":%s",
+		tasks->size(), copied, failed, stopped ? "true" : "false");
 	return copied;
 }
 

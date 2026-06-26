@@ -329,6 +329,7 @@ extern "C" HRESULT WINAPI D3D12EnableExperimentalFeatures(
 extern "C" HRESULT WINAPI D3D12GetInterface(REFCLSID clsid, REFIID riid, void **object)
 {
 	LoadRealD3D12();
+	DX12LogDebugJsonFunc("DX12HookCall", "\"api\":\"D3D12GetInterface\",\"this\":\"%p\"", nullptr);
 	if (!gOrigD3D12GetInterface)
 		return E_NOINTERFACE;
 	HRESULT hr = gOrigD3D12GetInterface(clsid, riid, object);
