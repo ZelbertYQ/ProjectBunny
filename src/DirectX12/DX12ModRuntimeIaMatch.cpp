@@ -213,7 +213,7 @@ static const std::vector<size_t> *FindIaTextureOverrideCandidatesLocked(
 bool DX12ModIaHashMayHaveTextureOverrideCandidate(
 	uint32_t hash, bool indexBuffer, uint32_t vertexSlot)
 {
-	if (gHasTextureOverrides == 0 || !hash)
+	if (!DX12ModHasActiveTextureOverrides() || !hash)
 		return false;
 
 	AcquireSRWLockShared(&gModLock);
@@ -757,4 +757,3 @@ static void LogPreSkinningCandidatesLimited(const DX12IaHashState &iaState)
 	(void)iaState;
 #endif
 }
-

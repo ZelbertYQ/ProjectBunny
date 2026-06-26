@@ -1623,7 +1623,7 @@ bool DX12ModApplyPreSkinningUavReplacement(
 		*overrideVertexCount = 0;
 	if (dispatchOverride)
 		*dispatchOverride = DX12PreSkinDispatchOverride();
-	if (!commandList || gHasTextureOverrides == 0)
+	if (!commandList || !DX12ModHasActiveTextureOverrides())
 		return false;
 
 	ID3D12Device *device = AcquireModDevice(commandList);
@@ -1715,7 +1715,7 @@ bool DX12ModApplyPreSkinningUavReplacement(
 
 bool DX12ModApplyKnownPreSkinningUavPatches(ID3D12GraphicsCommandList *commandList)
 {
-	if (!commandList || gHasTextureOverrides == 0)
+	if (!commandList || !DX12ModHasActiveTextureOverrides())
 		return false;
 
 	std::vector<std::pair<SIZE_T, std::wstring>> patches;

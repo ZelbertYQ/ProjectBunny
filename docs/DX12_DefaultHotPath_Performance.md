@@ -1,0 +1,85 @@
+# DX12 Default Hot Path Performance
+
+## 2026-06-27
+
+### Symptom
+
+With the DX12 DLL injected, safe mode enabled, overlay disabled, and no visible Mod work active, GPU utilization stayed around 5 percent while DX11 could keep the same scene near 95 percent.
+
+The latest runtime log was already quiet after diagnostic JSON logging became opt-in. It showed only startup records:
+
+- `safeMode:true`
+- `overlay:false`
+- `textureOverrides:4`
+- no per-frame hook calls
+- no `DX12FrameStats`
+
+This means default disk logging was no longer the current bottleneck. The remaining default path still treated loaded TextureOverride data as active runtime work even when safe mode was enabled.
+
+### Causes
+
+DX12 safe mode disabled present replacement, but several TextureOverride, ShaderOverride, PreSkin, IA, and command-list runtime predicates still read raw loaded-state flags such as `gHasTextureOverrides` and `gHasShaderOverrides`.
+
+That made the default safe-mode path keep entering Mod matching, IA candidate checks, PreSkin probes, shader override checks, command-list state capture, and resource metadata paths even though the runtime should behave like pure forwarding.
+
+Profiling counters also ran `InterlockedIncrement` from hook paths even when profiling and diagnostic logging were disabled. Microsoft documents `InterlockedIncrement` as a full memory barrier, so using it per hook call is not a free counter in a high-frequency path.
+
+Resource and descriptor creation hooks recorded metadata by default. Microsoft documents `CreateCommittedResource` as creating both a resource and an implicit heap, and descriptor heap creation returns a real heap object. The hook should forward these calls in the default path without adding metadata work unless FrameAnalysis, ShaderDump, or PreSkin needs it.
+
+### Fix
+
+Active Mod predicates now honor safe mode consistently:
+
+- `DX12ModHasActiveShaderOverrides`
+- `DX12ModHasActiveTextureOverrides`
+- `DX12ModHasAnyActiveOverrides`
+- `DX12ModNeedsPresentReplacement`
+- `DX12ModNeedsPreSkinningUavProbe`
+- `DX12ModHasActivePreSkinTextureOverrides`
+- `DX12ModShouldProbePreSkinningForCs`
+
+TextureOverride, ShaderOverride, PreSkin, IA replacement, and command-list runtime entry points now use those active predicates instead of raw loaded-state flags.
+
+Shader bytecode replacement now exits before hashing when shader overrides are not active.
+
+Profiling counters now collect only when diagnostic logging is enabled or F11 summary profiling is active. Default hook forwarding no longer pays per-hook interlocked counter cost.
+
+Resource metadata tracking now starts disabled and is turned on by `DX12HotPathUpdate` only for heavy tracking or PreSkin needs. Resource creation hooks still allow Mod buffer-desc adjustment before forwarding, but metadata recording after successful creation is gated by active need.
+
+`BunnyDX12RuntimeInitialize` now calls `DX12HotPathUpdate` after config and Mod loading, so the startup flags reflect the loaded runtime instead of the compile-time defaults.
+
+### Verification
+
+`build_debug_x64.ps1` succeeded and copied the DX12 DLL to:
+
+`D:\SSMTCacheFolder\3Dmigoto\ZZMIDX12\d3d12.dll`
+
+Static checks on touched source files found:
+
+- no code comments
+- no garbled text markers
+- no UTF-8 BOM
+
+Retest the same default safe-mode scene. The expected direction is:
+
+- the log should remain startup-only unless `MIGOTO_DX12_DIAGNOSTIC_LOGS=1` is set
+- safe mode with loaded but inactive TextureOverrides should keep `gDX12HotPathSkipAll=1`
+- binding capture should stay skipped unless FrameAnalysis, ShaderDump, Hunt, or PreSkin requires it
+- resource metadata recording should stay off unless heavy tracking or PreSkin requires it
+- GPU utilization should rise if the remaining bottleneck was default hook-side CPU pressure
+
+### Follow-up Risk
+
+Several fallback designs remain and should be replaced by single resolution models:
+
+- original-function lookup helpers still accept static fallback function pointers
+- `DX12ModRuntimeIaRuntime.cpp` still has section-id fallback paths such as `fallbackSeen` and `fallbackConfig`
+- resource copy fallback in FrameAnalysis may be valid as a diagnostic recovery path, but it should remain outside default gameplay hot paths
+
+If GPU utilization remains low after this change, the next hypothesis should test command-list original lookup, hook coverage, and forwarding overhead under safe mode with diagnostics disabled.
+
+### References
+
+- https://learn.microsoft.com/en-us/windows/win32/api/winnt/nf-winnt-interlockedincrement
+- https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12device-createcommittedresource
+- https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12device-createdescriptorheap

@@ -42,9 +42,9 @@ static CNktHookLib gHookMgr;
 static std::unordered_set<void*> gHookedFunctions;
 static std::unordered_map<void*, void*> gOriginalFunctions;
 
-volatile LONG gDX12HotPathSkipAll = 0;
-volatile LONG gDX12HotPathSkipBindings = 0;
-volatile LONG gDX12HotPathTrackResourceMetadata = 1;
+volatile LONG gDX12HotPathSkipAll = 1;
+volatile LONG gDX12HotPathSkipBindings = 1;
+volatile LONG gDX12HotPathTrackResourceMetadata = 0;
 static thread_local UINT tDX12InternalReplayDepth = 0;
 
 #if defined(_DEBUG)

@@ -498,7 +498,7 @@ bool DX12ModShouldSkipIa(
 	uint32_t ibHash, const uint32_t *vbHashes, size_t vbHashCount,
 	uint32_t vertexCount, uint32_t indexCount, uint32_t instanceCount)
 {
-	if (gHasTextureOverrides == 0)
+	if (!DX12ModHasActiveTextureOverrides())
 		return false;
 
 	uint64_t cacheKey = MakeIaSkipCacheKey(ibHash, vbHashes, vbHashCount);
@@ -555,7 +555,7 @@ bool DX12ModPrepareIaReplacement(
 	if (!replacement)
 		return false;
 	*replacement = DX12ModIaReplacement();
-	if (!commandList || gHasTextureOverrides == 0)
+	if (!commandList || !DX12ModHasActiveTextureOverrides())
 		return false;
 
 	ID3D12PipelineState *pipelineState =
@@ -679,7 +679,7 @@ void DX12ModRunPostIaReplacement(
 	uint32_t firstVertex, uint32_t firstIndex, uint32_t firstInstance,
 	DX12ModIaReplacement *replacement)
 {
-	if (!replacement || !commandList || gHasTextureOverrides == 0)
+	if (!replacement || !commandList || !DX12ModHasActiveTextureOverrides())
 		return;
 
 	ID3D12Device *device = AcquireModDevice(commandList);

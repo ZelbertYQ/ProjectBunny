@@ -53,6 +53,7 @@ Counter gAllCommands;
 Counter gFastForwardHits;
 
 Mode gMode = Mode::NONE;
+volatile LONG gCollectCounters = 0;
 volatile LONG gFramePresentCount = 0;
 LARGE_INTEGER gFrameStartTime = {};
 LARGE_INTEGER gPerfFrequency = {};
@@ -60,7 +61,13 @@ wchar_t gOverlayText[2048] = L"";
 
 ScopedTimer::ScopedTimer(Counter &counter)
 	: mCounter(counter)
+	, mActive(false)
 {
+	if (!ShouldCollectCounters()) {
+		mStart.QuadPart = 0;
+		return;
+	}
+	mActive = true;
 	InterlockedIncrement(&mCounter.calls);
 	mStart.QuadPart = 0;
 	if (gMode == Mode::SUMMARY)
@@ -69,7 +76,7 @@ ScopedTimer::ScopedTimer(Counter &counter)
 
 ScopedTimer::~ScopedTimer()
 {
-	if (mStart.QuadPart == 0)
+	if (!mActive || mStart.QuadPart == 0)
 		return;
 	LARGE_INTEGER endTime;
 	QueryPerformanceCounter(&endTime);
@@ -155,6 +162,7 @@ static void ResetFrame()
 void Init()
 {
 	QueryPerformanceFrequency(&gPerfFrequency);
+	InterlockedExchange(&gCollectCounters, DX12DiagnosticsLoggingEnabled() ? 1 : 0);
 }
 
 void BeginFrame()
@@ -175,19 +183,24 @@ void EndFrame()
 		LogFrameStats();
 	}
 
-	ResetFrame();
+	if (ShouldCollectCounters())
+		ResetFrame();
 }
 
 void Toggle()
 {
 	if (gMode == Mode::NONE) {
 		gMode = Mode::SUMMARY;
+		InterlockedExchange(&gCollectCounters, 1);
 		DX12Log("DX12 profiling enabled (SUMMARY mode) - press F11 to toggle\n");
 		DX12LogJsonFunc("DX12Profiling", "\"status\":\"enabled\",\"mode\":\"SUMMARY\"");
 	} else {
 		if (gMode == Mode::SUMMARY)
 			FlushFrame();
 		gMode = Mode::NONE;
+		InterlockedExchange(&gCollectCounters, DX12DiagnosticsLoggingEnabled() ? 1 : 0);
+		if (!ShouldCollectCounters())
+			ResetFrame();
 		DX12Log("DX12 profiling disabled\n");
 		DX12LogJsonFunc("DX12Profiling", "\"status\":\"disabled\"");
 	}
@@ -200,31 +213,43 @@ bool IsActive()
 
 void RecordIaDrawOverrideCheck()
 {
+	if (!ShouldCollectCounters())
+		return;
 	InterlockedIncrement(&gIaDrawOverrideChecks.calls);
 }
 
 void RecordIaHashStateResult(bool hit)
 {
+	if (!ShouldCollectCounters())
+		return;
 	InterlockedIncrement(hit ? &gIaHashStateHits.calls : &gIaHashStateMisses.calls);
 }
 
 void RecordIaTextureMayMatchResult(bool hit)
 {
+	if (!ShouldCollectCounters())
+		return;
 	InterlockedIncrement(hit ? &gIaTextureMayHits.calls : &gIaTextureMayMisses.calls);
 }
 
 void RecordIaPrepareCall()
 {
+	if (!ShouldCollectCounters())
+		return;
 	InterlockedIncrement(&gIaPrepareCalls.calls);
 }
 
 void RecordIaApplied()
 {
+	if (!ShouldCollectCounters())
+		return;
 	InterlockedIncrement(&gIaApplied.calls);
 }
 
 void RecordIaCandidateTest(bool hit)
 {
+	if (!ShouldCollectCounters())
+		return;
 	InterlockedIncrement(&gIaCandidateTests.calls);
 	if (hit)
 		InterlockedIncrement(&gIaCandidateHits.calls);
@@ -232,11 +257,15 @@ void RecordIaCandidateTest(bool hit)
 
 void RecordIaHuntIaUpdate()
 {
+	if (!ShouldCollectCounters())
+		return;
 	InterlockedIncrement(&gIaHuntIaUpdates.calls);
 }
 
 void RecordIaReplacementDraw(bool indexed)
 {
+	if (!ShouldCollectCounters())
+		return;
 	InterlockedIncrement(&gIaReplacementDraws.calls);
 	if (indexed)
 		InterlockedIncrement(&gIaReplacementIndexedDraws.calls);
@@ -244,17 +273,23 @@ void RecordIaReplacementDraw(bool indexed)
 
 void RecordIaReplacementDispatch()
 {
+	if (!ShouldCollectCounters())
+		return;
 	InterlockedIncrement(&gIaReplacementDispatches.calls);
 }
 
 void RecordPreSkinCsTest(bool hit)
 {
+	if (!ShouldCollectCounters())
+		return;
 	InterlockedIncrement(&gPreSkinCsTests.calls);
 	(void)hit;
 }
 
 void RecordPreSkinUavTest(bool hit)
 {
+	if (!ShouldCollectCounters())
+		return;
 	InterlockedIncrement(&gPreSkinUavTests.calls);
 	if (hit)
 		InterlockedIncrement(&gPreSkinUavHits.calls);
@@ -262,11 +297,15 @@ void RecordPreSkinUavTest(bool hit)
 
 void RecordPreSkinApplied()
 {
+	if (!ShouldCollectCounters())
+		return;
 	InterlockedIncrement(&gPreSkinApplied.calls);
 }
 
 void RecordPreSkinDispatchResized()
 {
+	if (!ShouldCollectCounters())
+		return;
 	InterlockedIncrement(&gPreSkinDispatchResized.calls);
 }
 

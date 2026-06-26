@@ -399,7 +399,7 @@ static void FindMatchingIaOverridesLocked(
 
 bool DX12ModIaMayHaveTextureOverrideMatch(const DX12IaHashState &iaState, bool indexedCaller)
 {
-	if (gHasTextureOverrides == 0)
+	if (!DX12ModHasActiveTextureOverrides())
 		return false;
 
 

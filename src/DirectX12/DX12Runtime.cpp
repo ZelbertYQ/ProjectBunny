@@ -64,6 +64,7 @@ void BunnyDX12RuntimeInitialize(HINSTANCE module, DX12LoadRealD3D12Fn loadRealD3
 			"\"path\":\"%S\",\"status\":\"missing_or_invalid\",\"error\":\"%S\"",
 			configPath.c_str(), gConfig.Error().c_str());
 	}
+	DX12HotPathUpdate();
 
 	HANDLE thread = CreateThread(nullptr, 0, DX12WorkerThread, nullptr, 0, nullptr);
 	if (thread)

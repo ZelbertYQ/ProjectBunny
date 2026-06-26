@@ -684,6 +684,11 @@ bool ShouldTrackComputeDescriptorMetadata()
 	return InterlockedCompareExchange(&gDX12HotPathTrackResourceMetadata, 0, 0) != 0;
 }
 
+bool ShouldTrackResourceMetadata()
+{
+	return InterlockedCompareExchange(&gDX12HotPathTrackResourceMetadata, 0, 0) != 0;
+}
+
 static bool FindLatestDescriptorLocked(SIZE_T cpuHandle, DescriptorRecord *record)
 {
 	if (!record)

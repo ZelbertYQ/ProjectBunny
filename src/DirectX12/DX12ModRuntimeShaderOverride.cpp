@@ -67,7 +67,7 @@ bool DX12ModPrepareShaderOverrideReplacement(
 	if (!replacement)
 		return false;
 	*replacement = DX12ModIaReplacement();
-	if (!commandList || !pipelineState || gHasShaderOverrides == 0)
+	if (!commandList || !pipelineState || !DX12ModHasActiveShaderOverrides())
 		return false;
 
 	ID3D12Device *device = AcquireModDevice(commandList);
@@ -112,7 +112,7 @@ void DX12ModRunPostShaderOverrideReplacement(
 	uint32_t firstVertex, uint32_t firstIndex,
 	DX12ModIaReplacement *replacement)
 {
-	if (!replacement || !commandList || !pipelineState || gHasShaderOverrides == 0)
+	if (!replacement || !commandList || !pipelineState || !DX12ModHasActiveShaderOverrides())
 		return;
 
 	ID3D12Device *device = AcquireModDevice(commandList);
@@ -187,7 +187,7 @@ static void UpdateStoredPsoSkipLocked(DX12StoredPso *record)
 
 bool DX12ModShouldSkipPipelineState(ID3D12PipelineState *pipelineState, bool dispatch)
 {
-	if (!pipelineState || gHasShaderOverrides == 0)
+	if (!pipelineState || !DX12ModHasActiveShaderOverrides())
 		return false;
 
 	bool skip = false;
@@ -348,7 +348,7 @@ static ID3D12PipelineState *CreateComputeReplacement(DX12StoredPso *record)
 
 ID3D12PipelineState *DX12ModGetReplacementPipelineState(ID3D12PipelineState *pipelineState)
 {
-	if (!pipelineState || gHasShaderOverrides == 0)
+	if (!pipelineState || !DX12ModHasActiveShaderOverrides())
 		return nullptr;
 
 	DX12StoredPso createRecord;
