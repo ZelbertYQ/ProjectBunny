@@ -22,6 +22,7 @@ add_library(DirectX12 SHARED
     DX12Overlay.cpp
     DX12Profiling.cpp
     DX12ResourceDump.cpp
+    DX12ResourceMetadataDump.cpp
     DX12ResourceTracker.cpp
     DX12Runtime.cpp
     DX12ShaderDump.cpp

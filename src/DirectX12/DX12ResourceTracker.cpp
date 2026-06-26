@@ -29,14 +29,6 @@ static uint32_t HashBytes(uint32_t seed, const void *data, size_t size)
 	}
 }
 
-static void GetSummaryDirectory(const wchar_t *dir, wchar_t *path, size_t pathCount)
-{
-	if (!dir || !path || pathCount == 0)
-		return;
-	swprintf_s(path, pathCount, L"%s\\summary", dir);
-	CreateDirectoryW(path, nullptr);
-}
-
 typedef HRESULT(STDMETHODCALLTYPE *PFN_CREATE_DESCRIPTOR_HEAP)(
 	ID3D12Device*, const D3D12_DESCRIPTOR_HEAP_DESC*, REFIID, void**);
 typedef HRESULT(STDMETHODCALLTYPE *PFN_CREATE_ROOT_SIGNATURE)(
@@ -234,13 +226,27 @@ static SRWLOCK gResourceLock = SRWLOCK_INIT;
 static std::vector<RootSignatureRecord> gRootSignatures;
 static std::vector<DescriptorHeapRecord> gDescriptorHeaps;
 static std::vector<DescriptorRecord> gDescriptors;
+static std::unordered_map<ID3D12RootSignature*, size_t> gRootSignatureByPtr;
+static std::unordered_map<ID3D12DescriptorHeap*, size_t> gDescriptorHeapByPtr;
 static std::unordered_map<SIZE_T, size_t> gDescriptorByCpuHandle;
 static std::vector<PsoRootRecord> gPsoRoots;
+static std::unordered_map<UINT64, size_t> gPsoRootByIndex;
 static std::vector<ResourceRecord> gResources;
 static std::unordered_map<ID3D12Resource*, size_t> gResourceByPtr;
 static std::unordered_map<UINT64, BufferResolveCacheEntry> gBufferResolveCache;
 static bool gCleanupRegistered = false;
 static UINT64 gResourcesRecordedFromCreate = 0;
+static UINT64 gDescriptorRecordsSeen = 0;
+static UINT64 gDescriptorCopyRecordsSeen = 0;
+static UINT64 gDescriptorHeapRecordsSeen = 0;
+static UINT64 gRootSignatureRecordsSeen = 0;
+static UINT64 gPsoRootRecordsSeen = 0;
+static LONG gLastResourceStatsPresent = -1;
+static constexpr size_t kMaxTrackedDescriptors = 131072;
+static constexpr size_t kDescriptorPruneBatch = 32768;
+static constexpr LONG kResourceStatsLogInterval = 300;
+
+static void LogResourceTrackerStatsLocked();
 
 typedef HRESULT(WINAPI *PFN_D3D12_CREATE_ROOT_SIGNATURE_DESERIALIZER_LOCAL)(
 	LPCVOID, SIZE_T, REFIID, void**);
@@ -296,22 +302,6 @@ static const char *DescriptorHeapTypeName(D3D12_DESCRIPTOR_HEAP_TYPE type)
 		return "RTV";
 	case D3D12_DESCRIPTOR_HEAP_TYPE_DSV:
 		return "DSV";
-	default:
-		return "UNKNOWN";
-	}
-}
-
-static const char *ResourceDimensionName(D3D12_RESOURCE_DIMENSION dimension)
-{
-	switch (dimension) {
-	case D3D12_RESOURCE_DIMENSION_BUFFER:
-		return "BUFFER";
-	case D3D12_RESOURCE_DIMENSION_TEXTURE1D:
-		return "TEXTURE1D";
-	case D3D12_RESOURCE_DIMENSION_TEXTURE2D:
-		return "TEXTURE2D";
-	case D3D12_RESOURCE_DIMENSION_TEXTURE3D:
-		return "TEXTURE3D";
 	default:
 		return "UNKNOWN";
 	}
@@ -417,12 +407,21 @@ static void RecordResource(
 	}
 	gBufferResolveCache.clear();
 	gResourcesRecordedFromCreate++;
+	LogResourceTrackerStatsLocked();
 	ReleaseSRWLockExclusive(&gResourceLock);
 }
 
 static void CleanupTrackedResources()
 {
 	AcquireSRWLockExclusive(&gResourceLock);
+	gRootSignatures.clear();
+	gDescriptorHeaps.clear();
+	gDescriptors.clear();
+	gRootSignatureByPtr.clear();
+	gDescriptorHeapByPtr.clear();
+	gDescriptorByCpuHandle.clear();
+	gPsoRoots.clear();
+	gPsoRootByIndex.clear();
 	gResources.clear();
 	gResourceByPtr.clear();
 	gBufferResolveCache.clear();
@@ -852,6 +851,49 @@ static void FillUavBufferView(DescriptorRecord *record)
 			record->resourceDesc.Width - record->resourceOffset : 0;
 }
 
+static void RebuildDescriptorIndexLocked()
+{
+	gDescriptorByCpuHandle.clear();
+	for (size_t i = 0; i < gDescriptors.size(); ++i)
+		gDescriptorByCpuHandle[gDescriptors[i].cpuHandle] = i;
+}
+
+static void PruneDescriptorCacheLocked()
+{
+	if (gDescriptors.size() <= kMaxTrackedDescriptors)
+		return;
+	const size_t eraseCount = (std::min)(kDescriptorPruneBatch, gDescriptors.size());
+	gDescriptors.erase(gDescriptors.begin(), gDescriptors.begin() + eraseCount);
+	RebuildDescriptorIndexLocked();
+}
+
+static void LogResourceTrackerStatsLocked()
+{
+	const LONG present = DX12GetPresentCount();
+	const LONG last = InterlockedCompareExchange(&gLastResourceStatsPresent, 0, 0);
+	if (present < last + kResourceStatsLogInterval)
+		return;
+	if (InterlockedCompareExchange(&gLastResourceStatsPresent, present, last) != last)
+		return;
+	DX12LogDebugJsonFunc("DX12ResourceTrackerStats",
+		"\"present\":%ld,\"roots\":%zu,\"rootRecordsSeen\":%llu,"
+		"\"heaps\":%zu,\"heapRecordsSeen\":%llu,"
+		"\"descriptors\":%zu,\"descriptorRecordsSeen\":%llu,\"descriptorCopyRecordsSeen\":%llu,"
+		"\"resources\":%zu,\"resourcesFromCreate\":%llu,\"psoRoots\":%zu,\"psoRootRecordsSeen\":%llu",
+		present,
+		gRootSignatures.size(),
+		static_cast<unsigned long long>(gRootSignatureRecordsSeen),
+		gDescriptorHeaps.size(),
+		static_cast<unsigned long long>(gDescriptorHeapRecordsSeen),
+		gDescriptors.size(),
+		static_cast<unsigned long long>(gDescriptorRecordsSeen),
+		static_cast<unsigned long long>(gDescriptorCopyRecordsSeen),
+		gResources.size(),
+		static_cast<unsigned long long>(gResourcesRecordedFromCreate),
+		gPsoRoots.size(),
+		static_cast<unsigned long long>(gPsoRootRecordsSeen));
+}
+
 static void UpdateDescriptorResourceStateLocked(
 	ID3D12Resource *resource, D3D12_RESOURCE_STATES state, bool hasState)
 {
@@ -869,6 +911,7 @@ static void UpdateDescriptorResourceStateLocked(
 static void RecordDescriptor(DescriptorRecord &&record)
 {
 	AcquireSRWLockExclusive(&gResourceLock);
+	++gDescriptorRecordsSeen;
 	auto found = gDescriptorByCpuHandle.find(record.cpuHandle);
 	if (found != gDescriptorByCpuHandle.end()) {
 		gDescriptors[found->second] = std::move(record);
@@ -876,6 +919,8 @@ static void RecordDescriptor(DescriptorRecord &&record)
 		gDescriptorByCpuHandle[record.cpuHandle] = gDescriptors.size();
 		gDescriptors.push_back(std::move(record));
 	}
+	PruneDescriptorCacheLocked();
+	LogResourceTrackerStatsLocked();
 	ReleaseSRWLockExclusive(&gResourceLock);
 }
 
@@ -894,6 +939,7 @@ static bool FindLatestDescriptorLocked(SIZE_T cpuHandle, DescriptorRecord *recor
 
 static void RecordDescriptorLocked(DescriptorRecord &&record)
 {
+	++gDescriptorCopyRecordsSeen;
 	auto found = gDescriptorByCpuHandle.find(record.cpuHandle);
 	if (found != gDescriptorByCpuHandle.end()) {
 		gDescriptors[found->second] = std::move(record);
@@ -925,6 +971,8 @@ static void RecordDescriptorCopyRange(
 			RecordDescriptorLocked(std::move(copied));
 		}
 	}
+	PruneDescriptorCacheLocked();
+	LogResourceTrackerStatsLocked();
 	ReleaseSRWLockExclusive(&gResourceLock);
 }
 
@@ -949,7 +997,15 @@ static HRESULT STDMETHODCALLTYPE HookedCreateDescriptorHeap(
 			descriptorHeap->Release();
 
 			AcquireSRWLockExclusive(&gResourceLock);
-			gDescriptorHeaps.push_back(record);
+			++gDescriptorHeapRecordsSeen;
+			auto found = gDescriptorHeapByPtr.find(record.heap);
+			if (found != gDescriptorHeapByPtr.end()) {
+				gDescriptorHeaps[found->second] = record;
+			} else {
+				gDescriptorHeapByPtr[record.heap] = gDescriptorHeaps.size();
+				gDescriptorHeaps.push_back(record);
+			}
+			LogResourceTrackerStatsLocked();
 			ReleaseSRWLockExclusive(&gResourceLock);
 		}
 	}
@@ -975,7 +1031,15 @@ static HRESULT STDMETHODCALLTYPE HookedCreateRootSignature(
 		ParseRootSignatureBlob(&record, blob, blobLength);
 
 		AcquireSRWLockExclusive(&gResourceLock);
-		gRootSignatures.push_back(record);
+		++gRootSignatureRecordsSeen;
+		auto found = gRootSignatureByPtr.find(record.rootSignature);
+		if (found != gRootSignatureByPtr.end()) {
+			gRootSignatures[found->second] = std::move(record);
+		} else {
+			gRootSignatureByPtr[record.rootSignature] = gRootSignatures.size();
+			gRootSignatures.push_back(std::move(record));
+		}
+		LogResourceTrackerStatsLocked();
 		ReleaseSRWLockExclusive(&gResourceLock);
 	}
 	return hr;
@@ -1607,7 +1671,15 @@ void DX12RecordPsoRootSignature(
 	record.rootSignature = rootSignature;
 
 	AcquireSRWLockExclusive(&gResourceLock);
-	gPsoRoots.push_back(record);
+	++gPsoRootRecordsSeen;
+	auto found = gPsoRootByIndex.find(psoIndex);
+	if (found != gPsoRootByIndex.end()) {
+		gPsoRoots[found->second] = std::move(record);
+	} else {
+		gPsoRootByIndex[psoIndex] = gPsoRoots.size();
+		gPsoRoots.push_back(std::move(record));
+	}
+	LogResourceTrackerStatsLocked();
 	ReleaseSRWLockExclusive(&gResourceLock);
 }
 
@@ -2037,209 +2109,3 @@ bool DX12FindDescriptorHeapByGpuHandle(
 	return false;
 }
 
-static void WriteResourceDesc(FILE *file, const DescriptorRecord &record)
-{
-	if (!record.hasResourceDesc) {
-		fprintf(file, ",,,,,,,,,");
-		return;
-	}
-
-	const D3D12_RESOURCE_DESC &desc = record.resourceDesc;
-	fprintf(file, ",%s,%llu,%u,%u,%u,%u,0x%llx,0x%llx,%llu",
-		ResourceDimensionName(desc.Dimension),
-		static_cast<unsigned long long>(desc.Width),
-		desc.Height,
-		desc.DepthOrArraySize,
-		desc.MipLevels,
-		static_cast<UINT>(desc.Format),
-		static_cast<unsigned long long>(desc.Flags),
-		static_cast<unsigned long long>(record.gpuVirtualAddress),
-		static_cast<unsigned long long>(desc.SampleDesc.Count));
-}
-
-void DX12DumpResourceMetadata(const wchar_t *dir)
-{
-	if (!dir)
-		return;
-
-	std::vector<RootSignatureRecord> rootSignatures;
-	std::vector<DescriptorHeapRecord> descriptorHeaps;
-	std::vector<DescriptorRecord> descriptors;
-	std::vector<PsoRootRecord> psoRoots;
-
-	AcquireSRWLockShared(&gResourceLock);
-	rootSignatures = gRootSignatures;
-	descriptorHeaps = gDescriptorHeaps;
-	descriptors = gDescriptors;
-	psoRoots = gPsoRoots;
-	ReleaseSRWLockShared(&gResourceLock);
-
-	wchar_t path[MAX_PATH];
-	wchar_t summaryDir[MAX_PATH];
-	GetSummaryDirectory(dir, summaryDir, ARRAYSIZE(summaryDir));
-	swprintf_s(path, L"%s\\ResourceMetadataDX12.txt", summaryDir);
-	FILE *file = _wfsopen(path, L"w", _SH_DENYNO);
-	if (!file)
-		return;
-
-	fprintf(file, "DX12 Resource Metadata\n");
-	fprintf(file, "======================\n");
-	fprintf(file, "root_signatures=%zu descriptor_heaps=%zu descriptors=%zu pso_roots=%zu\n\n",
-		rootSignatures.size(), descriptorHeaps.size(), descriptors.size(), psoRoots.size());
-
-	fprintf(file, "PSO Root Signatures\n");
-	fprintf(file, "pso,kind,pipeline_state,root_signature\n");
-	for (const PsoRootRecord &record : psoRoots) {
-		fprintf(file, "%llu,%s,%p,%p\n",
-			static_cast<unsigned long long>(record.psoIndex),
-			record.kind.c_str(), record.pipelineState, record.rootSignature);
-	}
-
-	fprintf(file, "\nRoot Signatures\n");
-	fprintf(file, "index,root_signature,hash,size,node_mask,version,flags,static_samplers,parsed,parameters\n");
-	for (size_t i = 0; i < rootSignatures.size(); ++i) {
-		const RootSignatureRecord &record = rootSignatures[i];
-		fprintf(file, "%zu,%p,%016llx,%zu,%u,0x%x,0x%x,%u,%u,%zu\n",
-			i,
-			record.rootSignature,
-			static_cast<unsigned long long>(record.hash),
-			record.size,
-			record.nodeMask,
-			record.version,
-			record.flags,
-			record.staticSamplerCount,
-			record.parsed ? 1 : 0,
-			record.parameters.size());
-	}
-
-	fprintf(file, "\nRoot Parameters\n");
-	fprintf(file, "root_signature,root_param,type,visibility,shader_register,space,root_descriptor_flags,num32bit_values,range_count\n");
-	for (const RootSignatureRecord &record : rootSignatures) {
-		for (const DX12RootParameterSummary &parameter : record.parameters) {
-			fprintf(file, "%p,%u,%u,%u,%u,%u,0x%x,%u,%zu\n",
-				record.rootSignature,
-				parameter.rootParameterIndex,
-				parameter.parameterType,
-				parameter.shaderVisibility,
-				parameter.shaderRegister,
-				parameter.registerSpace,
-				parameter.rootDescriptorFlags,
-				parameter.num32BitValues,
-				parameter.ranges.size());
-		}
-	}
-
-	fprintf(file, "\nRoot Descriptor Ranges\n");
-	fprintf(file, "root_signature,root_param,range_index,range_type,num_descriptors,base_shader_register,space,offset,effective_offset,flags,visibility\n");
-	for (const RootSignatureRecord &record : rootSignatures) {
-		for (const DX12RootParameterSummary &parameter : record.parameters) {
-			for (const DX12RootDescriptorRangeSummary &range : parameter.ranges) {
-				fprintf(file, "%p,%u,%u,%u,%u,%u,%u,%u,%u,0x%x,%u\n",
-					record.rootSignature,
-					range.rootParameterIndex,
-					range.rangeIndex,
-					range.rangeType,
-					range.numDescriptors,
-					range.baseShaderRegister,
-					range.registerSpace,
-					range.offsetInDescriptorsFromTableStart,
-					range.effectiveOffset,
-					range.flags,
-					range.shaderVisibility);
-			}
-		}
-	}
-
-	fprintf(file, "\nDescriptor Heaps\n");
-	fprintf(file, "index,heap,type,num_descriptors,flags,node_mask,cpu_start,gpu_start,increment\n");
-	for (size_t i = 0; i < descriptorHeaps.size(); ++i) {
-		const DescriptorHeapRecord &record = descriptorHeaps[i];
-		fprintf(file, "%zu,%p,%s,%u,0x%x,%u,0x%llx,0x%llx,%u\n",
-			i,
-			record.heap,
-			DescriptorHeapTypeName(record.desc.Type),
-			record.desc.NumDescriptors,
-			static_cast<UINT>(record.desc.Flags),
-			record.desc.NodeMask,
-			static_cast<unsigned long long>(record.cpuStart),
-			static_cast<unsigned long long>(record.gpuStart),
-			record.increment);
-	}
-
-	fprintf(file, "\nDescriptors\n");
-	fprintf(file,
-		"index,kind,cpu_handle,resource,counter_resource,resource_dimension,width,height,depth_or_array,mips,format,flags,gpu_va,sample_count,resource_offset,view_size,heap_type,current_state,has_current_state,has_view_desc,view_format,view_dimension,cbv_size,first_element,num_elements,stride,buffer_view_offset,buffer_view_bytes\n");
-	for (size_t i = 0; i < descriptors.size(); ++i) {
-		const DescriptorRecord &record = descriptors[i];
-		fprintf(file, "%zu,%s,0x%llx,%p,%p",
-			i,
-			record.kind.c_str(),
-			static_cast<unsigned long long>(record.cpuHandle),
-			record.resource,
-			record.counterResource);
-		WriteResourceDesc(file, record);
-
-		UINT viewFormat = 0;
-		UINT viewDimension = 0;
-		UINT cbvSize = 0;
-		UINT64 firstElement = 0;
-		UINT numElements = 0;
-		UINT stride = 0;
-		UINT64 bufferViewOffset = 0;
-		UINT64 bufferViewBytes = 0;
-		if (record.kind == "CBV") {
-			cbvSize = record.cbv.SizeInBytes;
-		} else if (record.kind == "SRV" && record.hasDesc) {
-			viewFormat = static_cast<UINT>(record.srv.Format);
-			viewDimension = static_cast<UINT>(record.srv.ViewDimension);
-			if (record.srv.ViewDimension == D3D12_SRV_DIMENSION_BUFFER) {
-				firstElement = record.srv.Buffer.FirstElement;
-				numElements = record.srv.Buffer.NumElements;
-				stride = record.srv.Buffer.StructureByteStride;
-				bufferViewOffset = record.resourceOffset;
-				bufferViewBytes = record.viewSize;
-			}
-		} else if (record.kind == "UAV" && record.hasDesc) {
-			viewFormat = static_cast<UINT>(record.uav.Format);
-			viewDimension = static_cast<UINT>(record.uav.ViewDimension);
-			if (record.uav.ViewDimension == D3D12_UAV_DIMENSION_BUFFER) {
-				firstElement = record.uav.Buffer.FirstElement;
-				numElements = record.uav.Buffer.NumElements;
-				stride = record.uav.Buffer.StructureByteStride;
-				bufferViewOffset = record.resourceOffset;
-				bufferViewBytes = record.viewSize;
-			}
-		} else if (record.kind == "RTV" && record.hasDesc) {
-			viewFormat = static_cast<UINT>(record.rtv.Format);
-			viewDimension = static_cast<UINT>(record.rtv.ViewDimension);
-		} else if (record.kind == "DSV" && record.hasDesc) {
-			viewFormat = static_cast<UINT>(record.dsv.Format);
-			viewDimension = static_cast<UINT>(record.dsv.ViewDimension);
-		}
-
-		fprintf(file, ",%llu,%llu,%u,0x%x,%u,%u,%u,%u,%u,%llu,%u,%u,%llu,%llu\n",
-			static_cast<unsigned long long>(record.resourceOffset),
-			static_cast<unsigned long long>(record.viewSize),
-			record.hasResourceHeapType ? record.resourceHeapType : 0,
-			static_cast<UINT>(record.currentState),
-			record.hasCurrentState ? 1 : 0,
-			record.hasDesc ? 1 : 0,
-			viewFormat,
-			viewDimension,
-			cbvSize,
-			static_cast<unsigned long long>(firstElement),
-			numElements,
-			stride,
-			static_cast<unsigned long long>(bufferViewOffset),
-			static_cast<unsigned long long>(bufferViewBytes));
-	}
-
-	fclose(file);
-	char fields[512] = "";
-	DX12JsonAppendWStringField(fields, sizeof(fields), "path", path);
-	DX12JsonAppendRawField(fields, sizeof(fields), "roots", std::to_string(rootSignatures.size()).c_str());
-	DX12JsonAppendRawField(fields, sizeof(fields), "heaps", std::to_string(descriptorHeaps.size()).c_str());
-	DX12JsonAppendRawField(fields, sizeof(fields), "descriptors", std::to_string(descriptors.size()).c_str());
-	DX12JsonAppendRawField(fields, sizeof(fields), "psoRoots", std::to_string(psoRoots.size()).c_str());
-	DX12FrameAnalysisLogJsonFunc("ResourceMetadataWritten", "%s", fields + 1);
-}
