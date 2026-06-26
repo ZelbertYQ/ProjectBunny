@@ -657,6 +657,14 @@ static void LogCommandListStage(
 		hr, static_cast<unsigned long long>(elapsedMs));
 }
 
+static void LogCommandListStageEdge(
+	const char *api, const char *stage, ID3D12GraphicsCommandList *commandList)
+{
+	DX12LogDebugJsonFunc("DX12CommandListStage",
+		"\"api\":\"%s\",\"stage\":\"%s\",\"present\":%ld,\"commandList\":\"%p\"",
+		api ? api : "", stage ? stage : "", DX12GetPresentCount(), commandList);
+}
+
 template <typename T>
 static T GetCommandListOriginal(
 	ID3D12GraphicsCommandList *commandList, UINT slot, T fallback, const char *name)
@@ -978,15 +986,21 @@ static HRESULT STDMETHODCALLTYPE HookedResetCommandList(
 		" allocator=%p initialPso=%p", allocator, initialState);
 	ULONGLONG startTick = GetTickCount64();
 	ULONGLONG stageTick = startTick;
-	DX12CommandListLifecycleReset(commandList, initialState);
-	LogCommandListStage("Reset", "afterLifecycle", commandList, S_OK, GetTickCount64() - stageTick);
-	stageTick = GetTickCount64();
-	DX12CommandListRuntimeReset(commandList, initialState);
-	LogCommandListStage("Reset", "afterRuntime", commandList, S_OK, GetTickCount64() - stageTick);
 	PFN_RESET_COMMAND_LIST original = DX12_CL_ORIG(commandList, 10, PFN_RESET_COMMAND_LIST, ResetCommandList);
+	LogCommandListStageEdge("Reset", "beforeOriginal", commandList);
 	stageTick = GetTickCount64();
 	HRESULT hr = original ? original(commandList, allocator, initialState) : E_FAIL;
 	LogCommandListStage("Reset", "afterOriginal", commandList, hr, GetTickCount64() - stageTick);
+	if (SUCCEEDED(hr)) {
+		stageTick = GetTickCount64();
+		LogCommandListStageEdge("Reset", "beforeRuntime", commandList);
+		DX12CommandListRuntimeReset(commandList, initialState);
+		LogCommandListStage("Reset", "afterRuntime", commandList, S_OK, GetTickCount64() - stageTick);
+		stageTick = GetTickCount64();
+		LogCommandListStageEdge("Reset", "beforeLifecycle", commandList);
+		DX12CommandListLifecycleReset(commandList, initialState);
+		LogCommandListStage("Reset", "afterLifecycle", commandList, S_OK, GetTickCount64() - stageTick);
+	}
 	LogCommandListStage("Reset", "end", commandList, hr, GetTickCount64() - startTick);
 	return hr;
 }

@@ -112,32 +112,9 @@ struct BindingEvent
 	UINT threadGroupCountZ = 0;
 };
 
-// --- Lock strategy ---------------------------------------------------------
-//
-// Per Microsoft's D3D12 guidance, "multiple command lists can be recorded
-// concurrently"
-// (https://learn.microsoft.com/windows/win32/direct3d12/design-philosophy-of-command-queues-and-command-lists)
-// and "the majority of the CPU cost is associated with command list building"
-// (https://learn.microsoft.com/samples/microsoft/directx-graphics-samples/d3d12-multithreading-sample-win32/).
-//
-// Two distinct concerns previously shared ONE global lock:
-//   * gCommandLists  â€?per-command-list binding state, written on EVERY
-//                      vertex/index/descriptor/root binding call. With texture
-//                      overrides active this is the steady-state gameplay hot
-//                      path and was serializing all recording threads.
-//   * gEvents         â€?the frame-analysis event log, only touched when capture
-//                      (frame analysis / shader dump / hunt) is active, i.e.
-//                      NOT during normal gameplay.
-//
-// We split them:
-//   * gCommandLists is sharded by command-list pointer, so threads recording
-//     different lists never contend. A list is recorded by a single thread, so
-//     its own shard sees consistent state without cross-thread locking â€?the
-//     same property DX11 gets for free by storing state on the context object.
-//   * gEvents keeps a single dedicated lock; it is off the gameplay hot path.
 namespace {
 
-constexpr size_t kBindingShardCount = 64; // power of two for cheap masking
+constexpr size_t kBindingShardCount = 64;
 
 struct BindingShard {
 	SRWLOCK lock = SRWLOCK_INIT;
@@ -154,14 +131,13 @@ inline BindingShard &BindingShardFor(ID3D12GraphicsCommandList *commandList)
 	return gBindingShards[(key >> 17) & (kBindingShardCount - 1)];
 }
 
-} // namespace
+}
 
-// Dedicated lock for the frame-analysis event log (off the gameplay hot path).
 static SRWLOCK gEventsLock = SRWLOCK_INIT;
 static std::vector<BindingEvent> gEvents;
 static UINT64 gEventSerial = 0;
-static UINT64 gGlobalDrawSerial = 0;
-static UINT64 gGlobalDispatchSerial = 0;
+static volatile LONG64 gGlobalDrawSerial = 0;
+static volatile LONG64 gGlobalDispatchSerial = 0;
 static UINT64 gDroppedEvents = 0;
 static const DX12DescriptorHeapSummary *FindHeapForGpuHandle(
 	const std::vector<DX12DescriptorHeapSummary> &heaps,
@@ -288,10 +264,6 @@ void DX12BindingSetComputeRootSignature(
 	AcquireSRWLockExclusive(&shard.lock);
 	CommandListBindingState &state = shard.states[commandList];
 	if (state.computeRootSignature != rootSignature) {
-		// A different compute root signature changes how subsequent descriptor
-		// tables, root descriptors, and root constants must be interpreted.
-		// Treat that as a binding-state change so dispatch probes do not reuse
-		// a stale "zero serial" view after the layout flips on the fast path.
 		state.computeRootSignature = rootSignature;
 		++state.computeBindingSerial;
 	}
@@ -303,9 +275,6 @@ void DX12BindingRecordStateEvent(ID3D12GraphicsCommandList *commandList, const c
 	if (!commandList)
 		return;
 
-	// Snapshot the per-list state from its shard, then append the event under
-	// the dedicated events lock. This keeps the hot per-list shard lock and the
-	// (capture-only) events lock independent.
 	CommandListBindingState snapshot;
 	bool found = false;
 	BindingShard &shard = BindingShardFor(commandList);
@@ -351,8 +320,6 @@ bool DX12BindingSetDescriptorHeaps(
 		ReleaseSRWLockExclusive(&shard.lock);
 		return false;
 	}
-	// Skip redundant tracker churn for repeated heap pairs. The command-list
-	// API call still reaches D3D12; this only avoids CPU-side state rewrites.
 	state.cbvSrvUavHeap = cbvSrvUavHeap;
 	state.samplerHeap = samplerHeap;
 	++state.computeBindingSerial;
@@ -661,18 +628,10 @@ bool DX12BindingGetCurrentDescriptorHeaps(
 	ID3D12DescriptorHeap **cbvSrvUavHeap,
 	ID3D12DescriptorHeap **samplerHeap)
 {
-	// Descriptor-heap tracking moved to RuntimeState (TLS fast path, no
-	// BindingTracker dependency).  Texture overrides can query the current
-	// heaps without forcing the full binding-tracking machinery online.
 	return DX12CommandListRuntimeGetDescriptorHeaps(
 		commandList, cbvSrvUavHeap, samplerHeap);
 }
 
-// Records a draw/dispatch event for frame analysis. The per-list serial lives
-// in the command list's shard; the event log lives under gEventsLock. We bump
-// the serial + snapshot state under the shard lock, then append under the
-// events lock so the two locks stay independent. Only called when capture is
-// active (frame analysis / shader dump / hunt), never on the gameplay hot path.
 void DX12BindingRecordDrawInstanced(
 	ID3D12GraphicsCommandList *commandList, UINT vertexCountPerInstance,
 	UINT instanceCount, UINT startVertexLocation, UINT startInstanceLocation)
@@ -681,15 +640,15 @@ void DX12BindingRecordDrawInstanced(
 		return;
 
 	CommandListBindingState snapshot;
+	const UINT64 drawSerial = static_cast<UINT64>(InterlockedIncrement64(&gGlobalDrawSerial));
 	BindingShard &shard = BindingShardFor(commandList);
+	AcquireSRWLockExclusive(&shard.lock);
+	CommandListBindingState &state = shard.states[commandList];
+	state.drawSerial = drawSerial;
+	snapshot = state;
+	ReleaseSRWLockExclusive(&shard.lock);
+
 	AcquireSRWLockExclusive(&gEventsLock);
-	{
-		AcquireSRWLockExclusive(&shard.lock);
-		CommandListBindingState &state = shard.states[commandList];
-		state.drawSerial = ++gGlobalDrawSerial;
-		snapshot = state;
-		ReleaseSRWLockExclusive(&shard.lock);
-	}
 	const size_t before = gEvents.size();
 	StoreEventLocked("draw", commandList, snapshot);
 	if (gEvents.size() > before) {
@@ -711,15 +670,15 @@ void DX12BindingRecordDrawIndexedInstanced(
 		return;
 
 	CommandListBindingState snapshot;
+	const UINT64 drawSerial = static_cast<UINT64>(InterlockedIncrement64(&gGlobalDrawSerial));
 	BindingShard &shard = BindingShardFor(commandList);
+	AcquireSRWLockExclusive(&shard.lock);
+	CommandListBindingState &state = shard.states[commandList];
+	state.drawSerial = drawSerial;
+	snapshot = state;
+	ReleaseSRWLockExclusive(&shard.lock);
+
 	AcquireSRWLockExclusive(&gEventsLock);
-	{
-		AcquireSRWLockExclusive(&shard.lock);
-		CommandListBindingState &state = shard.states[commandList];
-		state.drawSerial = ++gGlobalDrawSerial;
-		snapshot = state;
-		ReleaseSRWLockExclusive(&shard.lock);
-	}
 	const size_t before = gEvents.size();
 	StoreEventLocked("draw_indexed", commandList, snapshot);
 	if (gEvents.size() > before) {
@@ -741,15 +700,16 @@ void DX12BindingRecordDispatch(
 		return;
 
 	CommandListBindingState snapshot;
+	const UINT64 dispatchSerial =
+		static_cast<UINT64>(InterlockedIncrement64(&gGlobalDispatchSerial));
 	BindingShard &shard = BindingShardFor(commandList);
+	AcquireSRWLockExclusive(&shard.lock);
+	CommandListBindingState &state = shard.states[commandList];
+	state.dispatchSerial = dispatchSerial;
+	snapshot = state;
+	ReleaseSRWLockExclusive(&shard.lock);
+
 	AcquireSRWLockExclusive(&gEventsLock);
-	{
-		AcquireSRWLockExclusive(&shard.lock);
-		CommandListBindingState &state = shard.states[commandList];
-		state.dispatchSerial = ++gGlobalDispatchSerial;
-		snapshot = state;
-		ReleaseSRWLockExclusive(&shard.lock);
-	}
 	const size_t before = gEvents.size();
 	StoreEventLocked("dispatch", commandList, snapshot);
 	if (gEvents.size() > before) {
@@ -766,9 +726,9 @@ void DX12BindingBeginFrame()
 	AcquireSRWLockExclusive(&gEventsLock);
 	gEvents.clear();
 	gEventSerial = 0;
-	gGlobalDrawSerial = 0;
-	gGlobalDispatchSerial = 0;
 	gDroppedEvents = 0;
+	InterlockedExchange64(&gGlobalDrawSerial, 0);
+	InterlockedExchange64(&gGlobalDispatchSerial, 0);
 	ReleaseSRWLockExclusive(&gEventsLock);
 }
 
