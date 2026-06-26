@@ -389,6 +389,7 @@ static bool UpdateIaTextureCandidateFromVertexViews(
 static bool DX12ShouldBypassIaTextureDrawWork(ID3D12GraphicsCommandList *commandList)
 {
 	return DX12ModHasActiveTextureOverrides() &&
+		!DX12ModHasActivePreSkinTextureOverrides() &&
 		!DX12ModHasActiveShaderOverrides() &&
 		!DX12ModNeedsPresentReplacement() &&
 		!DX12HuntIsEnabled() &&
@@ -1061,6 +1062,8 @@ static void STDMETHODCALLTYPE HookedDrawInstanced(
 		return;
 	}
 	const DX12CommandListRuntimeState runtimeState = DX12CommandListRuntimeGetState(commandList);
+	if (DX12ModHasActivePreSkinTextureOverrides())
+		SyncHuntIaFromRuntimeState(commandList, runtimeState.ia);
 	const DX12IaReplacementExecutorCallbacks iaCallbacks =
 		MakeIaReplacementCallbacks(commandList);
 	DX12IaDrawInvocation draw = {};
@@ -1134,6 +1137,8 @@ static void STDMETHODCALLTYPE HookedDrawIndexedInstanced(
 		return;
 	}
 	const DX12CommandListRuntimeState runtimeState = DX12CommandListRuntimeGetState(commandList);
+	if (DX12ModHasActivePreSkinTextureOverrides())
+		SyncHuntIaFromRuntimeState(commandList, runtimeState.ia);
 	const DX12IaReplacementExecutorCallbacks iaCallbacks =
 		MakeIaReplacementCallbacks(commandList);
 	DX12IaDrawInvocation draw = {};

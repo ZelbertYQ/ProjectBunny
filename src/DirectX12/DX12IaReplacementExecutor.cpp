@@ -23,6 +23,11 @@ bool DX12IaReplacementIsExecutingInternalDraw()
 	return tIaReplacementDrawDepth > 0;
 }
 
+static bool VertexBufferViewIsBound(const D3D12_VERTEX_BUFFER_VIEW &view)
+{
+	return view.BufferLocation != 0 && view.SizeInBytes != 0;
+}
+
 static bool PrepareIaForMod(
 	ID3D12GraphicsCommandList *commandList,
 	DX12IaHashState *iaState,
@@ -54,12 +59,28 @@ static void ApplyIaReplacement(
 	}
 
 	if (!replacement.vertexBuffers.empty() && callbacks.setVertexBuffers) {
-		DX12CommandListRuntimeRememberVertexBuffers(commandList, replacement.vertexBufferStartSlot,
-			static_cast<UINT>(replacement.vertexBuffers.size()),
-			replacement.vertexBuffers.data());
-		callbacks.setVertexBuffers(commandList, replacement.vertexBufferStartSlot,
-			static_cast<UINT>(replacement.vertexBuffers.size()),
-			replacement.vertexBuffers.data());
+		const UINT count = static_cast<UINT>(replacement.vertexBuffers.size());
+		UINT runStart = 0;
+		while (runStart < count) {
+			while (runStart < count &&
+			       !VertexBufferViewIsBound(replacement.vertexBuffers[runStart]))
+				++runStart;
+			if (runStart >= count)
+				break;
+
+			UINT runEnd = runStart + 1;
+			while (runEnd < count &&
+			       VertexBufferViewIsBound(replacement.vertexBuffers[runEnd]))
+				++runEnd;
+
+			const UINT slot = replacement.vertexBufferStartSlot + runStart;
+			const UINT runCount = runEnd - runStart;
+			const D3D12_VERTEX_BUFFER_VIEW *views =
+				replacement.vertexBuffers.data() + runStart;
+			DX12CommandListRuntimeRememberVertexBuffers(commandList, slot, runCount, views);
+			callbacks.setVertexBuffers(commandList, slot, runCount, views);
+			runStart = runEnd;
+		}
 	}
 }
 

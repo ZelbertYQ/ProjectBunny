@@ -1,5 +1,6 @@
 #include "DX12DispatchHookFlow.h"
 
+#include <cstring>
 #include <vector>
 
 #include "DX12BindingTracker.h"
@@ -21,6 +22,11 @@ static void LogPreSkinDispatchProbeReason(
 	size_t uavCount)
 {
 #if defined(_DEBUG)
+	if (reason && (!strcmp(reason, "uav_filter_miss") ||
+	    !strcmp(reason, "cached_no_uav_match") ||
+	    !strcmp(reason, "cs_not_configured"))) {
+		return;
+	}
 	// These logs explain why explicit match_cs pre-skinning did not reach the
 	// replacement path.
 	DX12LogDebugJsonFunc("DX12PreSkinDispatchProbe",
@@ -51,8 +57,6 @@ struct DX12DispatchPreSkinProbe
 	bool shouldLog = false;
 	uint64_t computeShaderHash = 0;
 	UINT64 computeBindingSerial = 0;
-	UINT originalVertexCount = 0;
-	UINT overrideVertexCount = 0;
 };
 
 static DX12DispatchPreSkinProbe &GetDispatchPreSkinProbeScratch()
@@ -70,8 +74,6 @@ static DX12DispatchPreSkinProbe &GetDispatchPreSkinProbeScratch()
 	probe.shouldLog = false;
 	probe.computeShaderHash = 0;
 	probe.computeBindingSerial = 0;
-	probe.originalVertexCount = 0;
-	probe.overrideVertexCount = 0;
 	return probe;
 }
 
@@ -146,44 +148,13 @@ static void PreparePreSkinProbe(
 			probe->srvsFound ? probe->srvs : kEmptyComputeBindings,
 			probe->cbvsFound ? probe->cbvs : kEmptyComputeBindings,
 			probe->rootConstantsFound ? probe->rootConstants : kEmptyRootConstants,
-			&probe->originalVertexCount, &probe->overrideVertexCount);
+			nullptr, nullptr);
 	} else {
 		LogPreSkinDispatchProbeReason(
 			"uav_filter_miss", probe->computeShaderHash,
 			computeBindingSerial, probe->uavs.size());
 	}
 
-}
-
-static UINT AdjustDispatchGroupsX(
-	UINT threadGroupCountX,
-	UINT threadGroupCountY,
-	UINT threadGroupCountZ,
-	const DX12DispatchPreSkinProbe &probe)
-{
-	if (!probe.applied || !probe.originalVertexCount || !probe.overrideVertexCount ||
-	    probe.overrideVertexCount <= probe.originalVertexCount || !threadGroupCountX)
-		return threadGroupCountX;
-
-	const UINT threadsPerGroup =
-		(probe.originalVertexCount + threadGroupCountX - 1) / threadGroupCountX;
-	if (!threadsPerGroup)
-		return threadGroupCountX;
-
-	UINT dispatchGroupsX =
-		(probe.overrideVertexCount + threadsPerGroup - 1) / threadsPerGroup;
-	if (dispatchGroupsX < threadGroupCountX)
-		dispatchGroupsX = threadGroupCountX;
-	DX12Profiling::RecordPreSkinDispatchResized();
-	DX12_DISPATCH_DEBUG_VERBOSE_LOG(
-		DX12LogDebugJsonFunc("DX12PreSkinDispatchResize",
-			"\"oldGroups\":\"%u,%u,%u\",\"newGroups\":\"%u,%u,%u\",\"oldVertices\":%u,\"newVertices\":%u,\"threadsPerGroup\":%u,\"cs\":\"%016llx\"",
-			threadGroupCountX, threadGroupCountY, threadGroupCountZ,
-			dispatchGroupsX, threadGroupCountY, threadGroupCountZ,
-			probe.originalVertexCount, probe.overrideVertexCount,
-			threadsPerGroup,
-			static_cast<unsigned long long>(probe.computeShaderHash)));
-	return dispatchGroupsX;
 }
 
 static void FinishPreSkinProbe(
@@ -201,7 +172,7 @@ static void FinishPreSkinProbe(
 		DX12ModStoreCachedPreSkinningUavMatch(
 			commandList, probe.computeShaderHash, probe.computeBindingSerial,
 			probe.uavsFound);
-	if (!probe.shouldLog)
+	if (!probe.applied)
 		return;
 
 	DX12_DISPATCH_DEBUG_VERBOSE_LOG(
@@ -245,8 +216,6 @@ void DX12DispatchHookFlowExecute(
 
 	DX12DispatchPreSkinProbe &probe = GetDispatchPreSkinProbeScratch();
 	PreparePreSkinProbe(commandList, runtimeState, &probe);
-	const UINT dispatchGroupsX =
-		AdjustDispatchGroupsX(threadGroupCountX, threadGroupCountY, threadGroupCountZ, probe);
-	originalDispatch(commandList, dispatchGroupsX, threadGroupCountY, threadGroupCountZ);
+	originalDispatch(commandList, threadGroupCountX, threadGroupCountY, threadGroupCountZ);
 	FinishPreSkinProbe(commandList, threadGroupCountX, threadGroupCountY, threadGroupCountZ, probe);
 }
