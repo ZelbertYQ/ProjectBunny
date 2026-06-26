@@ -617,6 +617,14 @@ bool DX12ModPrepareIaReplacement(
 	if (overrides.empty()) {
 		return false;
 	}
+	AcquireSRWLockShared(&gModLock);
+	const bool requiresInactivePreSkin = IaOverridesRequireInactivePreSkinLocked(overrides);
+	ReleaseSRWLockShared(&gModLock);
+	if (requiresInactivePreSkin) {
+		LogIaReplacementSuppressedLimited(
+			iaState, *replacement, "inactive_preskin_dependency");
+		return false;
+	}
 	LogIaMatchLimited(
 		iaState, vertexCount, indexCount, instanceCount,
 		firstVertex, firstIndex, overrides);
@@ -694,4 +702,3 @@ void DX12ModRunPostIaReplacement(
 	ReleaseSRWLockExclusive(&gModLock);
 	device->Release();
 }
-

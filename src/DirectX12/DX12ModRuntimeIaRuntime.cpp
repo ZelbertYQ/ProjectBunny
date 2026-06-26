@@ -640,6 +640,43 @@ static void AppendRelatedMeshTextureOverridesLocked(
 	}
 }
 
+static bool IaOverridesRequireInactivePreSkinLocked(
+	const std::vector<DX12TriggeredTextureOverride> &overrides)
+{
+	if (overrides.empty() || gPreSkinTextureOverrides.empty())
+		return false;
+
+	std::unordered_set<std::wstring> namespaces;
+	std::set<std::wstring> tokens;
+	bool hasActivePreSkinEntry = false;
+	for (const DX12TriggeredTextureOverride &entry : overrides) {
+		if (entry.preSkinAnchor) {
+			hasActivePreSkinEntry = true;
+			continue;
+		}
+		const Bunny::TextureOverrideConfig &config =
+			TriggeredTextureOverrideConfig(entry);
+		if (!config.iniNamespace.empty())
+			namespaces.insert(config.iniNamespace);
+		CollectTextureOverrideTokens(config, &tokens);
+	}
+	if (hasActivePreSkinEntry || tokens.empty())
+		return false;
+
+	for (const DX12PreSkinTextureOverrideCandidate &candidate : gPreSkinTextureOverrides) {
+		const Bunny::TextureOverrideConfig &config = candidate.config;
+		if (TextureOverrideMatchCsSatisfiedLocked(config))
+			continue;
+		if (!namespaces.empty() && namespaces.find(config.iniNamespace) == namespaces.end())
+			continue;
+		std::set<std::wstring> candidateTokens;
+		CollectTextureOverrideTokens(config, &candidateTokens);
+		if (TextureOverrideSharesAnyToken(candidateTokens, tokens))
+			return true;
+	}
+	return false;
+}
+
 static ID3D12Resource *SelectIaResourceForViewLocked(
 	ID3D12GraphicsCommandList *commandList, DX12LoadedResource *resource)
 {
@@ -907,4 +944,3 @@ static const Bunny::TextureOverrideConfig *FindTargetTextureOverrideLocked(
 
 	return nullptr;
 }
-
