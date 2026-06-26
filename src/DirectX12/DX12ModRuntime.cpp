@@ -91,7 +91,12 @@ struct DX12TriggeredTextureOverride
 	uint32_t vertexSlot = 0;
 	bool executeCommands = false;
 	bool executeDrawActions = true;
+	bool directIaAnchor = false;
+	bool relatedMesh = false;
 	bool preSkinAnchor = false;
+	ID3D12Resource *preSkinResource = nullptr;
+	UINT64 preSkinByteWidth = 0;
+	UINT preSkinStride = 0;
 };
 
 static const Bunny::TextureOverrideConfig &TriggeredTextureOverrideConfig(
@@ -205,8 +210,42 @@ struct DX12ActivePreSkinTextureOverride
 {
 	Bunny::TextureOverrideConfig config;
 	DX12ComputeUavProducer producer;
+	ID3D12Resource *outputResource = nullptr;
+	UINT64 outputByteWidth = 0;
+	UINT outputStride = 0;
 };
+
 static std::map<std::wstring, DX12ActivePreSkinTextureOverride> gActivePreSkinTextureOverrides;
+static void ReleaseActivePreSkinTextureOverride(DX12ActivePreSkinTextureOverride *active)
+{
+	if (!active)
+		return;
+	if (active->outputResource) {
+		active->outputResource->Release();
+		active->outputResource = nullptr;
+	}
+	active->outputByteWidth = 0;
+	active->outputStride = 0;
+}
+
+static void ClearActivePreSkinTextureOverridesLocked()
+{
+	for (auto &item : gActivePreSkinTextureOverrides)
+		ReleaseActivePreSkinTextureOverride(&item.second);
+	gActivePreSkinTextureOverrides.clear();
+}
+
+static void StoreActivePreSkinTextureOverrideLocked(
+	const std::wstring &section, const DX12ActivePreSkinTextureOverride &active)
+{
+	auto existing = gActivePreSkinTextureOverrides.find(section);
+	if (existing != gActivePreSkinTextureOverrides.end())
+		ReleaseActivePreSkinTextureOverride(&existing->second);
+	DX12ActivePreSkinTextureOverride stored = active;
+	if (stored.outputResource)
+		stored.outputResource->AddRef();
+	gActivePreSkinTextureOverrides[section] = stored;
+}
 static std::map<std::wstring, LONG> gPreSkinSectionAppliedPresent;
 
 struct DX12PreSkinCbvReadCacheKey
@@ -352,6 +391,7 @@ struct DX12LoadedResource
 	bool uavInitialized = false;
 	bool uavWritten = false;
 	bool uavValid = false;
+	bool uavBarrierPending = false;
 	UINT64 uavByteWidth = 0;
 	UINT64 srvByteWidth = 0;
 	UINT srvStride = 0;
@@ -405,7 +445,8 @@ static std::unordered_map<ID3D12GraphicsCommandList*, DX12PreSkinReplacementStat
 struct DX12RetiredPreSkinResource
 {
 	ID3D12Resource *resource = nullptr;
-	LONG present = 0;
+	ID3D12Fence *fence = nullptr;
+	UINT64 fenceValue = 0;
 };
 static std::vector<DX12RetiredPreSkinResource> gRetiredPreSkinResources;
 
@@ -422,15 +463,27 @@ struct DX12PreSkinDescriptorRing
 struct DX12RetiredPreSkinDescriptorHeap
 {
 	ID3D12DescriptorHeap *heap = nullptr;
-	LONG present = 0;
+	ID3D12Fence *fence = nullptr;
+	UINT64 fenceValue = 0;
 };
 
 static SRWLOCK gPreSkinDescriptorRingLock = SRWLOCK_INIT;
 static DX12PreSkinDescriptorRing gPreSkinDescriptorRing;
 static std::vector<DX12RetiredPreSkinDescriptorHeap> gRetiredPreSkinDescriptorHeaps;
 static constexpr UINT PreSkinDescriptorRingInitialCapacity = 4096;
-static constexpr LONG PreSkinResourceRetireDelay = 32;
-static constexpr LONG PreSkinDescriptorHeapRetireDelay = 32;
+
+struct DX12PreSkinPendingSubmission
+{
+	std::vector<ID3D12Resource*> resources;
+	std::vector<ID3D12DescriptorHeap*> descriptorHeaps;
+};
+
+static SRWLOCK gPreSkinRetireLock = SRWLOCK_INIT;
+static ID3D12Fence *gPreSkinRetireFence = nullptr;
+static ID3D12Device *gPreSkinRetireFenceDevice = nullptr;
+static ID3D12CommandQueue *gPreSkinRetireFenceQueue = nullptr;
+static UINT64 gPreSkinRetireFenceNextValue = 0;
+static std::unordered_map<IUnknown*, DX12PreSkinPendingSubmission> gPendingPreSkinSubmissions;
 
 static void ReleasePreSkinDescriptorRestores(
 	std::vector<DX12PreSkinReplacementState::DescriptorRestore> *restores)
@@ -446,52 +499,223 @@ static void ReleasePreSkinDescriptorRestores(
 	restores->clear();
 }
 
+static bool EnsurePreSkinRetireFenceLocked(ID3D12CommandQueue *queue)
+{
+	if (!queue)
+		return false;
+	D3D12_COMMAND_QUEUE_DESC queueDesc = queue->GetDesc();
+	if (queueDesc.Type != D3D12_COMMAND_LIST_TYPE_DIRECT)
+		return false;
+	ID3D12Device *device = nullptr;
+	HRESULT hr = queue->GetDevice(IID_PPV_ARGS(&device));
+	if (FAILED(hr) || !device)
+		return false;
+
+	if (gPreSkinRetireFence &&
+	    gPreSkinRetireFenceDevice == device &&
+	    gPreSkinRetireFenceQueue == queue) {
+		device->Release();
+		return true;
+	}
+
+	if (gPreSkinRetireFence)
+		gPreSkinRetireFence->Release();
+	if (gPreSkinRetireFenceDevice)
+		gPreSkinRetireFenceDevice->Release();
+	if (gPreSkinRetireFenceQueue)
+		gPreSkinRetireFenceQueue->Release();
+	gPreSkinRetireFence = nullptr;
+	gPreSkinRetireFenceDevice = nullptr;
+	gPreSkinRetireFenceQueue = nullptr;
+	gPreSkinRetireFenceNextValue = 0;
+
+	hr = device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gPreSkinRetireFence));
+	if (FAILED(hr) || !gPreSkinRetireFence) {
+		device->Release();
+		return false;
+	}
+	gPreSkinRetireFenceDevice = device;
+	queue->AddRef();
+	gPreSkinRetireFenceQueue = queue;
+	return true;
+}
+
+static void CleanupRetiredPreSkinObjectsLocked()
+{
+	auto resourceIt = gRetiredPreSkinResources.begin();
+	while (resourceIt != gRetiredPreSkinResources.end()) {
+		if (resourceIt->fence &&
+		    resourceIt->fence->GetCompletedValue() < resourceIt->fenceValue) {
+			++resourceIt;
+			continue;
+		}
+		if (resourceIt->resource)
+			resourceIt->resource->Release();
+		if (resourceIt->fence)
+			resourceIt->fence->Release();
+		resourceIt = gRetiredPreSkinResources.erase(resourceIt);
+	}
+
+	auto heapIt = gRetiredPreSkinDescriptorHeaps.begin();
+	while (heapIt != gRetiredPreSkinDescriptorHeaps.end()) {
+		if (heapIt->fence &&
+		    heapIt->fence->GetCompletedValue() < heapIt->fenceValue) {
+			++heapIt;
+			continue;
+		}
+		if (heapIt->heap)
+			heapIt->heap->Release();
+		if (heapIt->fence)
+			heapIt->fence->Release();
+		heapIt = gRetiredPreSkinDescriptorHeaps.erase(heapIt);
+	}
+}
+
+static IUnknown *PreSkinCommandListIdentity(IUnknown *commandList)
+{
+	if (!commandList)
+		return nullptr;
+	IUnknown *identity = nullptr;
+	if (FAILED(commandList->QueryInterface(IID_PPV_ARGS(&identity))) || !identity)
+		return commandList;
+	identity->Release();
+	return identity;
+}
+
+static void ReleasePendingPreSkinSubmission(DX12PreSkinPendingSubmission *pending)
+{
+	if (!pending)
+		return;
+	for (ID3D12Resource *resource : pending->resources) {
+		if (resource)
+			resource->Release();
+	}
+	for (ID3D12DescriptorHeap *heap : pending->descriptorHeaps) {
+		if (heap)
+			heap->Release();
+	}
+	pending->resources.clear();
+	pending->descriptorHeaps.clear();
+}
+
+static void RequeuePendingPreSkinSubmissionLocked(DX12PreSkinPendingSubmission *pending)
+{
+	if (!pending)
+		return;
+	DX12PreSkinPendingSubmission &globalPending = gPendingPreSkinSubmissions[nullptr];
+	globalPending.resources.insert(globalPending.resources.end(),
+		pending->resources.begin(), pending->resources.end());
+	globalPending.descriptorHeaps.insert(globalPending.descriptorHeaps.end(),
+		pending->descriptorHeaps.begin(), pending->descriptorHeaps.end());
+	pending->resources.clear();
+	pending->descriptorHeaps.clear();
+}
 static void RetirePreSkinResource(ID3D12Resource *resource)
 {
 	if (!resource)
 		return;
-	AcquireSRWLockExclusive(&gPreSkinLock);
-	gRetiredPreSkinResources.push_back({ resource, DX12GetPresentCount() });
-#if defined(_DEBUG)
-	const size_t retiredCount = gRetiredPreSkinResources.size();
-#endif
-	const LONG keepAfter = DX12GetPresentCount() - PreSkinResourceRetireDelay;
-	auto it = gRetiredPreSkinResources.begin();
-	while (it != gRetiredPreSkinResources.end()) {
-		if (it->present <= keepAfter) {
-			if (it->resource)
-				it->resource->Release();
-			it = gRetiredPreSkinResources.erase(it);
-		} else {
-			++it;
-		}
-	}
-	ReleaseSRWLockExclusive(&gPreSkinLock);
-#if defined(_DEBUG)
-	DX12LogDebugJsonFunc("DX12PreSkinResourceRetire",
-		"\"resource\":\"%p\",\"retired\":%zu",
-		resource, retiredCount);
-#endif
+	AcquireSRWLockExclusive(&gPreSkinRetireLock);
+	gPendingPreSkinSubmissions[nullptr].resources.push_back(resource);
+	ReleaseSRWLockExclusive(&gPreSkinRetireLock);
+}
+
+static void RetirePreSkinResourceForCommandList(
+	ID3D12GraphicsCommandList *commandList, ID3D12Resource *resource)
+{
+	if (!resource)
+		return;
+	AcquireSRWLockExclusive(&gPreSkinRetireLock);
+	gPendingPreSkinSubmissions[PreSkinCommandListIdentity(commandList)].resources.push_back(resource);
+	CleanupRetiredPreSkinObjectsLocked();
+	ReleaseSRWLockExclusive(&gPreSkinRetireLock);
+}
+
+static void RetainPreSkinResourceForCommandList(
+	ID3D12GraphicsCommandList *commandList, ID3D12Resource *resource)
+{
+	if (!resource)
+		return;
+	resource->AddRef();
+	RetirePreSkinResourceForCommandList(commandList, resource);
 }
 
 static void RetirePreSkinDescriptorHeapLocked(ID3D12DescriptorHeap *heap)
 {
 	if (!heap)
 		return;
-	gRetiredPreSkinDescriptorHeaps.push_back({ heap, DX12GetPresentCount() });
-	const LONG keepAfter = DX12GetPresentCount() - PreSkinDescriptorHeapRetireDelay;
-	auto it = gRetiredPreSkinDescriptorHeaps.begin();
-	while (it != gRetiredPreSkinDescriptorHeaps.end()) {
-		if (it->present <= keepAfter) {
-			if (it->heap)
-				it->heap->Release();
-			it = gRetiredPreSkinDescriptorHeaps.erase(it);
-		} else {
-			++it;
-		}
-	}
+	AcquireSRWLockExclusive(&gPreSkinRetireLock);
+	gPendingPreSkinSubmissions[nullptr].descriptorHeaps.push_back(heap);
+	CleanupRetiredPreSkinObjectsLocked();
+	ReleaseSRWLockExclusive(&gPreSkinRetireLock);
 }
+void DX12ModNotifyCommandListsSubmitted(
+	ID3D12CommandQueue *queue, UINT numCommandLists, ID3D12CommandList *const *commandLists)
+{
+	if (!queue || !commandLists || !numCommandLists)
+		return;
 
+	DX12PreSkinPendingSubmission pending;
+	AcquireSRWLockExclusive(&gPreSkinRetireLock);
+	CleanupRetiredPreSkinObjectsLocked();
+
+	auto globalIt = gPendingPreSkinSubmissions.find(nullptr);
+	if (globalIt != gPendingPreSkinSubmissions.end()) {
+		pending.resources.insert(pending.resources.end(),
+			globalIt->second.resources.begin(), globalIt->second.resources.end());
+		pending.descriptorHeaps.insert(pending.descriptorHeaps.end(),
+			globalIt->second.descriptorHeaps.begin(), globalIt->second.descriptorHeaps.end());
+		gPendingPreSkinSubmissions.erase(globalIt);
+	}
+
+	for (UINT i = 0; i < numCommandLists; ++i) {
+		auto it = gPendingPreSkinSubmissions.find(PreSkinCommandListIdentity(commandLists[i]));
+		if (it == gPendingPreSkinSubmissions.end())
+			continue;
+		pending.resources.insert(pending.resources.end(),
+			it->second.resources.begin(), it->second.resources.end());
+		pending.descriptorHeaps.insert(pending.descriptorHeaps.end(),
+			it->second.descriptorHeaps.begin(), it->second.descriptorHeaps.end());
+		gPendingPreSkinSubmissions.erase(it);
+	}
+
+	if (pending.resources.empty() && pending.descriptorHeaps.empty()) {
+		ReleaseSRWLockExclusive(&gPreSkinRetireLock);
+		return;
+	}
+
+	if (!EnsurePreSkinRetireFenceLocked(queue)) {
+		RequeuePendingPreSkinSubmissionLocked(&pending);
+		ReleaseSRWLockExclusive(&gPreSkinRetireLock);
+		return;
+	}
+
+	const UINT64 fenceValue = ++gPreSkinRetireFenceNextValue;
+	gPreSkinRetireFence->AddRef();
+	ID3D12Fence *fence = gPreSkinRetireFence;
+	HRESULT hr = queue->Signal(fence, fenceValue);
+	if (FAILED(hr)) {
+		fence->Release();
+		RequeuePendingPreSkinSubmissionLocked(&pending);
+		ReleaseSRWLockExclusive(&gPreSkinRetireLock);
+		return;
+	}
+
+	for (ID3D12Resource *resource : pending.resources) {
+		if (!resource)
+			continue;
+		fence->AddRef();
+		gRetiredPreSkinResources.push_back({ resource, fence, fenceValue });
+	}
+	for (ID3D12DescriptorHeap *heap : pending.descriptorHeaps) {
+		if (!heap)
+			continue;
+		fence->AddRef();
+		gRetiredPreSkinDescriptorHeaps.push_back({ heap, fence, fenceValue });
+	}
+	fence->Release();
+	CleanupRetiredPreSkinObjectsLocked();
+	ReleaseSRWLockExclusive(&gPreSkinRetireLock);
+}
 static void ReleasePreSkinDescriptorRingLocked()
 {
 	if (gPreSkinDescriptorRing.heap) {
@@ -797,20 +1021,51 @@ static void ClearPreSkinRuntimeState()
 	gComputeUavSerial = 0;
 	gPatchedPreSkinDescriptors.clear();
 	gKnownPreSkinDescriptorPatches.clear();
-	gActivePreSkinTextureOverrides.clear();
+	ClearActivePreSkinTextureOverridesLocked();
 	gPreSkinCbvReadCache.clear();
 	gPreSkinSrvNegativeCache.clear();
 	gPreSkinSrvStableNegativeCache.clear();
 	gPreSkinSrvPositiveCache.clear();
 	gPreSkinSrvStablePositiveCache.clear();
 	++gPreSkinSrvCacheGeneration;
+	ReleaseSRWLockExclusive(&gPreSkinLock);
+
+	AcquireSRWLockExclusive(&gPreSkinRetireLock);
+	for (auto &pending : gPendingPreSkinSubmissions)
+		ReleasePendingPreSkinSubmission(&pending.second);
+	gPendingPreSkinSubmissions.clear();
 	for (auto &retired : gRetiredPreSkinResources) {
 		if (retired.resource)
 			retired.resource->Release();
+		if (retired.fence)
+			retired.fence->Release();
 	}
 	gRetiredPreSkinResources.clear();
+	for (auto &retired : gRetiredPreSkinDescriptorHeaps) {
+		if (retired.heap)
+			retired.heap->Release();
+		if (retired.fence)
+			retired.fence->Release();
+	}
+	gRetiredPreSkinDescriptorHeaps.clear();
+	if (gPreSkinRetireFence) {
+		gPreSkinRetireFence->Release();
+		gPreSkinRetireFence = nullptr;
+	}
+	if (gPreSkinRetireFenceDevice) {
+		gPreSkinRetireFenceDevice->Release();
+		gPreSkinRetireFenceDevice = nullptr;
+	}
+	if (gPreSkinRetireFenceQueue) {
+		gPreSkinRetireFenceQueue->Release();
+		gPreSkinRetireFenceQueue = nullptr;
+	}
+	gPreSkinRetireFenceNextValue = 0;
+	ReleaseSRWLockExclusive(&gPreSkinRetireLock);
+
+	AcquireSRWLockExclusive(&gPreSkinDescriptorRingLock);
 	ReleasePreSkinDescriptorRingLocked();
-	ReleaseSRWLockExclusive(&gPreSkinLock);
+	ReleaseSRWLockExclusive(&gPreSkinDescriptorRingLock);
 }
 
 static bool DescriptorOverlapsView(
@@ -1791,7 +2046,7 @@ static DX12LoadedResource *EnsureLoadedResourceLocked(
 static bool EnsureResourceUavLocked(
 	ID3D12Device *device, ID3D12GraphicsCommandList *commandList,
 	DX12LoadedResource *resource, UINT elementStride, UINT64 minByteWidth = 0,
-	bool allowInactiveExplicitMatchCs = false)
+	bool allowInactiveExplicitMatchCs = false, bool forceNewResource = false)
 {
 	if (!device || !commandList || !resource || !resource->resource)
 		return false;
@@ -1799,7 +2054,7 @@ static bool EnsureResourceUavLocked(
 	    ResourceBlockedByInactiveExplicitMatchCsLocked(resource->name))
 		return false;
 	const UINT64 uavByteWidth = (std::max)(resource->byteWidth, minByteWidth);
-	if (resource->uavHeap && resource->uavResource && resource->uavByteWidth >= uavByteWidth)
+	if (!forceNewResource && resource->uavHeap && resource->uavResource && resource->uavByteWidth >= uavByteWidth)
 		return true;
 
 	if (!elementStride)
@@ -1808,11 +2063,11 @@ static bool EnsureResourceUavLocked(
 		return false;
 
 	if (resource->uavResource) {
-		resource->uavResource->Release();
+		RetirePreSkinResourceForCommandList(commandList, resource->uavResource);
 		resource->uavResource = nullptr;
 	}
 	if (resource->uavHeap) {
-		resource->uavHeap->Release();
+		RetirePreSkinDescriptorHeapLocked(resource->uavHeap);
 		resource->uavHeap = nullptr;
 	}
 	resource->uavCpu = {};
@@ -3138,7 +3393,7 @@ bool DX12ModApplyPreSkinningUavReplacement(
 		if (replacement && EnsureResourceUavLocked(
 			device, commandList, replacement, elementStride,
 			DescriptorViewSize(producer.descriptor),
-			hashMatch.config.hasMatchCs)) {
+			hashMatch.config.hasMatchCs, true)) {
 			applied = ApplyPreSkinDescriptorTablePatchLocked(
 				device, commandList, hashBinding, producer, replacement,
 				hashMatch.config, srvs, cbvs, rootConstants,
@@ -3151,8 +3406,11 @@ bool DX12ModApplyPreSkinningUavReplacement(
 				DX12ActivePreSkinTextureOverride active;
 				active.config = hashMatch.config;
 				active.producer = producer;
+				active.outputResource = replacement->uavResource;
+				active.outputByteWidth = replacement->uavByteWidth ? replacement->uavByteWidth : replacement->byteWidth;
+				active.outputStride = replacement->stride;
 				AcquireSRWLockExclusive(&gPreSkinLock);
-				gActivePreSkinTextureOverrides[hashMatch.config.section] = active;
+				StoreActivePreSkinTextureOverrideLocked(hashMatch.config.section, active);
 				ReleaseSRWLockExclusive(&gPreSkinLock);
 				++gPreSkinActiveGeneration;
 			}
@@ -3163,7 +3421,8 @@ bool DX12ModApplyPreSkinningUavReplacement(
 		replacement = FindReplacementResourceForVlrLocked(device, vlr);
 		if (replacement && EnsureResourceUavLocked(
 			device, commandList, replacement,
-			vlr.uavByteStride ? vlr.uavByteStride : vlr.overrideByteStride)) {
+			vlr.uavByteStride ? vlr.uavByteStride : vlr.overrideByteStride,
+			0, false, true)) {
 			const DX12CurrentComputeUavBinding *binding = nullptr;
 			for (const DX12CurrentComputeUavBinding &uav : uavs) {
 				if (uav.rootParameterIndex == producer.rootParameterIndex &&
@@ -3297,7 +3556,7 @@ void DX12ModRestorePreSkinningUavReplacement(ID3D12GraphicsCommandList *commandL
 	}
 	for (ID3D12Resource *resource : state.temporaryResources) {
 		if (resource)
-			RetirePreSkinResource(resource);
+			RetirePreSkinResourceForCommandList(commandList, resource);
 	}
 	state.temporaryResources.clear();
 	ID3D12Device *device = AcquireModDevice(commandList);
@@ -4083,6 +4342,12 @@ static void LogIaMatchLimited(
 			sections += slotText;
 		}
 		sections += entry.executeCommands ? L":exec" : L":bind";
+		if (entry.preSkinAnchor)
+			sections += L":preskin";
+		else if (entry.directIaAnchor)
+			sections += L":anchor";
+		else if (entry.relatedMesh)
+			sections += L":related";
 	}
 
 	DX12LogDebugJsonFunc("DX12IaTextureOverrideMatch",
@@ -4122,6 +4387,12 @@ static void LogIaReplacementLimited(
 			sections += slotText;
 		}
 		sections += entry.executeCommands ? L":exec" : L":bind";
+		if (entry.preSkinAnchor)
+			sections += L":preskin";
+		else if (entry.directIaAnchor)
+			sections += L":anchor";
+		else if (entry.relatedMesh)
+			sections += L":related";
 	}
 
 	char drawText[512] = {};
@@ -4347,11 +4618,11 @@ static void ReleaseLoadedResourceObjects(DX12LoadedResource *resource)
 		resource->resource = nullptr;
 	}
 	if (resource->uavResource) {
-		resource->uavResource->Release();
+		RetirePreSkinResource(resource->uavResource);
 		resource->uavResource = nullptr;
 	}
 	if (resource->uavHeap) {
-		resource->uavHeap->Release();
+		RetirePreSkinDescriptorHeapLocked(resource->uavHeap);
 		resource->uavHeap = nullptr;
 	}
 	if (resource->srvResource) {
@@ -4405,7 +4676,7 @@ void DX12ModBeginFrame()
 		item.second.uavWritten = false;
 	gPreSkinSectionAppliedPresent.clear();
 	AcquireSRWLockExclusive(&gPreSkinLock);
-	gActivePreSkinTextureOverrides.clear();
+	ClearActivePreSkinTextureOverridesLocked();
 	ReleaseSRWLockExclusive(&gPreSkinLock);
 	gPreSkinCbvReadCache.clear();
 	gPreSkinSrvNegativeCache.clear();
@@ -4604,6 +4875,9 @@ static void AppendTextureOverridesForHashLocked(
 		entry.vertexSlot = vertexSlot;
 		entry.executeCommands = executeCommands;
 		entry.executeDrawActions = executeCommands;
+		entry.directIaAnchor = indexBuffer || executeCommands ||
+			TextureOverrideHasDrawContextMatch(config) ||
+			!config.indexBufferResource.empty();
 		overrides->push_back(entry);
 	}
 }
@@ -4673,7 +4947,11 @@ static void AppendActivePreSkinTextureOverridesLocked(
 		entry.vertexSlot = matchedSlot;
 		entry.executeCommands = executeCommands;
 		entry.executeDrawActions = executeCommands;
+		entry.directIaAnchor = true;
 		entry.preSkinAnchor = true;
+		entry.preSkinResource = active.outputResource;
+		entry.preSkinByteWidth = active.outputByteWidth;
+		entry.preSkinStride = active.outputStride;
 		overrides->push_back(entry);
 	}
 }
@@ -4884,6 +5162,8 @@ static void AppendRelatedMeshTextureOverridesLocked(
 	std::unordered_set<std::wstring> namespaces;
 	std::set<std::wstring> tokens;
 	for (const DX12TriggeredTextureOverride &entry : *overrides) {
+		if (!entry.directIaAnchor && !entry.preSkinAnchor)
+			continue;
 		const Bunny::TextureOverrideConfig &config =
 			TriggeredTextureOverrideConfig(entry);
 		// Only let the related-mesh heuristic expand around a draw that matched
@@ -4967,6 +5247,7 @@ static void AppendRelatedMeshTextureOverridesLocked(
 			0 : config.vertexBufferResources.begin()->first;
 		entry.executeCommands = false;
 		entry.executeDrawActions = hasPreSkinAnchor;
+		entry.relatedMesh = true;
 		overrides->push_back(entry);
 	}
 }
@@ -4977,6 +5258,13 @@ static ID3D12Resource *SelectIaResourceForViewLocked(
 	if (!resource)
 		return nullptr;
 	if (resource->uavResource && resource->uavValid) {
+		if (resource->uavBarrierPending) {
+			D3D12_RESOURCE_BARRIER barrier = {};
+			barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+			barrier.UAV.pResource = resource->uavResource;
+			commandList->ResourceBarrier(1, &barrier);
+			resource->uavBarrierPending = false;
+		}
 		if (resource->uavState != D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER) {
 			D3D12_RESOURCE_BARRIER barrier = {};
 			barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -5027,6 +5315,51 @@ static void LogIaResourceBindLimited(
 #endif
 }
 
+static bool AppendPreSkinResourceViewLocked(
+	ID3D12GraphicsCommandList *commandList, const DX12IaHashState &iaState,
+	const DX12TriggeredTextureOverride &entry, DX12ModIaReplacement *replacement)
+{
+	if (!commandList || !replacement || !entry.preSkinResource)
+		return false;
+	if (entry.preSkinByteWidth == 0 || entry.preSkinStride == 0)
+		return false;
+
+	if (replacement->vertexBuffers.empty() ||
+	    entry.vertexSlot < replacement->vertexBufferStartSlot ||
+	    entry.vertexSlot >= replacement->vertexBufferStartSlot + replacement->vertexBuffers.size()) {
+		uint32_t minSlot = replacement->vertexBuffers.empty() ?
+			entry.vertexSlot : (std::min)(replacement->vertexBufferStartSlot, entry.vertexSlot);
+		uint32_t maxSlot = replacement->vertexBuffers.empty() ?
+			entry.vertexSlot : (std::max)(
+				replacement->vertexBufferStartSlot +
+				static_cast<uint32_t>(replacement->vertexBuffers.size()) - 1,
+				entry.vertexSlot);
+		if (maxSlot - minSlot >= 32)
+			return false;
+		std::vector<D3D12_VERTEX_BUFFER_VIEW> resized(maxSlot - minSlot + 1);
+		for (size_t i = 0; i < replacement->vertexBuffers.size(); ++i) {
+			uint32_t slot = replacement->vertexBufferStartSlot + static_cast<uint32_t>(i);
+			resized[slot - minSlot] = replacement->vertexBuffers[i];
+		}
+		replacement->vertexBufferStartSlot = minSlot;
+		replacement->vertexBuffers.swap(resized);
+	}
+
+	D3D12_VERTEX_BUFFER_VIEW &view =
+		replacement->vertexBuffers[entry.vertexSlot - replacement->vertexBufferStartSlot];
+	view.BufferLocation = entry.preSkinResource->GetGPUVirtualAddress();
+	view.SizeInBytes = static_cast<UINT>((std::min)(
+		entry.preSkinByteWidth, static_cast<UINT64>(UINT_MAX)));
+	const DX12IaBufferHash *sourceSlot = FindIaVertexSlot(iaState, entry.vertexSlot);
+	view.StrideInBytes = entry.preSkinStride ? entry.preSkinStride :
+		(sourceSlot ? sourceSlot->vertexView.StrideInBytes : 0);
+	replacement->RetainResource(entry.preSkinResource);
+	if (view.BufferLocation != 0 && view.SizeInBytes != 0 && view.StrideInBytes != 0) {
+		RetainPreSkinResourceForCommandList(commandList, entry.preSkinResource);
+		return true;
+	}
+	return false;
+}
 static bool AppendResourceViewsLocked(
 	ID3D12Device *device, ID3D12GraphicsCommandList *commandList, const DX12IaHashState &iaState,
 	const std::wstring &indexResource,
@@ -5187,6 +5520,11 @@ public:
 	void ClearChanged()
 	{
 		mChanged = false;
+	}
+
+	void MarkExternalChange()
+	{
+		MarkChanged();
 	}
 
 	void RunTextureOverride(
@@ -5696,10 +6034,11 @@ bool DX12ModPrepareIaReplacement(
 		shaderInfo.hasVS ? shaderInfo.vs : 0,
 		shaderInfo.hasPS ? shaderInfo.ps : 0);
 	const LONG present = DX12GetPresentCount();
+	const bool hasActivePreSkin = DX12ModHasActivePreSkinTextureOverrides();
 	std::vector<DX12TriggeredTextureOverride> overrides;
 	bool matchCacheHit = false;
 	AcquireSRWLockShared(&gModLock);
-	if (gIaReplacementPrepareCachePresent == present) {
+	if (!hasActivePreSkin && gIaReplacementPrepareCachePresent == present) {
 		auto prepared = gIaReplacementPreparedFrameCache.find(matchCacheKey);
 		if (prepared != gIaReplacementPreparedFrameCache.end()) {
 			// Prepared replacements contain command-list ready GPU views and
@@ -5736,9 +6075,11 @@ bool DX12ModPrepareIaReplacement(
 			gIaReplacementPreparedFrameCache.clear();
 			gIaReplacementPrepareCachePresent = currentPresent;
 		}
-		if (gIaReplacementMatchCache.size() > 4096)
-			gIaReplacementMatchCache.clear();
-		gIaReplacementMatchCache[matchCacheKey] = overrides;
+		if (!hasActivePreSkin) {
+			if (gIaReplacementMatchCache.size() > 4096)
+				gIaReplacementMatchCache.clear();
+			gIaReplacementMatchCache[matchCacheKey] = overrides;
+		}
 		ReleaseSRWLockExclusive(&gModLock);
 	}
 
@@ -5763,6 +6104,10 @@ bool DX12ModPrepareIaReplacement(
 	for (const DX12TriggeredTextureOverride &entry : overrides) {
 		executor.SetExecutionMode(entry.executeCommands, entry.executeDrawActions);
 		executor.RunTextureOverride(TriggeredTextureOverrideConfig(entry), false);
+		if (entry.preSkinAnchor) {
+			if (AppendPreSkinResourceViewLocked(commandList, iaState, entry, replacement))
+				executor.MarkExternalChange();
+		}
 		executor.RunPostTextureOverrideLists(
 			TriggeredTextureOverrideConfig(entry), entry.postRuntimeEffect);
 	}
@@ -5788,7 +6133,8 @@ bool DX12ModPrepareIaReplacement(
 		iaState, vertexCount, indexCount, instanceCount, *replacement, overrides);
 	if (gIaReplacementPreparedFrameCache.size() > 4096)
 		gIaReplacementPreparedFrameCache.clear();
-	gIaReplacementPreparedFrameCache[matchCacheKey] = *replacement;
+	if (!hasActivePreSkin)
+		gIaReplacementPreparedFrameCache[matchCacheKey] = *replacement;
 	ReleaseSRWLockExclusive(&gModLock);
 	device->Release();
 

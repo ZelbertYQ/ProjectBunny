@@ -885,6 +885,7 @@ static void STDMETHODCALLTYPE HookedQueueExecuteCommandLists(
 	if (original) {
 		LogQueueStage("ExecuteCommandLists", "beforeOriginal", queue, numCommandLists);
 		original(queue, numCommandLists, commandLists);
+		DX12ModNotifyCommandListsSubmitted(queue, numCommandLists, commandLists);
 		LogQueueStage("ExecuteCommandLists", "afterOriginal", queue, numCommandLists);
 	}
 }

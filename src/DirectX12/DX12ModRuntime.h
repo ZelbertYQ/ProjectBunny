@@ -210,6 +210,8 @@ bool DX12ModApplyPreSkinningUavReplacement(
 	UINT *overrideVertexCount = nullptr);
 bool DX12ModApplyKnownPreSkinningUavPatches(ID3D12GraphicsCommandList *commandList);
 void DX12ModRestorePreSkinningUavReplacement(ID3D12GraphicsCommandList *commandList);
+void DX12ModNotifyCommandListsSubmitted(
+	ID3D12CommandQueue *queue, UINT numCommandLists, ID3D12CommandList *const *commandLists);
 void DX12ModBeginFrame();
 bool DX12ModPreparePresentReplacement(
 	ID3D12GraphicsCommandList *commandList, DX12ModIaReplacement *replacement);
