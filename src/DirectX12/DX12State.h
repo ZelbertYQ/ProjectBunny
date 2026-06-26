@@ -19,7 +19,6 @@ void DX12LogDebugJsonFuncFlush(const char *func, const char *fmt, ...);
 #define DX12LogDebugJsonFunc(...) ((void)0)
 #define DX12LogDebugJsonFuncFlush(...) ((void)0)
 #endif
-// Call once per frame (from Present) instead of after every log line.
 void DX12FlushLog();
 
 DWORD DX12HookFunction(void **original, void *target, void *hook, const char *name);
@@ -43,21 +42,7 @@ COLORREF DX12GetOverlayStatusColor();
 void DX12SetCommandQueue(ID3D12CommandQueue *queue);
 ID3D12CommandQueue *DX12AcquireCommandQueue();
 
-// --- Hot-path fast-forward flags ---
-// When no mod overrides, no hunting, no frame analysis capture and no shader
-// dump are active, this flag is set to true.  Every recording-hook entry point
-// checks it FIRST with a single non-atomic read; if set the hook does nothing
-// except call the original D3D12 function.
-//
-// Recalculated once per Present (frame granularity) by DX12HotPathUpdate.
 extern volatile LONG gDX12HotPathSkipAll;
-
-// Separate fast-forward for BINDING hooks (SetRoot*, IASet*, SetDescriptorHeaps).
-// Set to true when no HEAVY tracking is needed (hunt / frame-analysis / shader-
-// dump are all off), even when mod work (texture/shader overrides) is active.
-// Binding hooks only need to track state for hunt/capture; mod work only needs
-// draw hooks.  This lets ~80 % of API calls (bindings) skip the StateCapture
-// path entirely while draw hooks still run the mod matching path.
 extern volatile LONG gDX12HotPathSkipBindings;
 
 void DX12HotPathUpdate();

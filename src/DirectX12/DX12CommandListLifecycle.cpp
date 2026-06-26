@@ -14,8 +14,6 @@ void DX12CommandListLifecycleRegister(
 		return;
 
 	DX12CommandListRuntimeRegister(commandList);
-	// Use cached predicates: the tracking cache is populated at Register/Reset
-	// time, so subsequent hot-path calls hit a pre-computed answer.
 	if (DX12CommandListCaptureShouldTrackBindingsCached(commandList)) {
 		DX12BindingRegisterCommandList(commandList);
 		DX12BindingResetCommandList(commandList, initialState);
@@ -29,9 +27,6 @@ void DX12CommandListLifecycleReset(
 	if (!commandList)
 		return;
 
-	// Reset makes the command list recordable again. Rebuild every tracked
-	// command-list view from the reset PSO before the next recorded command.
-	// Use cached predicates populated at Reset time in DX12CommandListRuntimeReset.
 	if (DX12CommandListCaptureShouldTrackBindingsCached(commandList))
 		DX12BindingResetCommandList(commandList, initialState);
 	if (DX12CommandListCaptureShouldTrackPsoStateCached(commandList))

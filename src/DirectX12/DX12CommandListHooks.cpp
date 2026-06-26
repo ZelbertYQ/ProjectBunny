@@ -216,33 +216,11 @@ static volatile LONG gIaReplacementSummaryDraws = 0;
 static volatile LONG gIaReplacementSummaryIndexedDraws = 0;
 static volatile LONG gIaReplacementSummaryDispatches = 0;
 
-// --- Submit-path hook/registration dedupe ---------------------------------
-//
-// ID3D12CommandQueue::ExecuteCommandLists is called every frame, often with
-// many command lists, and previously re-ran the full hook + lifecycle
-// registration for every list on every submit. Each re-run took ~21 global
-// exclusive SRW locks inside DX12HookFunction (one per vtable slot) plus extra
-// COM QueryInterface calls, all serialized across the recording worker
-// threads. That CPU stall on the submit path starved the GPU and is the main
-// cause of the heavy frame drops / low GPU utilization.
-//
-// Two facts let us short-circuit cheaply and safely:
-//   1. All graphics command lists created from the same device share ONE
-//      vtable, so the vtable only needs hooking once. We dedupe by vtable
-//      pointer, turning every later list into a single shared-lock lookup.
-//   2. Lifecycle/runtime registration is idempotent, so once a command-list
-//      pointer has been fully registered we can skip the whole body.
-//
-// Both registries use an SRW lock in shared (reader) mode on the steady-state
-// hot path, allowing concurrent worker threads to proceed without contention;
-// the exclusive lock is only taken on the rare first-time insert.
 static SRWLOCK gHookedVTableLock = SRWLOCK_INIT;
 static std::unordered_set<void*> gHookedCommandListVTables;
 static SRWLOCK gRegisteredListLock = SRWLOCK_INIT;
 static std::unordered_set<void*> gRegisteredCommandLists;
 
-// Returns true if this vtable has not been hooked before (and records it).
-// A shared-lock fast path keeps concurrent submits lock-free in steady state.
 static bool ShouldHookCommandListVTable(void *vtable)
 {
 	if (!vtable)
@@ -257,15 +235,11 @@ static bool ShouldHookCommandListVTable(void *vtable)
 
 	bool shouldHook = false;
 	AcquireSRWLockExclusive(&gHookedVTableLock);
-	// Re-check under the exclusive lock to avoid a race where two threads both
-	// missed in the shared section.
 	shouldHook = gHookedCommandListVTables.insert(vtable).second;
 	ReleaseSRWLockExclusive(&gHookedVTableLock);
 	return shouldHook;
 }
 
-// Returns true the first time a command-list pointer is seen (and records it),
-// so the expensive submit-path registration body runs at most once per list.
 static bool ShouldRegisterCommandListPointer(void *commandList)
 {
 	if (!commandList)
@@ -285,8 +259,6 @@ static bool ShouldRegisterCommandListPointer(void *commandList)
 	return shouldRegister;
 }
 
-// Drop a recycled command-list pointer so a future list reusing the same
-// address is registered (and re-hooked if its vtable differs) correctly.
 static void ForgetRegisteredCommandListPointer(void *commandList)
 {
 	if (!commandList)
@@ -402,9 +374,6 @@ static void SyncHuntIaFromRuntimeState(
 	DX12Profiling::RecordIaHuntIaUpdate();
 	DX12HuntSetIndexBuffer(commandList, ia.hasIndexBuffer ? &ia.indexBuffer : nullptr);
 
-	// Candidate windows must be exact, including slots that became unbound.
-	// Sending the full 32-slot IA view snapshot prevents stale Hunt VB hashes
-	// from surviving after the game clears or reuses a slot.
 	D3D12_VERTEX_BUFFER_VIEW views[ARRAYSIZE(ia.vertexBuffers)] = {};
 	for (UINT i = 0; i < ARRAYSIZE(ia.vertexBuffers); ++i)
 		views[i] = ia.hasVertexBuffer[i] ? ia.vertexBuffers[i] : D3D12_VERTEX_BUFFER_VIEW();
@@ -444,9 +413,6 @@ static void LogDX12Call(const char *api, const void *object, const char *fmt = n
 static void FlushIaReplacementExecuteSummaryIfNeeded()
 {
 #if defined(_DEBUG)
-	// Keep IA replacement execution summaries disabled by default on the hot
-	// path. Per-frame JSON logging can dominate CPU time in debug builds and
-	// make the GPU look underfed while replacement itself is inexpensive.
 	constexpr bool kLogIaReplacementExecuteSummary = false;
 	if (!kLogIaReplacementExecuteSummary)
 		return;
@@ -691,13 +657,19 @@ static T GetCommandQueueOriginal(ID3D12CommandQueue *queue, UINT slot, T fallbac
 
 static void LogQueueStage(
 	const char *api, const char *stage, ID3D12CommandQueue *queue,
-	UINT count = 0, ID3D12Fence *fence = nullptr, UINT64 value = 0, HRESULT hr = S_OK)
+	UINT count = 0, ID3D12Fence *fence = nullptr, UINT64 value = 0, HRESULT hr = S_OK,
+	ULONGLONG elapsedMs = 0)
 {
-	DX12LogDebugJsonFuncFlush("DX12QueueStage",
+	if (SUCCEEDED(hr) && elapsedMs < 4 && stage && !strcmp(stage, "beforeOriginal"))
+		return;
+	if (SUCCEEDED(hr) && elapsedMs < 4 && api)
+		return;
+	DX12LogDebugJsonFunc("DX12QueueStage",
 		"\"api\":\"%s\",\"stage\":\"%s\",\"present\":%ld,\"queue\":\"%p\","
-		"\"count\":%u,\"fence\":\"%p\",\"value\":%llu,\"hr\":\"0x%lx\"",
+		"\"count\":%u,\"fence\":\"%p\",\"value\":%llu,\"hr\":\"0x%lx\",\"elapsedMs\":%llu",
 		api ? api : "", stage ? stage : "", DX12GetPresentCount(), queue,
-		count, fence, static_cast<unsigned long long>(value), hr);
+		count, fence, static_cast<unsigned long long>(value), hr,
+		static_cast<unsigned long long>(elapsedMs));
 }
 
 template <typename T>
@@ -767,12 +739,6 @@ static void RegisterCommandList(IUnknown *commandList, ID3D12PipelineState *init
 
 	ID3D12GraphicsCommandList *baseList = nullptr;
 	if (SUCCEEDED(commandList->QueryInterface(IID_PPV_ARGS(&baseList)))) {
-		// Skip the whole hook + lifecycle registration body for command lists
-		// we have already processed. ExecuteCommandLists re-submits the same
-		// lists every frame, so without this guard each submit re-took dozens
-		// of global exclusive locks per list and starved the GPU. The vtable
-		// hook itself is independently deduped inside DX12HookCommandList, so a
-		// recycled pointer that slips through still cannot double-hook.
 		if (ShouldRegisterCommandListPointer(baseList)) {
 			DX12HookCommandList(baseList);
 			DX12CommandListLifecycleRegister(baseList, initialState);
@@ -826,10 +792,6 @@ static HRESULT STDMETHODCALLTYPE HookedCreateCommandList(
 		"\"hr\":\"0x%lx\",\"commandList\":\"%p\"",
 		hr, commandList ? *commandList : nullptr);
 	if (SUCCEEDED(hr) && commandList && *commandList) {
-		// Creation is the authoritative registration point. Forget any stale
-		// dedupe entry first so a recycled pointer is always re-registered
-		// here with its real initial PSO (the submit-path dedupe only exists
-		// to skip repeat work, never to suppress a genuine new list).
 		ForgetRegisteredCommandListPointer(*commandList);
 		RegisterCommandList(static_cast<IUnknown*>(*commandList), initialState);
 	}
@@ -848,8 +810,6 @@ static HRESULT STDMETHODCALLTYPE HookedCreateCommandList1(
 		"\"hr\":\"0x%lx\",\"commandList\":\"%p\"",
 		hr, commandList ? *commandList : nullptr);
 	if (SUCCEEDED(hr) && commandList && *commandList) {
-		// See HookedCreateCommandList: clear any stale dedupe entry so a
-		// recycled pointer is re-registered fresh at creation time.
 		ForgetRegisteredCommandListPointer(*commandList);
 		RegisterCommandList(static_cast<IUnknown*>(*commandList), nullptr);
 	}
@@ -908,9 +868,11 @@ static void STDMETHODCALLTYPE HookedQueueExecuteCommandLists(
 		DX12_QUEUE_ORIG(queue, 10, PFN_QUEUE_EXECUTE_COMMAND_LISTS, ExecuteCommandLists);
 	if (original) {
 		LogQueueStage("ExecuteCommandLists", "beforeOriginal", queue, numCommandLists);
+		ULONGLONG startTick = GetTickCount64();
 		original(queue, numCommandLists, commandLists);
 		DX12ModNotifyCommandListsSubmitted(queue, numCommandLists, commandLists);
-		LogQueueStage("ExecuteCommandLists", "afterOriginal", queue, numCommandLists);
+		LogQueueStage("ExecuteCommandLists", "afterOriginal", queue, numCommandLists,
+			nullptr, 0, S_OK, GetTickCount64() - startTick);
 	}
 }
 
@@ -959,8 +921,10 @@ static HRESULT STDMETHODCALLTYPE HookedQueueSignal(
 	if (!original)
 		return E_FAIL;
 	LogQueueStage("Signal", "beforeOriginal", queue, 0, fence, value);
+	ULONGLONG startTick = GetTickCount64();
 	HRESULT hr = original(queue, fence, value);
-	LogQueueStage("Signal", "afterOriginal", queue, 0, fence, value, hr);
+	LogQueueStage("Signal", "afterOriginal", queue, 0, fence, value, hr,
+		GetTickCount64() - startTick);
 	return hr;
 }
 
@@ -974,8 +938,10 @@ static HRESULT STDMETHODCALLTYPE HookedQueueWait(
 	if (!original)
 		return E_FAIL;
 	LogQueueStage("Wait", "beforeOriginal", queue, 0, fence, value);
+	ULONGLONG startTick = GetTickCount64();
 	HRESULT hr = original(queue, fence, value);
-	LogQueueStage("Wait", "afterOriginal", queue, 0, fence, value, hr);
+	LogQueueStage("Wait", "afterOriginal", queue, 0, fence, value, hr,
+		GetTickCount64() - startTick);
 	return hr;
 }
 
@@ -985,7 +951,14 @@ static HRESULT STDMETHODCALLTYPE HookedQueueGetTimestampFrequency(
 	LogDX12Call("ID3D12CommandQueue::GetTimestampFrequency", queue);
 	PFN_QUEUE_GET_TIMESTAMP_FREQUENCY original =
 		DX12_QUEUE_ORIG(queue, 16, PFN_QUEUE_GET_TIMESTAMP_FREQUENCY, GetTimestampFrequency);
-	return original ? original(queue, frequency) : E_FAIL;
+	if (!original)
+		return E_FAIL;
+	LogQueueStage("GetTimestampFrequency", "beforeOriginal", queue);
+	ULONGLONG startTick = GetTickCount64();
+	HRESULT hr = original(queue, frequency);
+	LogQueueStage("GetTimestampFrequency", "afterOriginal", queue, 0, nullptr, 0, hr,
+		GetTickCount64() - startTick);
+	return hr;
 }
 
 static HRESULT STDMETHODCALLTYPE HookedQueueGetClockCalibration(
@@ -994,7 +967,14 @@ static HRESULT STDMETHODCALLTYPE HookedQueueGetClockCalibration(
 	LogDX12Call("ID3D12CommandQueue::GetClockCalibration", queue);
 	PFN_QUEUE_GET_CLOCK_CALIBRATION original =
 		DX12_QUEUE_ORIG(queue, 17, PFN_QUEUE_GET_CLOCK_CALIBRATION, GetClockCalibration);
-	return original ? original(queue, gpuTimestamp, cpuTimestamp) : E_FAIL;
+	if (!original)
+		return E_FAIL;
+	LogQueueStage("GetClockCalibration", "beforeOriginal", queue);
+	ULONGLONG startTick = GetTickCount64();
+	HRESULT hr = original(queue, gpuTimestamp, cpuTimestamp);
+	LogQueueStage("GetClockCalibration", "afterOriginal", queue, 0, nullptr, 0, hr,
+		GetTickCount64() - startTick);
+	return hr;
 }
 
 static HRESULT STDMETHODCALLTYPE HookedCloseCommandList(ID3D12GraphicsCommandList *commandList)
@@ -1012,10 +992,6 @@ static HRESULT STDMETHODCALLTYPE HookedResetCommandList(
 	LogDX12Call("ID3D12GraphicsCommandList::Reset", commandList,
 		" allocator=%p initialPso=%p", allocator, initialState);
 	DX12CommandListLifecycleReset(commandList, initialState);
-	// IA replacement dedupe is now cleared once per frame at Present time
-	// (via tracking generation bump) instead of on every Reset.  Resetting
-	// it here was redundant because the dedupe is keyed by present count,
-	// which does not change across command-list resets within a frame.
 	DX12CommandListRuntimeReset(commandList, initialState);
 	PFN_RESET_COMMAND_LIST original = DX12_CL_ORIG(commandList, 10, PFN_RESET_COMMAND_LIST, ResetCommandList);
 	return original ? original(commandList, allocator, initialState) : E_FAIL;
@@ -1037,8 +1013,6 @@ static void STDMETHODCALLTYPE HookedDrawInstanced(
 {
 	DX12_PROFILE_SCOPE(DrawInstanced);
 
-	// Fast-forward: when no mod/hunt/capture work is needed, skip ALL tracking
-	// and call the original with a single predictable branch.
 	if (gDX12HotPathSkipAll) {
 		DX12_PROFILE_FAST_FORWARD();
 		PFN_DRAW_INSTANCED original = DX12_CL_ORIG(commandList, 12, PFN_DRAW_INSTANCED, DrawInstanced);
@@ -1072,8 +1046,6 @@ static void STDMETHODCALLTYPE HookedDrawInstanced(
 	LogDX12Call("ID3D12GraphicsCommandList::DrawInstanced", commandList,
 		" vertices=%u instances=%u startVertex=%u startInstance=%u",
 		vertexCountPerInstance, instanceCount, startVertexLocation, startInstanceLocation);
-	// Use cached tracking predicates to avoid re-evaluating global flags on
-	// every draw call.  The cache is refreshed at Reset time.
 	if (DX12CommandListCaptureShouldRecordBindingEventsCached(commandList))
 		DX12BindingRecordDrawInstanced(commandList, vertexCountPerInstance, instanceCount,
 			startVertexLocation, startInstanceLocation);
@@ -1083,9 +1055,6 @@ static void STDMETHODCALLTYPE HookedDrawInstanced(
 		DX12HuntRecordDraw(commandList, false);
 	}
 	if (!DX12DrawHookFlowNeedsModWork()) {
-		// D3D12 draw calls only append commands to the current command list.
-		// When no mod-side draw work is active, stay as thin as the API call
-		// itself and avoid runtime-state snapshots on every draw.
 		DX12_PROFILE_FAST_FORWARD();
 		PFN_DRAW_INSTANCED original = DX12_CL_ORIG(commandList, 12, PFN_DRAW_INSTANCED, DrawInstanced);
 		if (original)
@@ -1094,9 +1063,6 @@ static void STDMETHODCALLTYPE HookedDrawInstanced(
 		return;
 	}
 	if (DX12ShouldBypassIaTextureDrawWork(commandList)) {
-		// IASet hooks keep a cheap "may match" bit for texture overrides.
-		// D3D12 Draw* calls only record draw commands, so negative IA candidates
-		// can bypass the heavier replacement flow without changing command order.
 		DX12_PROFILE_FAST_FORWARD();
 		PFN_DRAW_INSTANCED original = DX12_CL_ORIG(commandList, 12, PFN_DRAW_INSTANCED, DrawInstanced);
 		if (original)
@@ -1123,7 +1089,6 @@ static void STDMETHODCALLTYPE HookedDrawIndexedInstanced(
 {
 	DX12_PROFILE_SCOPE(DrawIndexedInstanced);
 
-	// Fast-forward: when no mod/hunt/capture work is needed, skip ALL tracking.
 	if (gDX12HotPathSkipAll) {
 		DX12_PROFILE_FAST_FORWARD();
 		PFN_DRAW_INDEXED_INSTANCED original =
@@ -1161,8 +1126,6 @@ static void STDMETHODCALLTYPE HookedDrawIndexedInstanced(
 		" indices=%u instances=%u startIndex=%u baseVertex=%d startInstance=%u",
 		indexCountPerInstance, instanceCount, startIndexLocation, baseVertexLocation,
 		startInstanceLocation);
-	// Use cached tracking predicates to avoid re-evaluating global flags on
-	// every draw call.  The cache is refreshed at Reset time.
 	if (DX12CommandListCaptureShouldRecordBindingEventsCached(commandList))
 		DX12BindingRecordDrawIndexedInstanced(commandList, indexCountPerInstance, instanceCount,
 			startIndexLocation, baseVertexLocation, startInstanceLocation);
@@ -1172,7 +1135,6 @@ static void STDMETHODCALLTYPE HookedDrawIndexedInstanced(
 		DX12HuntRecordDraw(commandList, true);
 	}
 	if (!DX12DrawHookFlowNeedsModWork()) {
-		// Keep the common no-override path lock-free after hunting decisions.
 		DX12_PROFILE_FAST_FORWARD();
 		PFN_DRAW_INDEXED_INSTANCED original =
 			DX12_CL_ORIG(commandList, 13, PFN_DRAW_INDEXED_INSTANCED, DrawIndexedInstanced);
@@ -1182,8 +1144,6 @@ static void STDMETHODCALLTYPE HookedDrawIndexedInstanced(
 		return;
 	}
 	if (DX12ShouldBypassIaTextureDrawWork(commandList)) {
-		// IASet-derived negative candidate state avoids per-draw IA hash reads
-		// for the overwhelmingly common non-target mesh path.
 		DX12_PROFILE_FAST_FORWARD();
 		PFN_DRAW_INDEXED_INSTANCED original =
 			DX12_CL_ORIG(commandList, 13, PFN_DRAW_INDEXED_INSTANCED, DrawIndexedInstanced);
@@ -1219,7 +1179,6 @@ static void STDMETHODCALLTYPE HookedDispatch(
 		return;
 	}
 
-	// Fast-forward: when no mod/hunt/capture work is needed, skip ALL tracking.
 	if (gDX12HotPathSkipAll) {
 		DX12_PROFILE_FAST_FORWARD();
 		PFN_DISPATCH original = DX12_CL_ORIG(commandList, 14, PFN_DISPATCH, Dispatch);
@@ -1242,8 +1201,6 @@ static void STDMETHODCALLTYPE HookedDispatch(
 
 	LogDX12Call("ID3D12GraphicsCommandList::Dispatch", commandList,
 		" groups=%u,%u,%u", threadGroupCountX, threadGroupCountY, threadGroupCountZ);
-	// Use cached tracking predicate to avoid re-evaluating global flags on
-	// every dispatch call.  The cache is refreshed at Reset time.
 	if (DX12CommandListCaptureShouldRecordBindingEventsCached(commandList))
 		DX12BindingRecordDispatch(commandList, threadGroupCountX, threadGroupCountY, threadGroupCountZ);
 	if (DX12HuntIsEnabled()) {
@@ -1253,9 +1210,6 @@ static void STDMETHODCALLTYPE HookedDispatch(
 	}
 	PFN_DISPATCH original = DX12_CL_ORIG(commandList, 14, PFN_DISPATCH, Dispatch);
 	if (!DX12ModHasActiveShaderOverrides() && !DX12ModNeedsPreSkinningUavProbe()) {
-		// Dispatch only records compute work into the current D3D12 command list.
-		// When no compute override or UAV pre-skin probe can use our tracked state,
-		// avoid the runtime-state lock/hash lookup on this high-frequency path.
 		DX12_PROFILE_FAST_FORWARD();
 		if (original)
 			original(commandList, threadGroupCountX, threadGroupCountY, threadGroupCountZ);
@@ -1271,11 +1225,6 @@ static void STDMETHODCALLTYPE HookedDispatch(
 			shaderInfo.hasCS &&
 			DX12ModShouldTrackPreSkinBindingsForCs(shaderInfo.cs);
 		if (!hasConfiguredPreSkinCs) {
-			// Most game dispatches are unrelated to pre-skinning. D3D12 command
-			// lists record dispatches sequentially, so probing every compute
-			// PSO in a compute-heavy scene can dominate the frame even though no
-			// replacement can match. Only enter the heavy dispatch flow when the
-			// current CS is one of the configured pre-skin candidates.
 			DX12_PROFILE_FAST_FORWARD();
 			if (original)
 				original(commandList, threadGroupCountX, threadGroupCountY, threadGroupCountZ);
@@ -1391,7 +1340,6 @@ static void STDMETHODCALLTYPE HookedSetPipelineState(
 {
 	DX12_PROFILE_SCOPE(SetPipelineState);
 
-	// Fast-forward: skip PSO replacement and all tracking when idle.
 	if (gDX12HotPathSkipAll) {
 		DX12_PROFILE_FAST_FORWARD();
 		PFN_SET_PIPELINE_STATE original = DX12_CL_ORIG(commandList, 25, PFN_SET_PIPELINE_STATE, SetPipelineState);
@@ -1470,9 +1418,6 @@ static void STDMETHODCALLTYPE HookedSetDescriptorHeaps(
 		return;
 	}
 
-	// Always track descriptor-heap pointers in RuntimeState — two unconditional
-	// pointer writes on the TLS fast path.  Texture-override matching reads
-	// them without activating the full BindingTracker (the former #1 CPU sink).
 	ID3D12DescriptorHeap *cbvSrvUav = nullptr;
 	ID3D12DescriptorHeap *sampler = nullptr;
 	if (heaps) {
@@ -1488,10 +1433,6 @@ static void STDMETHODCALLTYPE HookedSetDescriptorHeaps(
 	}
 	DX12CommandListRuntimeSetDescriptorHeaps(commandList, cbvSrvUav, sampler);
 
-	// Fast-forward: skip the heavy BindingTracker whenever binding capture is
-	// disabled. SetDescriptorHeaps is a frequent D3D12 command-list binding
-	// call, and texture override matching only needs the lightweight runtime
-	// heap pointers written above.
 	if (gDX12HotPathSkipBindings) {
 		DX12_PROFILE_FAST_FORWARD();
 		PFN_SET_DESCRIPTOR_HEAPS original =
@@ -1517,10 +1458,6 @@ static void STDMETHODCALLTYPE HookedSetComputeRootSignature(
 
 	if (gDX12HotPathSkipBindings) {
 		DX12_PROFILE_FAST_FORWARD();
-		// Pre-skinning match_cs probing reads compute root state from the
-		// BindingTracker. Keep that tracker warm only while the current compute
-		// PSO is one of the configured pre-skin candidates; unrelated compute
-		// passes must stay as thin as the native D3D12 binding call.
 		if (DX12ShouldTrackComputeBindingsForPreSkin(commandList))
 			DX12BindingSetComputeRootSignature(commandList, rootSignature);
 		PFN_SET_ROOT_SIGNATURE original =
@@ -1632,8 +1569,6 @@ static void STDMETHODCALLTYPE HookedSetComputeRoot32BitConstant(
 	if (gDX12HotPathSkipBindings) {
 		DX12_PROFILE_FAST_FORWARD();
 		if (DX12ShouldTrackComputeBindingsForPreSkin(commandList)) {
-			// Some pre-skin producers drive dispatch selection through root
-			// constants only, so candidate compute PSOs still need these values.
 			DX12BindingSetComputeRoot32BitConstant(
 				commandList, rootParameterIndex, destOffset, srcData);
 		}
@@ -1675,8 +1610,6 @@ static void STDMETHODCALLTYPE HookedSetComputeRoot32BitConstants(
 	if (gDX12HotPathSkipBindings) {
 		DX12_PROFILE_FAST_FORWARD();
 		if (DX12ShouldTrackComputeBindingsForPreSkin(commandList)) {
-			// Mirror candidate pre-skin root constants into the tracker; all
-			// other compute passes avoid the lock-heavy tracker update.
 			DX12BindingSetComputeRoot32BitConstants(
 				commandList, rootParameterIndex, destOffset, num32BitValuesToSet, srcData);
 		}
@@ -1873,9 +1806,6 @@ static void STDMETHODCALLTYPE HookedIASetIndexBuffer(
 {
 	DX12_PROFILE_SCOPE(IASetIndexBuffer);
 
-	// When gDX12HotPathSkipBindings is set, skip the heavy BindingTracker but
-	// keep the lightweight RuntimeState tracking.  Texture-override matching
-	// needs the current IB/VB state and reads it from RuntimeState (TLS path).
 	if (!gDX12HotPathSkipBindings) {
 		LogDX12Call("ID3D12GraphicsCommandList::IASetIndexBuffer", commandList,
 			" gpu=0x%llx size=%u format=%u",
@@ -1884,10 +1814,6 @@ static void STDMETHODCALLTYPE HookedIASetIndexBuffer(
 			view ? static_cast<UINT>(view->Format) : 0);
 		DX12CommandListCaptureIndexBuffer(commandList, view);
 	} else {
-		// Fast path: only lightweight tracking for mod matching.
-		// Texture override matching reads IA hashes from the Hunt module's
-		// gCommandListIa AND buffer views from RuntimeState.  Both must be
-		// updated even when the BindingTracker is skipped.
 		DX12_PROFILE_FAST_FORWARD();
 		if (DX12HuntIsEnabled()) {
 			DX12Profiling::RecordIaHuntIaUpdate();
@@ -1897,10 +1823,6 @@ static void STDMETHODCALLTYPE HookedIASetIndexBuffer(
 			const bool hadCandidate =
 				DX12CommandListRuntimeMayHaveIaTextureCandidate(commandList);
 			DX12CommandListRuntimeRememberIndexBuffer(commandList, view);
-			// D3D12 IASet* calls only record buffer views into the command list.
-			// In the steady state most views cannot match any TextureOverride,
-			// so hash this one view first and only populate Hunt's full IA map
-			// when the hash can actually be consumed by the draw replacement path.
 			if (!DX12HuntIsEnabled() && (hadCandidate ||
 			    UpdateIaTextureCandidateFromIndexView(commandList, view))) {
 				SyncHuntIaFromRuntimeState(
@@ -1926,7 +1848,6 @@ static void STDMETHODCALLTYPE HookedIASetVertexBuffers(
 			" start=%u count=%u", startSlot, count);
 		DX12CommandListCaptureVertexBuffers(commandList, startSlot, count, views);
 	} else {
-		// Fast path: only lightweight tracking for mod matching.
 		DX12_PROFILE_FAST_FORWARD();
 		if (DX12HuntIsEnabled()) {
 			DX12Profiling::RecordIaHuntIaUpdate();
@@ -1936,9 +1857,6 @@ static void STDMETHODCALLTYPE HookedIASetVertexBuffers(
 			const bool hadCandidate =
 				DX12CommandListRuntimeMayHaveIaTextureCandidate(commandList);
 			DX12CommandListRuntimeRememberVertexBuffers(commandList, startSlot, count, views);
-			// Keep the IASet hot path local unless the changed view is a real
-			// TextureOverride candidate. Full Hunt IA state is still maintained
-			// while shader hunting is active so manual selection remains exact.
 			if (!DX12HuntIsEnabled() && (hadCandidate || UpdateIaTextureCandidateFromVertexViews(
 				   commandList, startSlot, count, views))) {
 				SyncHuntIaFromRuntimeState(
@@ -2111,24 +2029,8 @@ void DX12HookCommandQueue(IUnknown *commandQueue)
 
 	DX12SetCommandQueue(queue);
 	DX12VTableHook queueHooks[] = {
-		{8, reinterpret_cast<void**>(&gOrigQueueUpdateTileMappings),
-			HookedQueueUpdateTileMappings, "ID3D12CommandQueue::UpdateTileMappings"},
-		{9, reinterpret_cast<void**>(&gOrigQueueCopyTileMappings),
-			HookedQueueCopyTileMappings, "ID3D12CommandQueue::CopyTileMappings"},
 		{10, reinterpret_cast<void**>(&gOrigQueueExecuteCommandLists),
 			HookedQueueExecuteCommandLists, "ID3D12CommandQueue::ExecuteCommandLists"},
-		{11, reinterpret_cast<void**>(&gOrigQueueSetMarker),
-			HookedQueueSetMarker, "ID3D12CommandQueue::SetMarker"},
-		{12, reinterpret_cast<void**>(&gOrigQueueBeginEvent),
-			HookedQueueBeginEvent, "ID3D12CommandQueue::BeginEvent"},
-		{13, reinterpret_cast<void**>(&gOrigQueueEndEvent),
-			HookedQueueEndEvent, "ID3D12CommandQueue::EndEvent"},
-		{14, reinterpret_cast<void**>(&gOrigQueueSignal),
-			HookedQueueSignal, "ID3D12CommandQueue::Signal"},
-		{16, reinterpret_cast<void**>(&gOrigQueueGetTimestampFrequency),
-			HookedQueueGetTimestampFrequency, "ID3D12CommandQueue::GetTimestampFrequency"},
-		{17, reinterpret_cast<void**>(&gOrigQueueGetClockCalibration),
-			HookedQueueGetClockCalibration, "ID3D12CommandQueue::GetClockCalibration"},
 	};
 	DX12InstallVTableHooks(queue, queueHooks);
 	queue->Release();
@@ -2143,10 +2045,6 @@ void DX12HookCommandList(IUnknown *commandList)
 	if (FAILED(commandList->QueryInterface(IID_PPV_ARGS(&baseList))))
 		return;
 
-	// All command lists from the same device share one vtable. Hook each
-	// distinct vtable only once; subsequent lists hit the shared-lock fast
-	// path in ShouldHookCommandListVTable and skip the ~21 expensive
-	// per-slot hook attempts entirely.
 	void *vtable = *reinterpret_cast<void**>(baseList);
 	if (!ShouldHookCommandListVTable(vtable)) {
 		baseList->Release();

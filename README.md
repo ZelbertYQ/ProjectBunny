@@ -44,6 +44,10 @@ I don't know how DX12 work,so every single line of code may change, grow and cha
 
 it's totally not usable for mod work and will continue change until the first release published.
 
+DO NOT SUBMIT PULL REQUEST BEFORE FIRST RELEASE PUBLISHED, ONLY ISSUE ACCEPTED
+
+THIS IS A FULLY VIBE CODING PROJECT SO DO NOT COMMIT HUMAN WRITE CODE BACK UNLESS YOU'RE VERY CONFIDENT
+
 # Support Development
 
 <a href="https://afdian.com/a/NicoMico666"><img width="200" src="https://pic1.afdiancdn.com/static/img/welcome/button-sponsorme.png" alt=""></a>

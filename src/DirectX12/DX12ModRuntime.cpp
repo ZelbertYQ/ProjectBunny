@@ -708,6 +708,21 @@ struct DX12PreSkinPendingSubmission
 	std::vector<ID3D12DescriptorHeap*> descriptorHeaps;
 };
 
+struct DX12PreSkinFenceCompletion
+{
+	ID3D12Fence *fence = nullptr;
+	UINT64 completedValue = 0;
+};
+
+struct DX12PreSkinReleaseBatch
+{
+	std::vector<ID3D12Resource*> resources;
+	std::vector<ID3D12DescriptorHeap*> descriptorHeaps;
+	std::vector<ID3D12Fence*> fences;
+	std::vector<ID3D12Device*> devices;
+	std::vector<ID3D12CommandQueue*> queues;
+};
+
 static SRWLOCK gPreSkinRetireLock = SRWLOCK_INIT;
 static ID3D12Fence *gPreSkinRetireFence = nullptr;
 static ID3D12Device *gPreSkinRetireFenceDevice = nullptr;
@@ -729,74 +744,251 @@ static void ReleasePreSkinDescriptorRestores(
 	restores->clear();
 }
 
-static bool EnsurePreSkinRetireFenceLocked(ID3D12CommandQueue *queue)
+static void ReleasePreSkinReleaseBatch(DX12PreSkinReleaseBatch *batch)
+{
+	if (!batch)
+		return;
+	for (ID3D12Resource *resource : batch->resources) {
+		if (resource)
+			resource->Release();
+	}
+	for (ID3D12DescriptorHeap *heap : batch->descriptorHeaps) {
+		if (heap)
+			heap->Release();
+	}
+	for (ID3D12Fence *fence : batch->fences) {
+		if (fence)
+			fence->Release();
+	}
+	for (ID3D12CommandQueue *queue : batch->queues) {
+		if (queue)
+			queue->Release();
+	}
+	for (ID3D12Device *device : batch->devices) {
+		if (device)
+			device->Release();
+	}
+	batch->resources.clear();
+	batch->descriptorHeaps.clear();
+	batch->fences.clear();
+	batch->queues.clear();
+	batch->devices.clear();
+}
+
+static void MovePendingPreSkinSubmission(
+	DX12PreSkinPendingSubmission *source,
+	DX12PreSkinPendingSubmission *target)
+{
+	if (!source || !target)
+		return;
+	target->resources.insert(target->resources.end(),
+		source->resources.begin(), source->resources.end());
+	target->descriptorHeaps.insert(target->descriptorHeaps.end(),
+		source->descriptorHeaps.begin(), source->descriptorHeaps.end());
+	source->resources.clear();
+	source->descriptorHeaps.clear();
+}
+
+static void MovePendingPreSkinSubmissionToReleaseBatch(
+	DX12PreSkinPendingSubmission *source,
+	DX12PreSkinReleaseBatch *batch)
+{
+	if (!source || !batch)
+		return;
+	batch->resources.insert(batch->resources.end(),
+		source->resources.begin(), source->resources.end());
+	batch->descriptorHeaps.insert(batch->descriptorHeaps.end(),
+		source->descriptorHeaps.begin(), source->descriptorHeaps.end());
+	source->resources.clear();
+	source->descriptorHeaps.clear();
+}
+
+static ID3D12Device *AcquirePreSkinRetireDevice(ID3D12CommandQueue *queue)
 {
 	if (!queue)
-		return false;
+		return nullptr;
 	D3D12_COMMAND_QUEUE_DESC queueDesc = queue->GetDesc();
 	if (queueDesc.Type != D3D12_COMMAND_LIST_TYPE_DIRECT)
-		return false;
+		return nullptr;
 	ID3D12Device *device = nullptr;
 	HRESULT hr = queue->GetDevice(IID_PPV_ARGS(&device));
 	if (FAILED(hr) || !device)
+		return nullptr;
+	return device;
+}
+
+static bool PreparePreSkinRetireFence(
+	ID3D12CommandQueue *queue,
+	ID3D12Fence **fenceOut,
+	UINT64 *fenceValueOut,
+	DX12PreSkinReleaseBatch *releaseBatch)
+{
+	if (!queue || !fenceOut || !fenceValueOut || !releaseBatch)
+		return false;
+	*fenceOut = nullptr;
+	*fenceValueOut = 0;
+
+	ID3D12Device *device = AcquirePreSkinRetireDevice(queue);
+	if (!device)
 		return false;
 
+	bool needsFence = false;
+	AcquireSRWLockExclusive(&gPreSkinRetireLock);
 	if (gPreSkinRetireFence &&
 	    gPreSkinRetireFenceDevice == device &&
 	    gPreSkinRetireFenceQueue == queue) {
+		*fenceValueOut = ++gPreSkinRetireFenceNextValue;
+		gPreSkinRetireFence->AddRef();
+		*fenceOut = gPreSkinRetireFence;
+	} else {
+		needsFence = true;
+	}
+	ReleaseSRWLockExclusive(&gPreSkinRetireLock);
+
+	if (!needsFence) {
 		device->Release();
 		return true;
 	}
 
-	if (gPreSkinRetireFence)
-		gPreSkinRetireFence->Release();
-	if (gPreSkinRetireFenceDevice)
-		gPreSkinRetireFenceDevice->Release();
-	if (gPreSkinRetireFenceQueue)
-		gPreSkinRetireFenceQueue->Release();
-	gPreSkinRetireFence = nullptr;
-	gPreSkinRetireFenceDevice = nullptr;
-	gPreSkinRetireFenceQueue = nullptr;
-	gPreSkinRetireFenceNextValue = 0;
-
-	hr = device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gPreSkinRetireFence));
-	if (FAILED(hr) || !gPreSkinRetireFence) {
+	ID3D12Fence *createdFence = nullptr;
+	HRESULT hr = device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&createdFence));
+	if (FAILED(hr) || !createdFence) {
 		device->Release();
 		return false;
 	}
-	gPreSkinRetireFenceDevice = device;
+
 	queue->AddRef();
-	gPreSkinRetireFenceQueue = queue;
-	return true;
+	ID3D12CommandQueue *queueRef = queue;
+
+	AcquireSRWLockExclusive(&gPreSkinRetireLock);
+	if (gPreSkinRetireFence &&
+	    gPreSkinRetireFenceDevice == device &&
+	    gPreSkinRetireFenceQueue == queue) {
+		*fenceValueOut = ++gPreSkinRetireFenceNextValue;
+		gPreSkinRetireFence->AddRef();
+		*fenceOut = gPreSkinRetireFence;
+	} else {
+		if (gPreSkinRetireFence)
+			releaseBatch->fences.push_back(gPreSkinRetireFence);
+		if (gPreSkinRetireFenceDevice)
+			releaseBatch->devices.push_back(gPreSkinRetireFenceDevice);
+		if (gPreSkinRetireFenceQueue)
+			releaseBatch->queues.push_back(gPreSkinRetireFenceQueue);
+		gPreSkinRetireFence = createdFence;
+		gPreSkinRetireFenceDevice = device;
+		gPreSkinRetireFenceQueue = queueRef;
+		gPreSkinRetireFenceNextValue = 0;
+		createdFence = nullptr;
+		device = nullptr;
+		queueRef = nullptr;
+		*fenceValueOut = ++gPreSkinRetireFenceNextValue;
+		gPreSkinRetireFence->AddRef();
+		*fenceOut = gPreSkinRetireFence;
+	}
+	ReleaseSRWLockExclusive(&gPreSkinRetireLock);
+
+	if (createdFence)
+		createdFence->Release();
+	if (queueRef)
+		queueRef->Release();
+	if (device)
+		device->Release();
+	return *fenceOut != nullptr;
 }
 
-static void CleanupRetiredPreSkinObjectsLocked()
+static void CollectPreSkinRetireFenceSnapshot(std::vector<ID3D12Fence*> *fences)
 {
+	if (!fences)
+		return;
+	std::unordered_set<ID3D12Fence*> seen;
+	AcquireSRWLockExclusive(&gPreSkinRetireLock);
+	for (const auto &retired : gRetiredPreSkinResources) {
+		if (retired.fence && seen.insert(retired.fence).second) {
+			retired.fence->AddRef();
+			fences->push_back(retired.fence);
+		}
+	}
+	for (const auto &retired : gRetiredPreSkinDescriptorHeaps) {
+		if (retired.fence && seen.insert(retired.fence).second) {
+			retired.fence->AddRef();
+			fences->push_back(retired.fence);
+		}
+	}
+	ReleaseSRWLockExclusive(&gPreSkinRetireLock);
+}
+
+static void QueryPreSkinRetireFenceCompletions(
+	std::vector<DX12PreSkinFenceCompletion> *completions)
+{
+	if (!completions)
+		return;
+	std::vector<ID3D12Fence*> fences;
+	CollectPreSkinRetireFenceSnapshot(&fences);
+	for (ID3D12Fence *fence : fences) {
+		if (fence) {
+			DX12PreSkinFenceCompletion completion = {};
+			completion.fence = fence;
+			completion.completedValue = fence->GetCompletedValue();
+			completions->push_back(completion);
+		}
+	}
+}
+
+static void ReleasePreSkinFenceCompletions(
+	std::vector<DX12PreSkinFenceCompletion> *completions)
+{
+	if (!completions)
+		return;
+	for (DX12PreSkinFenceCompletion &completion : *completions) {
+		if (completion.fence)
+			completion.fence->Release();
+	}
+	completions->clear();
+}
+
+static bool PreSkinFenceCompleted(
+	const std::vector<DX12PreSkinFenceCompletion> &completions,
+	ID3D12Fence *fence,
+	UINT64 fenceValue)
+{
+	if (!fence)
+		return true;
+	for (const DX12PreSkinFenceCompletion &completion : completions) {
+		if (completion.fence == fence)
+			return completion.completedValue >= fenceValue;
+	}
+	return false;
+}
+
+static void CleanupRetiredPreSkinObjectsLocked(
+	const std::vector<DX12PreSkinFenceCompletion> &completions,
+	DX12PreSkinReleaseBatch *releaseBatch)
+{
+	if (!releaseBatch)
+		return;
 	auto resourceIt = gRetiredPreSkinResources.begin();
 	while (resourceIt != gRetiredPreSkinResources.end()) {
-		if (resourceIt->fence &&
-		    resourceIt->fence->GetCompletedValue() < resourceIt->fenceValue) {
+		if (!PreSkinFenceCompleted(completions, resourceIt->fence, resourceIt->fenceValue)) {
 			++resourceIt;
 			continue;
 		}
 		if (resourceIt->resource)
-			resourceIt->resource->Release();
+			releaseBatch->resources.push_back(resourceIt->resource);
 		if (resourceIt->fence)
-			resourceIt->fence->Release();
+			releaseBatch->fences.push_back(resourceIt->fence);
 		resourceIt = gRetiredPreSkinResources.erase(resourceIt);
 	}
 
 	auto heapIt = gRetiredPreSkinDescriptorHeaps.begin();
 	while (heapIt != gRetiredPreSkinDescriptorHeaps.end()) {
-		if (heapIt->fence &&
-		    heapIt->fence->GetCompletedValue() < heapIt->fenceValue) {
+		if (!PreSkinFenceCompleted(completions, heapIt->fence, heapIt->fenceValue)) {
 			++heapIt;
 			continue;
 		}
 		if (heapIt->heap)
-			heapIt->heap->Release();
+			releaseBatch->descriptorHeaps.push_back(heapIt->heap);
 		if (heapIt->fence)
-			heapIt->fence->Release();
+			releaseBatch->fences.push_back(heapIt->fence);
 		heapIt = gRetiredPreSkinDescriptorHeaps.erase(heapIt);
 	}
 }
@@ -812,34 +1004,14 @@ static IUnknown *PreSkinCommandListIdentity(IUnknown *commandList)
 	return identity;
 }
 
-static void ReleasePendingPreSkinSubmission(DX12PreSkinPendingSubmission *pending)
-{
-	if (!pending)
-		return;
-	for (ID3D12Resource *resource : pending->resources) {
-		if (resource)
-			resource->Release();
-	}
-	for (ID3D12DescriptorHeap *heap : pending->descriptorHeaps) {
-		if (heap)
-			heap->Release();
-	}
-	pending->resources.clear();
-	pending->descriptorHeaps.clear();
-}
-
 static void RequeuePendingPreSkinSubmissionLocked(DX12PreSkinPendingSubmission *pending)
 {
 	if (!pending)
 		return;
 	DX12PreSkinPendingSubmission &globalPending = gPendingPreSkinSubmissions[nullptr];
-	globalPending.resources.insert(globalPending.resources.end(),
-		pending->resources.begin(), pending->resources.end());
-	globalPending.descriptorHeaps.insert(globalPending.descriptorHeaps.end(),
-		pending->descriptorHeaps.begin(), pending->descriptorHeaps.end());
-	pending->resources.clear();
-	pending->descriptorHeaps.clear();
+	MovePendingPreSkinSubmission(pending, &globalPending);
 }
+
 static void RetirePreSkinResource(ID3D12Resource *resource)
 {
 	if (!resource)
@@ -854,9 +1026,9 @@ static void RetirePreSkinResourceForCommandList(
 {
 	if (!resource)
 		return;
+	IUnknown *identity = PreSkinCommandListIdentity(commandList);
 	AcquireSRWLockExclusive(&gPreSkinRetireLock);
-	gPendingPreSkinSubmissions[PreSkinCommandListIdentity(commandList)].resources.push_back(resource);
-	CleanupRetiredPreSkinObjectsLocked();
+	gPendingPreSkinSubmissions[identity].resources.push_back(resource);
 	ReleaseSRWLockExclusive(&gPreSkinRetireLock);
 }
 
@@ -869,13 +1041,12 @@ static void RetainPreSkinResourceForCommandList(
 	RetirePreSkinResourceForCommandList(commandList, resource);
 }
 
-static void RetirePreSkinDescriptorHeapLocked(ID3D12DescriptorHeap *heap)
+static void RetirePreSkinDescriptorHeap(ID3D12DescriptorHeap *heap)
 {
 	if (!heap)
 		return;
 	AcquireSRWLockExclusive(&gPreSkinRetireLock);
 	gPendingPreSkinSubmissions[nullptr].descriptorHeaps.push_back(heap);
-	CleanupRetiredPreSkinObjectsLocked();
 	ReleaseSRWLockExclusive(&gPreSkinRetireLock);
 }
 void DX12ModNotifyCommandListsSubmitted(
@@ -884,45 +1055,55 @@ void DX12ModNotifyCommandListsSubmitted(
 	if (!queue || !commandLists || !numCommandLists)
 		return;
 
+	std::vector<IUnknown*> identities;
+	identities.reserve(numCommandLists);
+	for (UINT i = 0; i < numCommandLists; ++i)
+		identities.push_back(PreSkinCommandListIdentity(commandLists[i]));
+
+	std::vector<DX12PreSkinFenceCompletion> completions;
+	QueryPreSkinRetireFenceCompletions(&completions);
+	DX12PreSkinReleaseBatch releaseBatch;
 	DX12PreSkinPendingSubmission pending;
 	AcquireSRWLockExclusive(&gPreSkinRetireLock);
-	CleanupRetiredPreSkinObjectsLocked();
+	CleanupRetiredPreSkinObjectsLocked(completions, &releaseBatch);
 
 	auto globalIt = gPendingPreSkinSubmissions.find(nullptr);
 	if (globalIt != gPendingPreSkinSubmissions.end()) {
-		pending.resources.insert(pending.resources.end(),
-			globalIt->second.resources.begin(), globalIt->second.resources.end());
-		pending.descriptorHeaps.insert(pending.descriptorHeaps.end(),
-			globalIt->second.descriptorHeaps.begin(), globalIt->second.descriptorHeaps.end());
+		MovePendingPreSkinSubmission(&globalIt->second, &pending);
 		gPendingPreSkinSubmissions.erase(globalIt);
 	}
 
-	for (UINT i = 0; i < numCommandLists; ++i) {
-		auto it = gPendingPreSkinSubmissions.find(PreSkinCommandListIdentity(commandLists[i]));
+	for (IUnknown *identity : identities) {
+		auto it = gPendingPreSkinSubmissions.find(identity);
 		if (it == gPendingPreSkinSubmissions.end())
 			continue;
-		pending.resources.insert(pending.resources.end(),
-			it->second.resources.begin(), it->second.resources.end());
-		pending.descriptorHeaps.insert(pending.descriptorHeaps.end(),
-			it->second.descriptorHeaps.begin(), it->second.descriptorHeaps.end());
+		MovePendingPreSkinSubmission(&it->second, &pending);
 		gPendingPreSkinSubmissions.erase(it);
 	}
 
 	if (pending.resources.empty() && pending.descriptorHeaps.empty()) {
 		ReleaseSRWLockExclusive(&gPreSkinRetireLock);
+		ReleasePreSkinReleaseBatch(&releaseBatch);
+		ReleasePreSkinFenceCompletions(&completions);
 		return;
 	}
+	ReleaseSRWLockExclusive(&gPreSkinRetireLock);
 
-	if (!EnsurePreSkinRetireFenceLocked(queue)) {
+	DX12LogDebugJsonFunc("DX12PreSkinRetireSubmit",
+		"\"present\":%ld,\"queue\":\"%p\",\"commandLists\":%u,\"resources\":%zu,\"descriptorHeaps\":%zu",
+		DX12GetPresentCount(), queue, numCommandLists,
+		pending.resources.size(), pending.descriptorHeaps.size());
+
+	ID3D12Fence *fence = nullptr;
+	UINT64 fenceValue = 0;
+	if (!PreparePreSkinRetireFence(queue, &fence, &fenceValue, &releaseBatch)) {
+		AcquireSRWLockExclusive(&gPreSkinRetireLock);
 		RequeuePendingPreSkinSubmissionLocked(&pending);
 		ReleaseSRWLockExclusive(&gPreSkinRetireLock);
+		ReleasePreSkinReleaseBatch(&releaseBatch);
+		ReleasePreSkinFenceCompletions(&completions);
 		return;
 	}
-
-	const UINT64 fenceValue = ++gPreSkinRetireFenceNextValue;
-	gPreSkinRetireFence->AddRef();
-	ID3D12Fence *fence = gPreSkinRetireFence;
-	ReleaseSRWLockExclusive(&gPreSkinRetireLock);
 
 	HRESULT hr = S_OK;
 	{
@@ -932,9 +1113,11 @@ void DX12ModNotifyCommandListsSubmitted(
 
 	AcquireSRWLockExclusive(&gPreSkinRetireLock);
 	if (FAILED(hr)) {
-		fence->Release();
 		RequeuePendingPreSkinSubmissionLocked(&pending);
 		ReleaseSRWLockExclusive(&gPreSkinRetireLock);
+		fence->Release();
+		ReleasePreSkinReleaseBatch(&releaseBatch);
+		ReleasePreSkinFenceCompletions(&completions);
 		return;
 	}
 
@@ -951,17 +1134,20 @@ void DX12ModNotifyCommandListsSubmitted(
 		gRetiredPreSkinDescriptorHeaps.push_back({ heap, fence, fenceValue });
 	}
 	fence->Release();
-	CleanupRetiredPreSkinObjectsLocked();
 	ReleaseSRWLockExclusive(&gPreSkinRetireLock);
+	ReleasePreSkinReleaseBatch(&releaseBatch);
+	ReleasePreSkinFenceCompletions(&completions);
 }
-static void ReleasePreSkinDescriptorRingLocked()
+static void ReleasePreSkinDescriptorRingLocked(DX12PreSkinReleaseBatch *releaseBatch)
 {
+	if (!releaseBatch)
+		return;
 	if (gPreSkinDescriptorRing.heap) {
-		gPreSkinDescriptorRing.heap->Release();
+		releaseBatch->descriptorHeaps.push_back(gPreSkinDescriptorRing.heap);
 		gPreSkinDescriptorRing.heap = nullptr;
 	}
 	if (gPreSkinDescriptorRing.device) {
-		gPreSkinDescriptorRing.device->Release();
+		releaseBatch->devices.push_back(gPreSkinDescriptorRing.device);
 		gPreSkinDescriptorRing.device = nullptr;
 	}
 	gPreSkinDescriptorRing.capacity = 0;
@@ -970,7 +1156,9 @@ static void ReleasePreSkinDescriptorRingLocked()
 	gPreSkinDescriptorRing.present = -1;
 	for (auto &retired : gRetiredPreSkinDescriptorHeaps) {
 		if (retired.heap)
-			retired.heap->Release();
+			releaseBatch->descriptorHeaps.push_back(retired.heap);
+		if (retired.fence)
+			releaseBatch->fences.push_back(retired.fence);
 	}
 	gRetiredPreSkinDescriptorHeaps.clear();
 }
@@ -1049,7 +1237,7 @@ static bool EnsurePreSkinDescriptorRingLocked(
 		ReleaseSRWLockExclusive(&gPreSkinDescriptorRingLock);
 
 		if (oldHeap)
-			RetirePreSkinDescriptorHeapLocked(oldHeap);
+			RetirePreSkinDescriptorHeap(oldHeap);
 		if (oldDevice)
 			oldDevice->Release();
 #if defined(_DEBUG)
@@ -1273,42 +1461,44 @@ static void ClearPreSkinRuntimeState()
 	++gPreSkinSrvCacheGeneration;
 	ReleaseSRWLockExclusive(&gPreSkinLock);
 
+	DX12PreSkinReleaseBatch releaseBatch;
 	AcquireSRWLockExclusive(&gPreSkinRetireLock);
 	for (auto &pending : gPendingPreSkinSubmissions)
-		ReleasePendingPreSkinSubmission(&pending.second);
+		MovePendingPreSkinSubmissionToReleaseBatch(&pending.second, &releaseBatch);
 	gPendingPreSkinSubmissions.clear();
 	for (auto &retired : gRetiredPreSkinResources) {
 		if (retired.resource)
-			retired.resource->Release();
+			releaseBatch.resources.push_back(retired.resource);
 		if (retired.fence)
-			retired.fence->Release();
+			releaseBatch.fences.push_back(retired.fence);
 	}
 	gRetiredPreSkinResources.clear();
 	for (auto &retired : gRetiredPreSkinDescriptorHeaps) {
 		if (retired.heap)
-			retired.heap->Release();
+			releaseBatch.descriptorHeaps.push_back(retired.heap);
 		if (retired.fence)
-			retired.fence->Release();
+			releaseBatch.fences.push_back(retired.fence);
 	}
 	gRetiredPreSkinDescriptorHeaps.clear();
 	if (gPreSkinRetireFence) {
-		gPreSkinRetireFence->Release();
+		releaseBatch.fences.push_back(gPreSkinRetireFence);
 		gPreSkinRetireFence = nullptr;
 	}
 	if (gPreSkinRetireFenceDevice) {
-		gPreSkinRetireFenceDevice->Release();
+		releaseBatch.devices.push_back(gPreSkinRetireFenceDevice);
 		gPreSkinRetireFenceDevice = nullptr;
 	}
 	if (gPreSkinRetireFenceQueue) {
-		gPreSkinRetireFenceQueue->Release();
+		releaseBatch.queues.push_back(gPreSkinRetireFenceQueue);
 		gPreSkinRetireFenceQueue = nullptr;
 	}
 	gPreSkinRetireFenceNextValue = 0;
 	ReleaseSRWLockExclusive(&gPreSkinRetireLock);
 
 	AcquireSRWLockExclusive(&gPreSkinDescriptorRingLock);
-	ReleasePreSkinDescriptorRingLocked();
+	ReleasePreSkinDescriptorRingLocked(&releaseBatch);
 	ReleaseSRWLockExclusive(&gPreSkinDescriptorRingLock);
+	ReleasePreSkinReleaseBatch(&releaseBatch);
 }
 
 static bool DescriptorOverlapsView(
@@ -2489,7 +2679,7 @@ static bool EnsureResourceUavLocked(
 		resource->uavResource = nullptr;
 	}
 	if (resource->uavHeap) {
-		RetirePreSkinDescriptorHeapLocked(resource->uavHeap);
+		RetirePreSkinDescriptorHeap(resource->uavHeap);
 		resource->uavHeap = nullptr;
 	}
 	resource->uavCpu = {};
@@ -4154,7 +4344,9 @@ static bool ApplyPreSkinDescriptorTablePatchLocked(
 		*originalVertexCountOut = originalVertexCount;
 	if (overrideVertexCountOut)
 		*overrideVertexCountOut = overrideVertexCount;
+	AcquireSRWLockExclusive(&gPreSkinLock);
 	gActivePreSkinReplacements[commandList] = state;
+	ReleaseSRWLockExclusive(&gPreSkinLock);
 
 #if defined(_DEBUG)
 	DX12LogDebugJsonFunc("DX12PreSkinningApply",
@@ -4253,7 +4445,9 @@ static bool ApplyPreSkinBindingPatchLocked(
 	state.producerSerial = gComputeUavSerial + 1;
 	if (descriptorRestores)
 		state.descriptorRestores.swap(*descriptorRestores);
+	AcquireSRWLockExclusive(&gPreSkinLock);
 	gActivePreSkinReplacements[commandList] = state;
+	ReleaseSRWLockExclusive(&gPreSkinLock);
 
 #if defined(_DEBUG)
 	if (!alreadyPatched) {
@@ -4517,16 +4711,17 @@ void DX12ModRestorePreSkinningUavReplacement(ID3D12GraphicsCommandList *commandL
 	if (!commandList)
 		return;
 
+	DX12InternalReplayScope internalReplay;
 	DX12PreSkinReplacementState state = {};
 	bool found = false;
-	AcquireSRWLockExclusive(&gModLock);
+	AcquireSRWLockExclusive(&gPreSkinLock);
 	auto it = gActivePreSkinReplacements.find(commandList);
 	if (it != gActivePreSkinReplacements.end()) {
 		state = it->second;
 		gActivePreSkinReplacements.erase(it);
 		found = state.active;
 	}
-	ReleaseSRWLockExclusive(&gModLock);
+	ReleaseSRWLockExclusive(&gPreSkinLock);
 
 	if (!found)
 		return;
@@ -5587,7 +5782,7 @@ static void ReleaseLoadedResourceObjects(DX12LoadedResource *resource)
 		resource->uavResource = nullptr;
 	}
 	if (resource->uavHeap) {
-		RetirePreSkinDescriptorHeapLocked(resource->uavHeap);
+		RetirePreSkinDescriptorHeap(resource->uavHeap);
 		resource->uavHeap = nullptr;
 	}
 	if (resource->srvResource) {

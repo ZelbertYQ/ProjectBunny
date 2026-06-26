@@ -41,7 +41,6 @@ static CNktHookLib gHookMgr;
 static std::unordered_set<void*> gHookedFunctions;
 static std::unordered_map<void*, void*> gOriginalFunctions;
 
-// Hot-path fast-forward flags; see DX12State.h for full documentation.
 volatile LONG gDX12HotPathSkipAll = 0;
 volatile LONG gDX12HotPathSkipBindings = 0;
 static thread_local UINT tDX12InternalReplayDepth = 0;
@@ -78,7 +77,6 @@ bool DX12IsInternalReplay()
 
 void DX12HotPathUpdate()
 {
-	// Heavy tracking subsystems that need full binding-tracker data.
 	const bool needsHeavyTracking =
 		DX12FrameAnalysisIsActive() ||
 		DX12FrameAnalysisIsCapturing() ||
@@ -87,7 +85,6 @@ void DX12HotPathUpdate()
 		DX12ShaderDumpIsCaptureRequested() ||
 		DX12ShaderDumpIsBusy();
 
-	// Lightweight work that needs draw/dispatch hooks but NOT BindingTracker.
 	const bool needsRecordWork =
 		DX12HuntIsEnabled() ||
 		DX12ModHasActiveShaderOverrides() ||
@@ -96,12 +93,9 @@ void DX12HotPathUpdate()
 		DX12ModHasAnyActiveOverrides() ||
 		DX12ModNeedsPreSkinningUavProbe();
 
-	// Skip-all: only when NOTHING is active.
 	InterlockedExchange(&gDX12HotPathSkipAll,
 		(needsHeavyTracking || needsRecordWork) ? 0 : 1);
 
-	// Skip-bindings: when no heavy tracking is needed.  Mod work alone does
-	// NOT require binding tracking; the draw hooks handle mod matching.
 	InterlockedExchange(&gDX12HotPathSkipBindings,
 		needsHeavyTracking ? 0 : 1);
 }
@@ -345,8 +339,6 @@ void DX12Log(const char *fmt, ...)
 	char funcJson[16];
 	DX12JsonEscapeString(funcJson, sizeof(funcJson), "Log");
 	WriteJsonLogLine("Log", funcJson, fields[0] == ',' ? fields + 1 : fields, false);
-	// Do NOT fflush here; per-line sync flushes cause severe CPU stalls on the
-	// recording hot path. DX12FlushLog() is called from the Present hook instead.
 }
 
 void DX12LogJsonFunc(const char *func, const char *fmt, ...)
@@ -371,7 +363,6 @@ void DX12LogJsonFunc(const char *func, const char *fmt, ...)
 	}
 
 	WriteJsonLogLine(func ? func : "Unknown", funcJson, extra, false);
-	// No fflush here — see DX12Log above.
 }
 
 void DX12LogJsonFuncFlush(const char *func, const char *fmt, ...)
