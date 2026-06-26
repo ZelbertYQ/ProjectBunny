@@ -28,8 +28,6 @@ static void LogPreSkinDispatchProbeReason(
 	    !strcmp(reason, "cs_not_configured"))) {
 		return;
 	}
-	// These logs explain why explicit match_cs pre-skinning did not reach the
-	// replacement path.
 	DX12LogDebugJsonFunc("DX12PreSkinDispatchProbe",
 		"\"reason\":\"%s\",\"cs\":\"%016llx\",\"bindingSerial\":%llu,\"uavs\":%zu",
 		reason ? reason : "unknown",

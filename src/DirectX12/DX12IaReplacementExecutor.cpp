@@ -147,10 +147,6 @@ static void ExecuteReplacementDraws(
 		UINT start = draw.start;
 		INT baseVertex = draw.baseVertex;
 
-		// draw = from_caller: replay the original draw with the replacement
-		// resources bound.  This matches DX11's FROM_CALLER behaviour — the mod
-		// says "use whatever the game was going to draw" without hardcoding
-		// vertex/index counts that may drift across game patches or LODs.
 		if (draw.fromCaller) {
 			if (draw.indexed) {
 				count = originalDraw.indexCount;
@@ -173,12 +169,15 @@ static void ExecuteReplacementDraws(
 				if (callbacks.recordReplacementDraw)
 					callbacks.recordReplacementDraw(true);
 				callbacks.drawIndexedInstanced(
-					commandList, count, 1, start, baseVertex, 0);
+					commandList, count, originalDraw.instanceCount,
+					start, baseVertex, originalDraw.firstInstance);
 			}
 		} else if (callbacks.drawInstanced) {
 			if (callbacks.recordReplacementDraw)
 				callbacks.recordReplacementDraw(false);
-			callbacks.drawInstanced(commandList, count, 1, start, 0);
+			callbacks.drawInstanced(
+				commandList, count, originalDraw.instanceCount,
+				start, originalDraw.firstInstance);
 		}
 	}
 }
@@ -194,8 +193,6 @@ bool DX12IaReplacementExecutePresent(
 
 	const DX12ActiveIaState originalIa = runtimeState.ia;
 	ApplyIaReplacement(commandList, replacement, callbacks);
-	// Present replacement has no "original draw" to borrow from; from_caller
-	// draws in this context receive zero counts and are skipped (expected).
 	DX12IaDrawInvocation noDraw = {};
 	ExecuteReplacementDraws(commandList, replacement, noDraw, callbacks);
 	RestoreIaReplacement(commandList, replacement, originalIa, callbacks);
@@ -223,18 +220,12 @@ bool DX12IaReplacementApplyAndExecute(
 		    draw.vertexCount, draw.indexCount, draw.instanceCount,
 		    draw.firstVertex, draw.firstIndex, draw.baseVertex,
 		    draw.firstInstance, *replacement)) {
-		// D3D12 draw and dispatch calls append GPU work to the command list.
-		// When the same IA replacement appears repeatedly in one frame, replaying
-		// all replacement/post commands again can flood the GPU queue at startup.
 		return true;
 	}
 
 	const DX12ActiveIaState originalIa = runtimeState.ia;
 	ApplyIaReplacement(commandList, *replacement, callbacks);
 
-	// DX12 records replacement work into the currently intercepted command list.
-	// Keeping this execution rule in one module gives later ResourceTarget and
-	// barrier handling the same locality that DX11 gets from CommandListState.
 	if (!replacement->skip)
 		ExecuteOriginalDraw(commandList, draw, callbacks);
 

@@ -270,7 +270,7 @@ static std::vector<DX12VertexLimitRaiseConfig> gVertexLimitRaiseConfigs;
 static UINT64 gReloadGeneration = 1;
 static volatile LONG gHasShaderOverrides = 0;
 static volatile LONG gHasTextureOverrides = 0;
-static volatile LONG gHasUavHashTextureOverrides = 0;
+static volatile LONG gHasPreSkinTextureOverrideCandidates = 0;
 static volatile LONG gHasPresentRuntimeEffect = 0;
 static bool gHasPreSkinVlrWithoutMatchCs = false;
 static std::unordered_set<uint64_t> gPreSkinMatchCsHashes;
@@ -1166,9 +1166,6 @@ static void BuildDx12ExplicitMatchCsResourceIndex(
 			for (const auto &item : config.preSkinCsSrvResources) {
 				if (item.second.empty())
 					continue;
-				// Preindex explicit match_cs ownership by lower-cased resource
-				// name so resource load/patch paths avoid scanning every
-				// TextureOverride while command lists are being recorded.
 				(*resourceSections)[Bunny::ToLower(item.second)].push_back(config.section);
 			}
 		}
@@ -1254,9 +1251,6 @@ static void BuildDx12VlrResourceCandidates(
 			continue;
 		if (!seen.insert(item.first).second)
 			continue;
-		// VLR fallback scans are rare but can trigger resource loading. Keep a
-		// prefiltered resource-name list so dispatch-time fallback avoids
-		// walking all parsed Resource sections.
 		resourceCandidates->push_back(item.first);
 	}
 }
@@ -1872,10 +1866,9 @@ bool DX12ModRuntimeLoad(
 	std::vector<DX12PreSkinTextureOverrideCandidate> preSkinTextureOverrides;
 	std::unordered_map<uint32_t, std::vector<size_t>> preSkinUavHashTextureOverrideIndex;
 	std::unordered_map<uint64_t, std::vector<size_t>> preSkinMatchCsTextureOverrideIndex;
-		std::unordered_map<std::wstring, std::vector<std::wstring>> explicitMatchCsResourceSections;
+	std::unordered_map<std::wstring, std::vector<std::wstring>> explicitMatchCsResourceSections;
 	std::vector<std::wstring> vlrResourceCandidates;
 	std::unordered_set<uint64_t> preSkinMatchCsHashes;
-	bool hasUavHashTextureOverridesWithoutMatchCs = false;
 	
 	SetBasePaths(configPath);
 	if (!Bunny::LoadMigotoIniWithIncludes(configPath, &iniLoad)) {
@@ -1898,7 +1891,7 @@ bool DX12ModRuntimeLoad(
 	Bunny::ParseCommandListSections(iniLoad.document, &commandLists);
 	std::vector<DX12VertexLimitRaiseConfig> vertexLimitRaiseConfigs =
 		CollectVertexLimitRaiseConfigs(textureOverrides);
-	bool hasUavHashTextureOverrides =
+	bool hasPreSkinTextureOverrideCandidates =
 		HasPreSkinTextureOverrideCandidates(
 			textureOverrides, &preSkinMatchCsHashes,
 			&gHasPreSkinVlrWithoutMatchCs,
@@ -1993,7 +1986,9 @@ bool DX12ModRuntimeLoad(
 	++gPreSkinSrvCacheGeneration;
 	InterlockedExchange(&gHasShaderOverrides, gShaderOverrides.empty() ? 0 : 1);
 	InterlockedExchange(&gHasTextureOverrides, gTextureOverrides.empty() ? 0 : 1);
-	InterlockedExchange(&gHasUavHashTextureOverrides, hasUavHashTextureOverrides ? 1 : 0);
+	InterlockedExchange(
+		&gHasPreSkinTextureOverrideCandidates,
+		hasPreSkinTextureOverrideCandidates ? 1 : 0);
 	InterlockedExchange(&gHasPresentRuntimeEffect, presentRuntimeEffect ? 1 : 0);
 	gLoaded = true;
 	++gReloadGeneration;
@@ -3243,6 +3238,38 @@ static uint64_t HashComputeBindingListForProbe(
 	}
 	return key;
 }
+
+static bool CanPatchPreSkinVertexCountCbvLocked(
+	const DX12CurrentComputeUavBinding &cbv,
+	UINT expectedOriginalVertexCount)
+{
+	if (!expectedOriginalVertexCount)
+		return true;
+	if (!cbv.hasDescriptor || cbv.rootDescriptor || cbv.descriptor.kind != "CBV" ||
+	    !cbv.descriptor.resource)
+		return false;
+
+	const UINT64 sourceOffset = cbv.descriptor.resourceOffset;
+	UINT viewBytes = cbv.descriptor.cbvSize;
+	if (!viewBytes && cbv.descriptor.viewSize)
+		viewBytes = static_cast<UINT>((std::min<UINT64>)(cbv.descriptor.viewSize, UINT_MAX));
+	if (!viewBytes)
+		viewBytes = 256;
+	viewBytes = AlignCbvSize(viewBytes);
+
+	std::vector<unsigned char> bytes;
+	HRESULT hr = E_FAIL;
+	if (!ReadPreSkinCbvBytesLocked(cbv.descriptor.resource, sourceOffset, viewBytes, &bytes, &hr))
+		return false;
+
+	for (UINT offset = 0; offset + sizeof(UINT32) <= bytes.size(); offset += sizeof(UINT32)) {
+		UINT32 candidate = 0;
+		memcpy(&candidate, bytes.data() + offset, sizeof(candidate));
+		if (candidate == expectedOriginalVertexCount)
+			return true;
+	}
+	return false;
+}
 static void AppendComputeCbvList(
 	const std::vector<DX12CurrentComputeUavBinding> &cbvs, char *text, size_t textSize);
 static void AppendComputeRootConstantsList(
@@ -3440,10 +3467,11 @@ static void LogPreSkinSrvHashProbeLimited(
 	const DX12PreSkinSrvHashResult *hash, bool matched, const char *status)
 {
 #if defined(_DEBUG)
+	if (!matched && status && (!strcmp(status, "descriptor_hash") || !strcmp(status, "hash_failed")))
+		return;
 	static SRWLOCK logLock = SRWLOCK_INIT;
 	static std::unordered_set<uint64_t> logged;
 	uint64_t key = 0x6e47f2cb0d45a31bull;
-	key = HashCombine64(key, DX12GetPresentCount());
 	key = HashCombine64(key, shaderRegister);
 	key = HashCombine64(key, expectedHash);
 	key = HashCombine64(key, hash ? hash->descriptorHash : 0);
@@ -3626,39 +3654,39 @@ static bool FindPreSkinProducerByMatchCsLocked(
 		    csHash, uavs, srvs, cbvs, rootConstants, &candidateMatch))
 		return false;
 
-	const DX12CurrentComputeUavBinding *chosenUav = nullptr;
+	const DX12CurrentComputeUavBinding *chosenBinding = nullptr;
 	for (auto it = uavs.rbegin(); it != uavs.rend(); ++it) {
 		if (IsPreSkinMatchCsUavCandidate(*it)) {
-			chosenUav = &(*it);
+			chosenBinding = &(*it);
 			break;
 		}
 	}
-	if (!chosenUav) {
+	if (!chosenBinding) {
 		for (const DX12CurrentComputeUavBinding &srv : srvs) {
 			if (srv.hasDescriptor && !srv.rootDescriptor && srv.descriptorIncrement &&
 			    srv.tableCpuStart && srv.tableGpuStart.ptr) {
-				chosenUav = &srv;
+				chosenBinding = &srv;
 				break;
 			}
 		}
 	}
-	if (!chosenUav)
+	if (!chosenBinding)
 		return false;
 
 	DX12ComputeUavProducer candidate = {};
-	candidate.rootParameterIndex = chosenUav->rootParameterIndex;
-	candidate.rangeIndex = chosenUav->rangeIndex;
-	candidate.shaderRegister = chosenUav->shaderRegister;
-	candidate.registerSpace = chosenUav->registerSpace;
-	candidate.descriptorOffset = chosenUav->descriptorOffset;
-	candidate.rootDescriptor = chosenUav->rootDescriptor;
-	candidate.gpuVirtualAddress = chosenUav->gpuVirtualAddress;
-	candidate.hasDescriptor = chosenUav->hasDescriptor;
-	candidate.descriptor = chosenUav->descriptor;
+	candidate.rootParameterIndex = chosenBinding->rootParameterIndex;
+	candidate.rangeIndex = chosenBinding->rangeIndex;
+	candidate.shaderRegister = chosenBinding->shaderRegister;
+	candidate.registerSpace = chosenBinding->registerSpace;
+	candidate.descriptorOffset = chosenBinding->descriptorOffset;
+	candidate.rootDescriptor = chosenBinding->rootDescriptor;
+	candidate.gpuVirtualAddress = chosenBinding->gpuVirtualAddress;
+	candidate.hasDescriptor = chosenBinding->hasDescriptor;
+	candidate.descriptor = chosenBinding->descriptor;
 	if (producer)
 		*producer = candidate;
 	if (binding)
-		*binding = *chosenUav;
+		*binding = *chosenBinding;
 	if (match)
 		*match = candidateMatch;
 	return true;
@@ -3741,8 +3769,6 @@ static bool ApplyPreSkinDescriptorTablePatchLocked(
 		UINT count = 0;
 		UINT tempOffset = 0;
 	};
-	// Reuse per-thread scratch storage to keep the pre-skin hot path from
-	// allocating vectors on every dispatch-driven patch attempt.
 	static thread_local std::vector<TableCopy> tlsTables;
 	std::vector<TableCopy> &tables = tlsTables;
 	tables.clear();
@@ -3786,6 +3812,80 @@ static bool ApplyPreSkinDescriptorTablePatchLocked(
 	}
 	(void)rootConstants;
 
+	const UINT64 abortCacheKey = MakePreSkinDescriptorPatchAbortCacheKey(
+		config, srvReplacements, srvs, cbvs);
+	if (gPreSkinDescriptorPatchAbortCache.find(abortCacheKey) !=
+	    gPreSkinDescriptorPatchAbortCache.end()) {
+		logStage("abort_cache_hit", 0, 0);
+#if defined(_DEBUG)
+		const LONG hitLogCount = InterlockedIncrement(&gPreSkinDescriptorAbortCacheHitLogCount);
+		if (hitLogCount <= 32) {
+			DX12LogDebugJsonFunc("DX12PreSkinningApply",
+				"\"status\":\"abort_cache_hit\",\"section\":\"%S\",\"triggerHash\":\"%08x\",\"tables\":%u,\"descriptors\":%u,\"cbvs\":%zu",
+				section ? section : L"", triggerHash,
+				0u, 0u, cbvs.size());
+		}
+#endif
+		return false;
+	}
+
+	UINT originalVertexCount = 0;
+	UINT overrideVertexCount = 0;
+	bool requiresCountPatch = false;
+	bool canPatchCount = false;
+	for (const DX12CurrentComputeUavBinding &srv : srvs) {
+		const DX12PreSkinSrvReplacementBinding *replacementBinding = nullptr;
+		for (const DX12PreSkinSrvReplacementBinding &binding : srvReplacements) {
+			if (binding.shaderRegister == srv.shaderRegister) {
+				replacementBinding = &binding;
+				break;
+			}
+		}
+		if (!replacementBinding || !srv.hasDescriptor || srv.descriptor.kind != "SRV" ||
+		    srv.descriptor.viewDimension != D3D12_SRV_DIMENSION_BUFFER)
+			continue;
+
+		const UINT64 srvByteWidth = DescriptorViewSize(srv.descriptor);
+		DX12LoadedResource *resource = EnsureLoadedResourceForPreSkin(device, replacementBinding->resource);
+		const UINT elementStride =
+			srv.descriptor.structureByteStride ? srv.descriptor.structureByteStride :
+			(resource ? resource->stride : 0);
+		if (!resource || !elementStride)
+			continue;
+
+		const UINT srvOriginalVertexCount = static_cast<UINT>(
+			(std::min)(srvByteWidth / elementStride, static_cast<UINT64>(UINT_MAX)));
+		const UINT srvOverrideVertexCount = static_cast<UINT>(
+			(std::min)(resource->byteWidth / elementStride, static_cast<UINT64>(UINT_MAX)));
+		if (srvOriginalVertexCount && srvOverrideVertexCount) {
+			if (!originalVertexCount || srvOriginalVertexCount < originalVertexCount)
+				originalVertexCount = srvOriginalVertexCount;
+			if (!overrideVertexCount || srvOverrideVertexCount < overrideVertexCount)
+				overrideVertexCount = srvOverrideVertexCount;
+		}
+	}
+	if (originalVertexCount && overrideVertexCount && originalVertexCount != overrideVertexCount) {
+		requiresCountPatch = true;
+		for (const DX12CurrentComputeUavBinding &cbv : cbvs) {
+			if (CanPatchPreSkinVertexCountCbvLocked(cbv, originalVertexCount)) {
+				canPatchCount = true;
+				break;
+			}
+		}
+		if (!canPatchCount) {
+#if defined(_DEBUG)
+			DX12LogDebugJsonFunc("DX12PreSkinningApply",
+				"\"status\":\"skip_resized_count_unpatchable\",\"section\":\"%S\",\"triggerHash\":\"%08x\",\"old\":%u,\"new\":%u,\"cbvs\":%zu",
+				section ? section : L"", triggerHash,
+				originalVertexCount, overrideVertexCount, cbvs.size());
+#endif
+			if (gPreSkinDescriptorPatchAbortCache.size() > 2048)
+				gPreSkinDescriptorPatchAbortCache.clear();
+			gPreSkinDescriptorPatchAbortCache.insert(abortCacheKey);
+			return false;
+		}
+	}
+
 	UINT totalDescriptors = 0;
 	for (TableCopy &table : tables) {
 		table.tempOffset = totalDescriptors;
@@ -3794,23 +3894,6 @@ static bool ApplyPreSkinDescriptorTablePatchLocked(
 	logStage("tables_built", static_cast<UINT>(tables.size()), totalDescriptors);
 	if (!totalDescriptors) {
 		logStage("no_descriptors", static_cast<UINT>(tables.size()), totalDescriptors);
-		return false;
-	}
-
-	const UINT64 abortCacheKey = MakePreSkinDescriptorPatchAbortCacheKey(
-		config, srvReplacements, srvs, cbvs);
-	if (gPreSkinDescriptorPatchAbortCache.find(abortCacheKey) !=
-	    gPreSkinDescriptorPatchAbortCache.end()) {
-		logStage("abort_cache_hit", static_cast<UINT>(tables.size()), totalDescriptors);
-#if defined(_DEBUG)
-		const LONG hitLogCount = InterlockedIncrement(&gPreSkinDescriptorAbortCacheHitLogCount);
-		if (hitLogCount <= 32) {
-			DX12LogDebugJsonFunc("DX12PreSkinningApply",
-				"\"status\":\"abort_cache_hit\",\"section\":\"%S\",\"triggerHash\":\"%08x\",\"tables\":%zu,\"descriptors\":%u,\"cbvs\":%zu",
-				section ? section : L"", triggerHash,
-				tables.size(), totalDescriptors, cbvs.size());
-		}
-#endif
 		return false;
 	}
 
@@ -3846,8 +3929,6 @@ static bool ApplyPreSkinDescriptorTablePatchLocked(
 	static thread_local std::vector<ID3D12Resource*> tlsTemporaryResources;
 	std::vector<ID3D12Resource*> &temporaryResources = tlsTemporaryResources;
 	temporaryResources.clear();
-	UINT originalVertexCount = 0;
-	UINT overrideVertexCount = 0;
 	bool patchedAnySrv = false;
 	for (const DX12CurrentComputeUavBinding &srv : srvs) {
 		const DX12PreSkinSrvReplacementBinding *replacementBinding = nullptr;
@@ -3926,32 +4007,12 @@ static bool ApplyPreSkinDescriptorTablePatchLocked(
 			LogPreSkinSrvProbe("skip_invalid_stride", &srv, &config, srv.shaderRegister, srvByteWidth, elementStride);
 			continue;
 		}
-		const UINT srvOriginalVertexCount = static_cast<UINT>(
-			(std::min)(srvByteWidth / elementStride, static_cast<UINT64>(UINT_MAX)));
-		const UINT srvOverrideVertexCount = static_cast<UINT>(
-			(std::min)(resource->byteWidth / elementStride, static_cast<UINT64>(UINT_MAX)));
-		if (srvOriginalVertexCount && srvOverrideVertexCount) {
-			if (!originalVertexCount || srvOriginalVertexCount < originalVertexCount)
-				originalVertexCount = srvOriginalVertexCount;
-			if (!overrideVertexCount || srvOverrideVertexCount < overrideVertexCount)
-				overrideVertexCount = srvOverrideVertexCount;
-		}
 		D3D12_CPU_DESCRIPTOR_HANDLE dst = tempCpuBase;
 		dst.ptr += static_cast<SIZE_T>(table->tempOffset + srv.descriptorOffset) * tempIncrement;
 		device->CopyDescriptorsSimple(
 			1, dst, resource->srvCpu,
 			D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 		patchedAnySrv = true;
-		LogPreSkinSrvProbe("patched", &srv, &config, srv.shaderRegister, srvByteWidth, elementStride);
-#if defined(_DEBUG)
-		DX12LogDebugJsonFunc("DX12PreSkinningSrvPatch",
-			"\"status\":\"table_patched\",\"resource\":\"%S\",\"csTRegister\":%u,\"tRegister\":%u,\"root\":%u,\"offset\":%u,\"bytes\":%llu,\"srvBytes\":%llu,\"stride\":%u",
-			resource->name.c_str(), replacementBinding->replaceSlot, srv.shaderRegister,
-			srv.rootParameterIndex, srv.descriptorOffset,
-			static_cast<unsigned long long>(resource->byteWidth),
-			static_cast<unsigned long long>(resource->srvByteWidth),
-			elementStride);
-#endif
 	}
 
 	if (!patchedAnySrv) {
@@ -3963,7 +4024,7 @@ static bool ApplyPreSkinDescriptorTablePatchLocked(
 		return false;
 	}
 
-	if (originalVertexCount && overrideVertexCount && originalVertexCount != overrideVertexCount) {
+	if (requiresCountPatch) {
 		bool patchedCountCbv = false;
 		for (const DX12CurrentComputeUavBinding &cbv : cbvs) {
 			if (!cbv.hasDescriptor || cbv.rootDescriptor || cbv.descriptor.kind != "CBV")
@@ -4251,7 +4312,7 @@ bool DX12ModApplyPreSkinningUavReplacement(
 		*overrideVertexCount = 0;
 	if (dispatchOverride)
 		*dispatchOverride = DX12PreSkinDispatchOverride();
-	if (!commandList || uavs.empty() || gHasTextureOverrides == 0)
+	if (!commandList || gHasTextureOverrides == 0)
 		return false;
 
 	ID3D12Device *device = AcquireModDevice(commandList);
@@ -4277,7 +4338,7 @@ bool DX12ModApplyPreSkinningUavReplacement(
 		uavs, srvs, cbvs, rootConstants, computeShaderHash, &producer, &hashBinding, &hashMatch);
 	if (hashMatched)
 		hasExplicitDispatch = HasExplicitPreSkinDispatchOverride(hashMatch.config);
-	if (!hashMatched || !hasExplicitDispatch) {
+	if ((!hashMatched || !hasExplicitDispatch) && !uavs.empty()) {
 		vlrMatched = FindPreSkinProducerLocked(uavs, computeShaderHash, &producer, &vlr) &&
 			FindReplacementResourceNameForVlrLocked(vlr, &vlrResourceName);
 	}
@@ -4439,8 +4500,6 @@ void DX12ModRestorePreSkinningUavReplacement(ID3D12GraphicsCommandList *commandL
 		if (heapCount &&
 		    (currentCbvSrvUavHeap != restoreCbvSrvUavHeap ||
 		     currentSamplerHeap != state.restoreSamplerHeap)) {
-			// Avoid redundant restore calls because shader-visible heap
-			// switches can be expensive on some D3D12 implementations.
 			commandList->SetDescriptorHeaps(heapCount, heaps);
 		}
 		for (const auto &restore : state.tableRestores)
@@ -4566,7 +4625,7 @@ bool DX12ModNeedsPresentReplacement()
 
 bool DX12ModNeedsPreSkinningUavProbe()
 {
-	return gHasTextureOverrides != 0 && gHasUavHashTextureOverrides != 0;
+	return gHasTextureOverrides != 0 && gHasPreSkinTextureOverrideCandidates != 0;
 }
 
 bool DX12ModHasActivePreSkinTextureOverrides()
@@ -4580,7 +4639,7 @@ bool DX12ModHasActivePreSkinTextureOverrides()
 
 bool DX12ModShouldProbePreSkinningForCs(uint64_t computeShaderHash)
 {
-	if (gHasTextureOverrides == 0 || gHasUavHashTextureOverrides == 0)
+	if (gHasTextureOverrides == 0 || gHasPreSkinTextureOverrideCandidates == 0)
 		return false;
 
 	bool shouldProbe = false;
@@ -4717,9 +4776,6 @@ static bool TextureOverrideMatchesDrawContext(
 	uint32_t vertexCount, uint32_t indexCount, uint32_t instanceCount,
 	uint32_t firstVertex, uint32_t firstIndex, uint32_t firstInstance)
 {
-	// DX11 supports simple comparison operators for draw-context filters.
-	// Keep the hot path to fixed small comparisons so IA replacement checks
-	// stay cheap even when several TextureOverride sections share a hash.
 	if (config.hasMatchVertexCount && !NumericMatchSatisfied(config.matchVertexCount, vertexCount))
 		return false;
 	if (config.hasMatchIndexCount && !NumericMatchSatisfied(config.matchIndexCount, indexCount))
@@ -4859,9 +4915,6 @@ static void BuildDx12IaTextureOverrideIndex(
 			if (TextureOverrideMatchesIaBinding(config, true, 0))
 				(*indexTextureOverrideIndex)[config.hash].push_back(index);
 
-			// DX11 prefilters TextureOverride work by resource binding before
-			// applying draw-context checks. Keep that same shape for DX12 so
-			// command-list recording does not rescan unrelated sections.
 			bool indexedSpecificVertexSlot = false;
 			for (const auto &slotResource : config.vertexBufferResources) {
 				if (!TextureOverrideMatchesIaBinding(config, false, slotResource.first))
@@ -4877,9 +4930,6 @@ static void BuildDx12IaTextureOverrideIndex(
 		}
 	}
 
-	// Merge exact-slot and any-slot VB candidates once at load time. Draw-time
-	// IA matching can then walk an already ordered table without allocating or
-	// sorting while the mod lock is held.
 	for (const auto &bucket : *vertexTextureOverrideIndex) {
 		std::vector<size_t> merged = bucket.second;
 		const uint32_t hash = static_cast<uint32_t>(bucket.first >> 32);
@@ -5065,9 +5115,6 @@ static void BuildDx12CompiledCommandListPlans(
 	for (const auto &item : commandLists) {
 		std::unordered_set<std::wstring> visiting;
 		DX12CompiledCommandListPlan plan;
-		// Compile only direct, unconditional command lists. Lists that need
-		// dynamic TextureOverride lookup keep using the legacy executor so the
-		// compiled path can stay branch-light and preserve mod behavior.
 		CompileCommandListPlanRecursive(
 			item.first, commandLists, compiledPlans, &visiting, &plan);
 	}
@@ -5150,9 +5197,6 @@ static void BuildDx12CompiledTextureOverridePlans(
 					}
 				}
 			}
-			// This is the first DX12 compiled-plan layer: keep only direct IA
-			// replacement actions here, and let recursive command actions keep
-			// using the legacy executor until they have their own compiled form.
 			(*compiledPlans)[sectionIdIt->second] = std::move(plan);
 		}
 	}
@@ -5264,12 +5308,30 @@ static void LogIaReplacementLimited(
 			break;
 	}
 
+	char vbSlotText[256] = {};
+	size_t vbSlotUsed = 0;
+	for (size_t i = 0; i < replacement.vertexBuffers.size(); ++i) {
+		const D3D12_VERTEX_BUFFER_VIEW &view = replacement.vertexBuffers[i];
+		if (!view.BufferLocation || !view.SizeInBytes || !view.StrideInBytes)
+			continue;
+		const UINT slot = replacement.vertexBufferStartSlot + static_cast<UINT>(i);
+		int written = sprintf_s(
+			vbSlotText + vbSlotUsed, sizeof(vbSlotText) - vbSlotUsed,
+			"%s%u:%u:%u", vbSlotUsed ? ";" : "", slot,
+			view.SizeInBytes, view.StrideInBytes);
+		if (written <= 0)
+			break;
+		vbSlotUsed += static_cast<size_t>(written);
+		if (vbSlotUsed >= sizeof(vbSlotText) - 1)
+			break;
+	}
+
 	DX12LogDebugJsonFunc("DX12IaReplacement",
-		"\"matches\":%zu,\"skip\":%s,\"draws\":%zu,\"drawList\":\"%s\",\"hasIB\":%s,\"vbStart\":%u,\"vbCount\":%zu,\"ib\":\"%08x\",\"vertexCount\":%u,\"indexCount\":%u,\"instanceCount\":%u,\"sections\":\"%S\"",
+		"\"matches\":%zu,\"skip\":%s,\"draws\":%zu,\"drawList\":\"%s\",\"hasIB\":%s,\"vbStart\":%u,\"vbCount\":%zu,\"vbSlots\":\"%s\",\"ib\":\"%08x\",\"vertexCount\":%u,\"indexCount\":%u,\"instanceCount\":%u,\"sections\":\"%S\"",
 		overrides.size(), replacement.skip ? "true" : "false", replacement.draws.size(),
 		drawText,
 		replacement.hasIndexBuffer ? "true" : "false",
-		replacement.vertexBufferStartSlot, replacement.vertexBuffers.size(),
+		replacement.vertexBufferStartSlot, replacement.vertexBuffers.size(), vbSlotText,
 		iaState.hasIndexBuffer ? iaState.indexHash : 0,
 		vertexCount, indexCount, instanceCount, sections.c_str());
 #else
@@ -5531,9 +5593,6 @@ void DX12ModBeginFrame()
 	gPreSkinCbvReadCache.clear();
 	gPreSkinSrvNegativeCache.clear();
 	gPreSkinSrvPositiveCache.clear();
-	// Match results are pure INI/IA/hash decisions and their key already
-	// includes reload and pre-skin generations. Keep them across frames so
-	// repeated negative draw matches do not rescan all texture overrides.
 	gIaReplacementPreparedFrameCache.clear();
 	gIaReplacementPrepareCachePresent = DX12GetPresentCount();
 	ReleaseExpiredRetiredLoadedResourcesLocked();
@@ -5549,8 +5608,6 @@ bool DX12ModPreparePresentReplacement(
 		return false;
 
 	const LONG present = DX12GetPresentCount();
-	// This guard runs from draw hooks, so keep the common "already executed for
-	// this frame" case to a plain read before falling back to atomic ownership.
 	if (gPresentCommandListExecutedPresent == present)
 		return false;
 	if (InterlockedCompareExchange(
@@ -5698,11 +5755,6 @@ static void AppendTextureOverridesForHashLocked(
 		    !TextureOverrideHasDrawKind(config, Bunny::CommandListActionKind::DrawIndexed) &&
 		    !TextureOverrideHasDrawKind(config, Bunny::CommandListActionKind::DrawFromCaller) &&
 		    !TextureOverrideHasDrawKind(config, Bunny::CommandListActionKind::DrawIndexedFromCaller)) {
-			// Indexed draws often share secondary VB streams such as texcoords or
-			// blend data across many unrelated meshes. A VB-only override that
-			// carries no IB anchor and no draw-context filters is therefore too
-			// broad to apply on its own in DX12. We only let those sections ride
-			// along after an IB match has already anchored the target mesh.
 			continue;
 		}
 		if (!executeCommands && !candidate.preRuntimeEffect)
@@ -5717,10 +5769,6 @@ static void AppendTextureOverridesForHashLocked(
 				continue;
 		}
 		DX12TriggeredTextureOverride entry;
-		// IA match caches keep a stable pointer into gIaTextureOverrides rather
-		// than copying the parsed TextureOverride. DX11 keeps override lists
-		// resident after ini parsing; mirroring that shape keeps draw-time cache
-		// hits small and avoids repeated string/vector copies.
 		entry.config = &candidate.config;
 		entry.sectionId = candidate.sectionId;
 		entry.postRuntimeEffect = candidate.postRuntimeEffect;
@@ -5885,10 +5933,6 @@ bool DX12ModIaMayHaveTextureOverrideMatch(const DX12IaHashState &iaState, bool i
 	}
 	ReleaseSRWLockShared(&gModLock);
 
-	// This is a draw-hot-path gate. It only consults immutable reload-time
-	// indexes while holding the mod lock. Cache the yes/no candidate answer by
-	// IA hashes so burst frames do not repeat the same shared-lock index scan
-	// for hundreds of equivalent D3D12 draw records.
 	AcquireSRWLockShared(&gModLock);
 	bool mayMatch = false;
 	if (iaState.hasIndexBuffer) {
@@ -6017,6 +6061,7 @@ static void AppendRelatedMeshTextureOverridesLocked(
 
 	bool hasDirectIndexAnchor = false;
 	bool hasPreSkinAnchor = false;
+	bool hasVerifiedResourceAnchor = false;
 	std::unordered_set<std::wstring> namespaces;
 	std::set<std::wstring> tokens;
 	for (const DX12TriggeredTextureOverride &entry : *overrides) {
@@ -6024,21 +6069,20 @@ static void AppendRelatedMeshTextureOverridesLocked(
 			continue;
 		const Bunny::TextureOverrideConfig &config =
 			TriggeredTextureOverrideConfig(entry);
-		// Only let the related-mesh heuristic expand around a draw that matched
-		// an index-buffer override directly, or around an active PreSkin producer
-		// that was verified against the current IA resource. Shared VB hashes
-		// such as texcoord streams can legitimately appear on many unrelated
-		// draws, and expanding those VB-only hits into sibling IB/LOD sections
-		// corrupts the IA bindings for meshes that do not belong to this target.
 		if (entry.indexBuffer)
 			hasDirectIndexAnchor = true;
-		if (entry.preSkinAnchor)
+		if (entry.preSkinAnchor) {
 			hasPreSkinAnchor = true;
+			hasVerifiedResourceAnchor = true;
+		}
+		if (entry.directIaAnchor && (entry.indexBuffer || entry.preSkinResource))
+			hasVerifiedResourceAnchor = true;
 		if (!config.iniNamespace.empty())
 			namespaces.insert(config.iniNamespace);
 		CollectTextureOverrideTokens(config, &tokens);
 	}
-	if ((!hasDirectIndexAnchor && !hasPreSkinAnchor) || tokens.empty())
+	if ((!hasDirectIndexAnchor && !hasPreSkinAnchor && !hasVerifiedResourceAnchor) ||
+	    tokens.empty())
 		return;
 
 	std::vector<const std::vector<size_t>*> indexedLists;
@@ -6055,9 +6099,6 @@ static void AppendRelatedMeshTextureOverridesLocked(
 		indexedPositions.push_back(0);
 	}
 
-	// Token index lists are built in TextureOverride load order. Merge them by
-	// candidate index instead of inserting into std::set so related-mesh
-	// matching keeps DX11-style priority while avoiding per-draw tree nodes.
 	while (!indexedLists.empty()) {
 		size_t index = SIZE_MAX;
 		for (size_t listIndex = 0; listIndex < indexedLists.size(); ++listIndex) {
@@ -6084,9 +6125,6 @@ static void AppendRelatedMeshTextureOverridesLocked(
 		if (!namespaces.empty() &&
 		    namespaces.find(config.iniNamespace) == namespaces.end())
 			continue;
-		// The ini-load index prefilters by token. Reuse pre-parsed candidate
-		// tokens here so related-mesh matching does not rebuild string sets on
-		// the draw path.
 		if (!TextureOverrideSharesAnyToken(candidate.tokens, tokens))
 			continue;
 		if (candidate.sectionId) {
@@ -6463,9 +6501,6 @@ public:
 	{
 		if (!postRuntimeEffect)
 			return;
-		// Post lists are collected during prepare and replayed once after the
-		// original draw. That keeps the expensive override search from running
-		// twice for the same replacement while preserving the DX11-style order.
 		for (const std::wstring &list : config.commandLists.post)
 			mReplacement->AddPostCommandList(list);
 	}
@@ -6495,10 +6530,17 @@ private:
 		if (!mReplacement)
 			return;
 		DX12ModIaReplacement::DrawCall draw;
-		draw.indexed = action.kind == Bunny::CommandListActionKind::DrawIndexed;
-		draw.count = action.args[0];
-		draw.start = action.args[1];
-		draw.baseVertex = draw.indexed ? static_cast<INT>(action.args[2]) : 0;
+		draw.indexed =
+			action.kind == Bunny::CommandListActionKind::DrawIndexed ||
+			action.kind == Bunny::CommandListActionKind::DrawIndexedFromCaller;
+		draw.fromCaller =
+			action.kind == Bunny::CommandListActionKind::DrawFromCaller ||
+			action.kind == Bunny::CommandListActionKind::DrawIndexedFromCaller;
+		if (!draw.fromCaller) {
+			draw.count = action.args[0];
+			draw.start = action.args[1];
+			draw.baseVertex = draw.indexed ? static_cast<INT>(action.args[2]) : 0;
+		}
 		mReplacement->draws.push_back(draw);
 		MarkChanged();
 	}
@@ -6777,11 +6819,6 @@ private:
 			"\"section\":\"%S\",\"depth\":%zu", name.c_str(),
 			mCommandListStack.size());
 #endif
-		// CommandList sections can reference each other through run= and
-		// checktextureoverride=. D3D12 records commands sequentially; allowing
-		// a cycle here multiplies draws/dispatches until the depth cap and can
-		// freeze a frame. Suppress re-entry so one matched draw gets one replay
-		// of each command-list node in the active graph.
 		return false;
 	}
 
@@ -6960,10 +6997,6 @@ bool DX12ModPrepareIaReplacement(
 	if (!hasActivePreSkin && gIaReplacementPrepareCachePresent == present) {
 		auto prepared = gIaReplacementPreparedFrameCache.find(matchCacheKey);
 		if (prepared != gIaReplacementPreparedFrameCache.end()) {
-			// Prepared replacements contain command-list ready GPU views and
-			// optional retained resources, so they are reused only within the
-			// current frame. BeginFrame invalidation keeps GPU VA/resource
-			// lifetime assumptions local while avoiding repeated IA work.
 			*replacement = prepared->second;
 
 			const bool changed = replacement->skip || replacement->hasIndexBuffer ||
@@ -7009,8 +7042,6 @@ bool DX12ModPrepareIaReplacement(
 		iaState, vertexCount, indexCount, instanceCount,
 		firstVertex, firstIndex, overrides);
 
-	// D3D12 draw hooks only record commands; resolve the device after a real
-	// IA match so negative cache hits do not pay a COM GetDevice/AddRef cost.
 	ID3D12Device *device = AcquireModDevice(commandList);
 	if (!device)
 		return false;
@@ -7042,12 +7073,6 @@ bool DX12ModPrepareIaReplacement(
 		(void)removed;
 #endif
 	}
-	// DX11 does NOT validate VB0 ??it lets the game's currently-bound VB0 be
-	// used by replacement draws.  D3D12 command lists are sequential, so the
-	// VB0 set by the game before the draw call is still valid when the
-	// replacement draws execute.  Removing this check matches the DX11
-	// behaviour and fixes the "mod broken" issue where indexed replacement
-	// draws were silently dropped.
 	LogIaReplacementLimited(
 		iaState, vertexCount, indexCount, instanceCount, *replacement, overrides);
 	if (gIaReplacementPreparedFrameCache.size() > 4096)
@@ -7085,10 +7110,6 @@ void DX12ModRunPostIaReplacement(
 			continue;
 		Bunny::CommandListLinks links;
 		links.main.push_back(listName);
-		// Post command lists are now replayed from the prepared replacement so
-		// the same override graph is not traversed twice per draw.
-		// CRITICAL: iterate a snapshot and pass includePost=false so post replay
-		// cannot append to the active replacement while we are consuming it.
 		executor.RunCommandListLinks(links, false);
 	}
 	ReleaseSRWLockExclusive(&gModLock);
@@ -7194,8 +7215,6 @@ bool DX12ModPrepareShaderOverrideReplacement(
 			replacement->skip = true;
 		executor.RunCommandListLinks(config->commandLists, false);
 	}
-	// DX11 behaviour: let the game's currently-bound VB0 be used by
-	// replacement draws ??same rationale as the TextureOverride path above.
 	LogShaderOverrideCommandListLimited("pre", configs, *replacement);
 	ReleaseSRWLockExclusive(&gModLock);
 	device->Release();

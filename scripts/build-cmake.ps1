@@ -1,7 +1,3 @@
-# ============================================================
-# build-cmake.ps1 — CMake 构建脚本
-# 用法: .\scripts\build-cmake.ps1 [-Configuration Debug|Release] [-Platform x64|Win32]
-# ============================================================
 param(
     [ValidateSet('Debug','Release')]
     [string]$Configuration = 'Debug',
@@ -14,7 +10,6 @@ param(
 
 $root = Split-Path -Parent $PSScriptRoot
 
-# 优先使用 PATH 中的 cmake，找不到再 fallback 到硬编码路径
 $cmake = (Get-Command cmake -ErrorAction SilentlyContinue).Source
 if (-not $cmake) {
     $cmake = "C:\tools\cmake\cmake-4.3.2-windows-x86_64\bin\cmake.exe"
@@ -22,13 +17,12 @@ if (-not $cmake) {
 
 $buildDir = "$root\build\cmake-$Platform-$($Configuration.ToLower())"
 
-# 检测 stale cache：如果 CMakeCache.txt 中记录的源目录与当前不匹配，清理 build 目录
 $cacheFile = "$buildDir\CMakeCache.txt"
 if (Test-Path $cacheFile) {
     $cacheContent = Get-Content $cacheFile -Raw -ErrorAction SilentlyContinue
     $cachedSourceDir = if ($cacheContent -match 'CMAKE_HOME_DIRECTORY:INTERNAL=(.+)') { $Matches[1].Trim() } else { '' }
     $currentSourceDir = (Resolve-Path $root).Path.TrimEnd('\')
-    $cachedSourceDir = $cachedSourceDir.TrimEnd('\')
+    $cachedSourceDir = $cachedSourceDir.Replace('/', '\').TrimEnd('\')
     if ($cachedSourceDir -and $cachedSourceDir -ne $currentSourceDir) {
         Write-Host "Stale CMake cache detected (was: $cachedSourceDir, now: $currentSourceDir)" -ForegroundColor Yellow
         Write-Host "Cleaning build directory: $buildDir" -ForegroundColor Yellow
@@ -36,14 +30,12 @@ if (Test-Path $cacheFile) {
     }
 }
 
-# 检查 CMake
 if (-not (Test-Path $cmake)) {
     Write-Host "ERROR: CMake not found at $cmake" -ForegroundColor Red
     Write-Host "Please install CMake and ensure it is in your system PATH." -ForegroundColor Red
     exit 1
 }
 
-# VS 检测：优先 vswhere → fallback 常见路径
 $vcvars = $null
 $vswherePath = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
 
@@ -58,7 +50,6 @@ if (Test-Path $vswherePath) {
     }
 }
 
-# vswhere 没找到则扫描常见 VS 安装目录
 if (-not $vcvars -or -not (Test-Path $vcvars)) {
     $candidateRoots = @(
         "C:\Program Files\Microsoft Visual Studio"
@@ -96,7 +87,6 @@ if (-not $vcvars -or -not (Test-Path $vcvars)) {
 
 Write-Host "INFO: Using Visual Studio vcvars: $vcvars" -ForegroundColor Green
 
-# 生成临时批处理文件（避免 cmd /c 的 & 转义问题）
 $tempDir = $env:TEMP
 if (-not $tempDir) {
     $tempDir = [System.IO.Path]::GetTempPath()
@@ -114,7 +104,6 @@ if errorlevel 1 exit /b 1
 "$cmake" --build "$buildDir" --target DirectX12 D3DCompiler_46 dxgi DirectX11
 "@
 
-# CMake 配置
 Write-Host "===== Configuring CMake ($Configuration|$Platform) =====" -ForegroundColor Cyan
 if (-not $tmpScript) {
     Write-Host "ERROR: Cannot determine temp directory for build script." -ForegroundColor Red
@@ -129,7 +118,6 @@ if ($exitCode -ne 0) {
     exit $exitCode
 }
 
-# 复制产物到统一输出目录
 $outDir = if ($Platform -eq 'x64') { "$root\x64\$Configuration" } else { "$root\x32\$Configuration" }
 if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Path $outDir -Force | Out-Null }
 

@@ -155,7 +155,7 @@ struct DX12ModIaReplacement
 		UINT count = 0;
 		UINT start = 0;
 		INT baseVertex = 0;
-		bool fromCaller = false;  // draw = from_caller — use original draw params
+		bool fromCaller = false;
 	};
 	struct DispatchCall
 	{
