@@ -1,5 +1,6 @@
 #include "DXGIHooks.h"
 
+#include <d3d12.h>
 #include <dxgi1_4.h>
 
 #include "DX12BindingTracker.h"
@@ -102,6 +103,27 @@ static void LogPresentStage(const char *api, const char *stage, IDXGISwapChain *
 	DX12LogDebugJsonFuncFlush("DX12PresentStage",
 		"\"api\":\"%s\",\"stage\":\"%s\",\"present\":%ld,\"swapchain\":\"%p\",\"hr\":\"0x%lx\"",
 		api ? api : "", stage ? stage : "", DX12GetPresentCount(), swapChain, hr);
+}
+
+static void LogPresentDeviceRemovedReason(const char *api, IDXGISwapChain *swapChain, HRESULT presentHr)
+{
+	if (SUCCEEDED(presentHr) || !swapChain)
+		return;
+
+	ID3D12Device *device = nullptr;
+	HRESULT queryHr = swapChain->GetDevice(IID_PPV_ARGS(&device));
+	if (FAILED(queryHr) || !device) {
+		DX12LogDebugJsonFuncFlush("DX12DeviceRemoved",
+			"\"api\":\"%s\",\"present\":%ld,\"swapchain\":\"%p\",\"presentHr\":\"0x%lx\",\"queryHr\":\"0x%lx\"",
+			api ? api : "", DX12GetPresentCount(), swapChain, presentHr, queryHr);
+		return;
+	}
+
+	const HRESULT reason = device->GetDeviceRemovedReason();
+	DX12LogDebugJsonFuncFlush("DX12DeviceRemoved",
+		"\"api\":\"%s\",\"present\":%ld,\"swapchain\":\"%p\",\"presentHr\":\"0x%lx\",\"reason\":\"0x%lx\"",
+		api ? api : "", DX12GetPresentCount(), swapChain, presentHr, reason);
+	device->Release();
 }
 
 static void HookSwapChain(IDXGISwapChain *swapChain)
@@ -325,6 +347,7 @@ static HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain *swapChain, UINT s
 	LogPresentStage("Present", "beforeOriginal", swapChain);
 	HRESULT hr = original(swapChain, syncInterval, flags);
 	LogPresentStage("Present", "afterOriginal", swapChain, hr);
+	LogPresentDeviceRemovedReason("Present", swapChain, hr);
 	DX12IncrementPresentCount();
 	DX12FlushLog();
 	LogPresentStage("Present", "beforeModBeginFrame", swapChain, hr);
@@ -363,13 +386,13 @@ static HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain *swapChain, UINT s
 		DX12ShaderDumpBeginCapture();
 	} else if (DX12FrameAnalysisIsCapturing() || DX12ShaderDumpIsCapturingFrame() ||
 	           DX12ModHasActiveTextureOverrides()) {
-		// Binding tracking is needed by an active subsystem â€?reset per-frame
+		// Binding tracking is needed by an active subsystem; reset per-frame
 		// state.  When nothing is active we skip this entirely so the binding
 		// tracker stays idle and does not consume CPU every frame.
 		DX12BindingBeginFrame();
 		LogPresentStage("Present", "afterBindingBeginFrame", swapChain, hr);
 	}
-	// else: no capture, no hunt, no texture overrides â€?skip binding frame
+	// else: no capture, no hunt, no texture overrides; skip binding frame
 	//       reset to save CPU on the Present path.
 	DX12Profiling::EndFrame();
 	LogPresentStage("Present", "end", swapChain, hr);
@@ -389,6 +412,7 @@ static HRESULT STDMETHODCALLTYPE HookedPresent1(
 	LogPresentStage("Present1", "beforeOriginal", swapChain);
 	HRESULT hr = original(swapChain, syncInterval, flags, presentParameters);
 	LogPresentStage("Present1", "afterOriginal", swapChain, hr);
+	LogPresentDeviceRemovedReason("Present1", swapChain, hr);
 	DX12IncrementPresentCount();
 	DX12FlushLog();
 	LogPresentStage("Present1", "beforeModBeginFrame", swapChain, hr);
@@ -425,13 +449,13 @@ static HRESULT STDMETHODCALLTYPE HookedPresent1(
 		DX12ShaderDumpBeginCapture();
 	} else if (DX12FrameAnalysisIsCapturing() || DX12ShaderDumpIsCapturingFrame() ||
 	           DX12ModHasActiveTextureOverrides()) {
-		// Binding tracking is needed by an active subsystem â€?reset per-frame
+		// Binding tracking is needed by an active subsystem; reset per-frame
 		// state.  When nothing is active we skip this entirely so the binding
 		// tracker stays idle and does not consume CPU every frame.
 		DX12BindingBeginFrame();
 		LogPresentStage("Present1", "afterBindingBeginFrame", swapChain, hr);
 	}
-	// else: no capture, no hunt, no texture overrides â€?skip binding frame
+	// else: no capture, no hunt, no texture overrides; skip binding frame
 	//       reset to save CPU on the Present path.
 	DX12Profiling::EndFrame();
 	LogPresentStage("Present1", "end", swapChain, hr);
