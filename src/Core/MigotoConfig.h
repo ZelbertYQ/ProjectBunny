@@ -15,13 +15,13 @@ struct LoaderConfig {
 	bool checkVersion = true;
 	bool requireAdmin = false;
 	bool waitForTarget = true;
-	int hookProc = 5; // WH_CBT without pulling windows.h into the public header.
+	int hookProc = 5;
 	int delay = 0;
 };
 
 struct RuntimeConfig {
 	bool dx12ProxyMode = true;
-	bool dx12SafeMode = true;
+	bool dx12SafeMode = false;
 	bool enableOverlay = false;
 	std::wstring configPath;
 };
@@ -50,4 +50,4 @@ private:
 
 std::wstring FindDefaultConfigPath(HINSTANCE module);
 
-} // namespace Bunny
+}

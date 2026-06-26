@@ -27,7 +27,7 @@
       "CopyToTargetDirectoryPath": "D:\\Dev\\ssmt4\\src-tauri\\resources\\DX12\\",
       "CopyToTargetDirectory": true,
       "LaunchGame": false,
-      "Notice": "此配置用于编译后自动复制 d3d12.dll 到本地 DX12 资源目录"
+      "Notice": "Copies d3d12.dll to the local DX12 resource directory after build."
     },
     {
       "GameId": "004",
@@ -40,7 +40,7 @@
       ],
       "CopyToTargetDirectory": true,
       "LaunchGame": false,
-      "Notice": "此配置用于编译后同时复制 d3d12.dll 到本地 DX12 资源目录和 ZZMIDX12 测试目录"
+      "Notice": "Copies d3d12.dll to the local DX12 resource directory and the ZZMIDX12 test directory after build."
     }
   ]
 }

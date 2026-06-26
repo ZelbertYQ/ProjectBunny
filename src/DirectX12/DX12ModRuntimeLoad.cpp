@@ -786,6 +786,20 @@ bool DX12ModRuntimeLoad(
 	std::unordered_map<std::wstring, std::vector<std::wstring>> explicitMatchCsResourceSections;
 	std::vector<std::wstring> vlrResourceCandidates;
 	std::unordered_set<uint64_t> preSkinMatchCsHashes;
+	bool hasPreSkinVlrWithoutMatchCs = false;
+	size_t loadedShaderOverrideCount = 0;
+	size_t loadedTextureOverrideCount = 0;
+	size_t loadedResourceCount = 0;
+	size_t loadedCommandListCount = 0;
+	bool safeModeActive = false;
+	bool activeShaderOverrides = false;
+	bool activeTextureOverrides = false;
+	bool preSkinProbeEnabled = false;
+	bool loadedPreSkinTextureOverrideCandidates = false;
+	bool loadedPresentRuntimeEffect = false;
+	std::wstring loadedShaderFixesDir;
+	std::vector<DX12VertexLimitRaiseConfig> loadedVertexLimitRaiseConfigs;
+	UINT64 loadedGeneration = 0;
 	
 	SetBasePaths(configPath);
 	if (!Bunny::LoadMigotoIniWithIncludes(configPath, &iniLoad)) {
@@ -811,7 +825,7 @@ bool DX12ModRuntimeLoad(
 	bool hasPreSkinTextureOverrideCandidates =
 		HasPreSkinTextureOverrideCandidates(
 			textureOverrides, &preSkinMatchCsHashes,
-			&gHasPreSkinVlrWithoutMatchCs,
+			&hasPreSkinVlrWithoutMatchCs,
 			nullptr);
 	BuildDx12RuntimeEffectIndexes(
 		textureOverrides, commandLists,
@@ -879,6 +893,7 @@ bool DX12ModRuntimeLoad(
 	gExplicitMatchCsResourceSections.swap(explicitMatchCsResourceSections);
 	gVertexLimitRaiseConfigs.swap(vertexLimitRaiseConfigs);
 	gPreSkinMatchCsHashes.swap(preSkinMatchCsHashes);
+	gHasPreSkinVlrWithoutMatchCs = hasPreSkinVlrWithoutMatchCs;
 	ReleaseLoadedResourcesLocked();
 	gIaSkipCache.clear();
 	gIaTextureCandidateCache.clear();
@@ -909,6 +924,20 @@ bool DX12ModRuntimeLoad(
 	InterlockedExchange(&gHasPresentRuntimeEffect, presentRuntimeEffect ? 1 : 0);
 	gLoaded = true;
 	++gReloadGeneration;
+	loadedShaderOverrideCount = gShaderOverrides.size();
+	loadedTextureOverrideCount = gTextureOverrides.size();
+	loadedResourceCount = gResources.size();
+	loadedCommandListCount = gCommandLists.size();
+	loadedPreSkinTextureOverrideCandidates = hasPreSkinTextureOverrideCandidates;
+	loadedPresentRuntimeEffect = presentRuntimeEffect;
+	safeModeActive = InterlockedCompareExchange(&gDx12SafeMode, 0, 0) != 0;
+	activeShaderOverrides = !safeModeActive && !gShaderOverrides.empty();
+	activeTextureOverrides = !safeModeActive && !gTextureOverrides.empty();
+	preSkinProbeEnabled =
+		!safeModeActive && !gTextureOverrides.empty() && hasPreSkinTextureOverrideCandidates;
+	loadedShaderFixesDir = gShaderFixesDir;
+	loadedVertexLimitRaiseConfigs = gVertexLimitRaiseConfigs;
+	loadedGeneration = gReloadGeneration;
 	for (auto &item : gPsoRecords) {
 		if (item.second.replacement) {
 			item.second.replacement->Release();
@@ -921,11 +950,25 @@ bool DX12ModRuntimeLoad(
 	ClearPreSkinRuntimeState();
 
 	DX12LogJsonFunc("DX12ModRuntime",
-		"\"status\":\"loaded\",\"path\":\"%S\",\"iniFiles\":%zu,\"errors\":%zu,\"warnings\":%zu,\"shaderOverrides\":%zu,\"textureOverrides\":%zu,\"resources\":%zu,\"commandLists\":%zu,\"shaderFixes\":\"%S\",\"generation\":%llu",
+		"\"status\":\"loaded\",\"path\":\"%S\",\"iniFiles\":%zu,\"errors\":%zu,\"warnings\":%zu,\"shaderOverrides\":%zu,\"textureOverrides\":%zu,\"resources\":%zu,\"commandLists\":%zu,\"safeMode\":%s,\"activeShaderOverrides\":%s,\"activeTextureOverrides\":%s,\"preSkinCandidates\":%s,\"preSkinProbeEnabled\":%s,\"presentRuntimeEffect\":%s,\"shaderFixes\":\"%S\",\"generation\":%llu",
 		configPath ? configPath : L"", iniLoad.loadedFiles.size(), iniLoad.errors.size(), iniLoad.warnings.size(),
-		gShaderOverrides.size(), gTextureOverrides.size(), gResources.size(), gCommandLists.size(),
-		gShaderFixesDir.c_str(),
-		static_cast<unsigned long long>(gReloadGeneration));
+		loadedShaderOverrideCount, loadedTextureOverrideCount, loadedResourceCount, loadedCommandListCount,
+		safeModeActive ? "true" : "false",
+		activeShaderOverrides ? "true" : "false",
+		activeTextureOverrides ? "true" : "false",
+		loadedPreSkinTextureOverrideCandidates ? "true" : "false",
+		preSkinProbeEnabled ? "true" : "false",
+		loadedPresentRuntimeEffect ? "true" : "false",
+		loadedShaderFixesDir.c_str(),
+		static_cast<unsigned long long>(loadedGeneration));
+	if (safeModeActive &&
+	    (loadedShaderOverrideCount || loadedTextureOverrideCount || loadedPresentRuntimeEffect)) {
+		DX12LogJsonFunc("DX12ModRuntimeDisabled",
+			"\"reason\":\"safe_mode\",\"shaderOverrides\":%zu,\"textureOverrides\":%zu,\"preSkinCandidates\":%s,\"presentRuntimeEffect\":%s",
+			loadedShaderOverrideCount, loadedTextureOverrideCount,
+			loadedPreSkinTextureOverrideCandidates ? "true" : "false",
+			loadedPresentRuntimeEffect ? "true" : "false");
+	}
 	for (const std::wstring &loadedFile : iniLoad.loadedFiles) {
 		DX12LogJsonFunc("DX12ModRuntimeIni",
 			"\"status\":\"loaded\",\"path\":\"%S\"", loadedFile.c_str());
@@ -938,7 +981,7 @@ bool DX12ModRuntimeLoad(
 		DX12LogJsonFunc("DX12ModRuntimeIni",
 			"\"status\":\"warning\",\"message\":\"%S\"", warning.c_str());
 	}
-	for (const DX12VertexLimitRaiseConfig &vlr : gVertexLimitRaiseConfigs) {
+	for (const DX12VertexLimitRaiseConfig &vlr : loadedVertexLimitRaiseConfigs) {
 		DX12LogJsonFunc("DX12VertexLimitRaiseConfig",
 			"\"section\":\"%S\",\"overrideByteStride\":%u,\"overrideVertexCount\":%u,\"overrideByteWidth\":%llu,\"uavByteStride\":%u,\"overrideNumElements\":%llu",
 			vlr.section.c_str(), vlr.overrideByteStride, vlr.overrideVertexCount,
@@ -952,7 +995,7 @@ bool DX12ModRuntimeLoad(
 				iniLoad.errors.size());
 		} else if (iniLoad.warnings.empty()) {
 			swprintf_s(text, L"F10 DX12 mod config reloaded: %zu ini, %zu TextureOverride, %zu Resource",
-				iniLoad.loadedFiles.size(), gTextureOverrides.size(), gResources.size());
+				iniLoad.loadedFiles.size(), loadedTextureOverrideCount, loadedResourceCount);
 		} else {
 			swprintf_s(text, L"F10 DX12 mod config reloaded with %zu warning(s)",
 				iniLoad.warnings.size());
