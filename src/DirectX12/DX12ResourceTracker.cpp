@@ -1774,6 +1774,26 @@ uint32_t DX12HashBufferView(
 	return hash;
 }
 
+uint32_t DX12HashIaBufferView(
+	UINT64 gpuVirtualAddress, UINT64 size, UINT stride, UINT format, UINT slot)
+{
+	if (!gpuVirtualAddress || !size)
+		return 0;
+
+	DX12BufferResourceSummary summary = {};
+	const bool resolved = DX12ResolveBufferResourceByGpuVa(gpuVirtualAddress, size, &summary);
+	if (!resolved)
+		return DX12HashBufferView(nullptr, gpuVirtualAddress, size, stride, format, slot);
+
+	uint32_t hash = DX12HashBufferResourceView(&summary, gpuVirtualAddress, size);
+	const uint32_t tag = MakeTrackerFourCC('D', 'X', 'I', 'A');
+	hash = HashBytes(hash, &tag, sizeof(tag));
+	hash = HashBytes(hash, &stride, sizeof(stride));
+	hash = HashBytes(hash, &format, sizeof(format));
+	hash = HashBytes(hash, &slot, sizeof(slot));
+	return hash;
+}
+
 uint32_t DX12HashDescriptorBufferView(
 	const DX12DescriptorSummary *descriptor, UINT64 fallbackGpuVirtualAddress,
 	UINT64 fallbackSize)

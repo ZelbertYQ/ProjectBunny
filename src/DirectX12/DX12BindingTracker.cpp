@@ -121,18 +121,18 @@ struct BindingEvent
 // (https://learn.microsoft.com/samples/microsoft/directx-graphics-samples/d3d12-multithreading-sample-win32/).
 //
 // Two distinct concerns previously shared ONE global lock:
-//   * gCommandLists  â€” per-command-list binding state, written on EVERY
+//   * gCommandLists  â€?per-command-list binding state, written on EVERY
 //                      vertex/index/descriptor/root binding call. With texture
 //                      overrides active this is the steady-state gameplay hot
 //                      path and was serializing all recording threads.
-//   * gEvents         â€” the frame-analysis event log, only touched when capture
+//   * gEvents         â€?the frame-analysis event log, only touched when capture
 //                      (frame analysis / shader dump / hunt) is active, i.e.
 //                      NOT during normal gameplay.
 //
 // We split them:
 //   * gCommandLists is sharded by command-list pointer, so threads recording
 //     different lists never contend. A list is recorded by a single thread, so
-//     its own shard sees consistent state without cross-thread locking â€” the
+//     its own shard sees consistent state without cross-thread locking â€?the
 //     same property DX11 gets for free by storing state on the context object.
 //   * gEvents keeps a single dedicated lock; it is off the gameplay hot path.
 namespace {
@@ -1217,8 +1217,7 @@ static const FlatBufferRow *GetOrAddBufferRow(
 
 	DX12BufferResourceSummary resource;
 	const bool resolved = DX12ResolveBufferResourceByGpuVa(gpuVa, size, &resource);
-	const uint32_t huntHash = DX12HashBufferView(
-		resolved ? &resource : nullptr, gpuVa, size, stride, format, slot);
+	const uint32_t huntHash = DX12HashIaBufferView(gpuVa, size, stride, format, slot);
 	std::string key = MakeBufferKey(role, huntHash);
 	auto found = rowByKey->find(key);
 	if (found != rowByKey->end() && found->second < rows->size())
@@ -1323,8 +1322,7 @@ static void AddFrameIaBufferRow(
 	row.slot = slot;
 	row.format = format;
 	row.resolved = DX12ResolveBufferResourceByGpuVa(gpuVa, size, &row.resource);
-	row.huntHash = DX12HashBufferView(
-		row.resolved ? &row.resource : nullptr, gpuVa, size, stride, format, slot);
+	row.huntHash = DX12HashIaBufferView(gpuVa, size, stride, format, slot);
 	rows->push_back(row);
 }
 

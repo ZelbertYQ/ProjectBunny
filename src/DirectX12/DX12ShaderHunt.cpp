@@ -96,7 +96,7 @@ static HuntIaBuffer MakeIaView(
 	buffer.stride = stride;
 	buffer.format = format;
 	buffer.valid = true;
-	buffer.hash = DX12HashBufferView(nullptr, gpuVa, size, stride, format, slot);
+	buffer.hash = DX12HashIaBufferView(gpuVa, size, stride, format, slot);
 	return buffer;
 }
 static UINT64 SelectedHashLocked(const StageSelection &stage)
