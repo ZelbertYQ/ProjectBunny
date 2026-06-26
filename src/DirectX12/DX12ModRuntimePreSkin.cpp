@@ -1803,18 +1803,16 @@ void DX12ModRestorePreSkinningUavReplacement(ID3D12GraphicsCommandList *commandL
 			heaps[heapCount++] = restoreCbvSrvUavHeap;
 		if (state.restoreSamplerHeap)
 			heaps[heapCount++] = state.restoreSamplerHeap;
-		ID3D12DescriptorHeap *currentCbvSrvUavHeap = nullptr;
-		ID3D12DescriptorHeap *currentSamplerHeap = nullptr;
-		DX12BindingGetCurrentDescriptorHeaps(
-			commandList, &currentCbvSrvUavHeap, &currentSamplerHeap);
-		if (heapCount &&
-		    (currentCbvSrvUavHeap != restoreCbvSrvUavHeap ||
-		     currentSamplerHeap != state.restoreSamplerHeap)) {
-			commandList->SetDescriptorHeaps(heapCount, heaps);
-		}
-		for (const auto &restore : state.tableRestores)
+		commandList->SetDescriptorHeaps(heapCount, heapCount ? heaps : nullptr);
+		DX12CommandListRuntimeSetDescriptorHeaps(
+			commandList, restoreCbvSrvUavHeap, state.restoreSamplerHeap);
+		DX12BindingSetDescriptorHeaps(commandList, heapCount, heapCount ? heaps : nullptr);
+		for (const auto &restore : state.tableRestores) {
 			commandList->SetComputeRootDescriptorTable(
 				restore.rootParameterIndex, restore.originalTable);
+			DX12BindingSetComputeRootDescriptorTable(
+				commandList, restore.rootParameterIndex, restore.originalTable);
+		}
 		state.patchHeap = nullptr;
 	}
 	for (ID3D12Resource *resource : state.temporaryResources) {
@@ -1853,7 +1851,9 @@ void DX12ModRestorePreSkinningUavReplacement(ID3D12GraphicsCommandList *commandL
 
 #if defined(_DEBUG)
 	DX12LogDebugJsonFunc("DX12PreSkinningApply",
-		"\"status\":\"post_dispatch\",\"root\":%u,\"bytes\":%llu,\"stride\":%u,\"restoredDescriptors\":%zu,\"restoredTables\":%zu",
+		"\"status\":\"post_dispatch\",\"section\":\"%S\",\"present\":%ld,\"root\":%u,\"bytes\":%llu,\"stride\":%u,\"restoredDescriptors\":%zu,\"restoredTables\":%zu",
+		state.activeConfig.section.c_str(),
+		DX12GetPresentCount(),
 		state.rootParameterIndex,
 		static_cast<unsigned long long>(state.byteWidth), state.stride,
 		restoredDescriptorCount, restoredTableCount);
