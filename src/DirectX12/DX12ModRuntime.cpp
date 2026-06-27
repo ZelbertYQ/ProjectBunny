@@ -5,6 +5,7 @@
 #include <stdio.h>
 
 #include <algorithm>
+#include <array>
 #include <cwctype>
 #include <map>
 #include <set>
@@ -206,6 +207,7 @@ struct DX12VertexLimitRaiseConfig
 };
 static std::vector<DX12VertexLimitRaiseConfig> gVertexLimitRaiseConfigs;
 static UINT64 gReloadGeneration = 1;
+static volatile UINT64 gShaderOverrideNegativeCacheGeneration = 1;
 static volatile LONG gHasVertexLimitRaiseConfigs = 0;
 static volatile LONG gHasShaderOverrides = 0;
 static volatile LONG gHasShaderRegexes = 0;
@@ -303,6 +305,47 @@ static std::unordered_map<
 	DX12TextureOverrideLookupCacheEntry,
 	DX12TextureOverrideLookupCacheKeyHash> gTextureOverrideLookupCache;
 static constexpr size_t MaxTextureOverrideLookupCacheEntries = 8192;
+
+struct DX12ShaderOverrideNegativeCacheKey
+{
+	UINT64 reloadGeneration = 0;
+	UINT64 preSkinGeneration = 0;
+	ID3D12PipelineState *pipelineState = nullptr;
+	uint32_t vertexCount = 0;
+	uint32_t indexCount = 0;
+	uint32_t instanceCount = 0;
+	uint32_t firstVertex = 0;
+	uint32_t firstIndex = 0;
+	bool hasIndexBuffer = false;
+	uint32_t indexHash = 0;
+	std::array<uint32_t, 32> vertexHashes = {};
+
+	bool operator==(const DX12ShaderOverrideNegativeCacheKey &other) const
+	{
+		return reloadGeneration == other.reloadGeneration &&
+			preSkinGeneration == other.preSkinGeneration &&
+			pipelineState == other.pipelineState &&
+			vertexCount == other.vertexCount &&
+			indexCount == other.indexCount &&
+			instanceCount == other.instanceCount &&
+			firstVertex == other.firstVertex &&
+			firstIndex == other.firstIndex &&
+			hasIndexBuffer == other.hasIndexBuffer &&
+			indexHash == other.indexHash &&
+			vertexHashes == other.vertexHashes;
+	}
+};
+
+struct DX12ShaderOverrideNegativeCacheEntry
+{
+	bool valid = false;
+	UINT64 hash = 0;
+	DX12ShaderOverrideNegativeCacheKey key;
+};
+
+static constexpr size_t ShaderOverrideNegativeCacheMaxEntries = 8192;
+static std::unordered_map<UINT64, DX12ShaderOverrideNegativeCacheKey> gShaderOverrideNegativeCache;
+static SRWLOCK gShaderOverrideNegativeCacheLock = SRWLOCK_INIT;
 
 struct DX12ComputeUavProducer
 {

@@ -130,6 +130,79 @@ static void LogShaderOverrideCommandListSnapshotLimited(
 #endif
 }
 
+static bool ShaderOverrideNegativeCacheEnabled()
+{
+	return DX12ModHasActiveShaderOverrides() &&
+		InterlockedCompareExchange(&gHasShaderDescriptorTextureOverrideTriggers, 0, 0) == 0;
+}
+
+static DX12ShaderOverrideNegativeCacheKey MakeShaderOverrideNegativeCacheKey(
+	ID3D12PipelineState *pipelineState,
+	const DX12IaHashState &iaState,
+	uint32_t vertexCount, uint32_t indexCount, uint32_t instanceCount,
+	uint32_t firstVertex, uint32_t firstIndex)
+{
+	DX12ShaderOverrideNegativeCacheKey key = {};
+	key.reloadGeneration = static_cast<UINT64>(InterlockedCompareExchange64(
+		reinterpret_cast<volatile LONG64*>(&gShaderOverrideNegativeCacheGeneration), 0, 0));
+	key.preSkinGeneration = CurrentPreSkinActiveGeneration();
+	key.pipelineState = pipelineState;
+	key.vertexCount = vertexCount;
+	key.indexCount = indexCount;
+	key.instanceCount = instanceCount;
+	key.firstVertex = firstVertex;
+	key.firstIndex = firstIndex;
+	key.hasIndexBuffer = iaState.hasIndexBuffer;
+	key.indexHash = iaState.hasIndexBuffer ? iaState.indexHash : 0;
+	for (const DX12IaBufferHash &buffer : iaState.vertexBuffers) {
+		if (buffer.slot < key.vertexHashes.size())
+			key.vertexHashes[buffer.slot] = buffer.hash;
+	}
+	return key;
+}
+
+static UINT64 HashShaderOverrideNegativeCacheKey(
+	const DX12ShaderOverrideNegativeCacheKey &key)
+{
+	UINT64 hash = 0x28cb7a8d31e7b4c5ull;
+	hash = HashCombine64(hash, key.reloadGeneration);
+	hash = HashCombine64(hash, key.preSkinGeneration);
+	hash = HashCombine64(hash, reinterpret_cast<uintptr_t>(key.pipelineState));
+	hash = HashCombine64(hash, key.vertexCount);
+	hash = HashCombine64(hash, key.indexCount);
+	hash = HashCombine64(hash, key.instanceCount);
+	hash = HashCombine64(hash, key.firstVertex);
+	hash = HashCombine64(hash, key.firstIndex);
+	hash = HashCombine64(hash, key.hasIndexBuffer ? 1 : 0);
+	hash = HashCombine64(hash, key.indexHash);
+	for (uint32_t vertexHash : key.vertexHashes)
+		hash = HashCombine64(hash, vertexHash);
+	return hash ? hash : 1;
+}
+
+static bool TryFindShaderOverrideNegativeCache(
+	const DX12ShaderOverrideNegativeCacheKey &key)
+{
+	const UINT64 hash = HashShaderOverrideNegativeCacheKey(key);
+	AcquireSRWLockShared(&gShaderOverrideNegativeCacheLock);
+	auto it = gShaderOverrideNegativeCache.find(hash);
+	const bool found = it != gShaderOverrideNegativeCache.end() &&
+		it->second == key;
+	ReleaseSRWLockShared(&gShaderOverrideNegativeCacheLock);
+	return found;
+}
+
+static void StoreShaderOverrideNegativeCache(
+	const DX12ShaderOverrideNegativeCacheKey &key)
+{
+	const UINT64 hash = HashShaderOverrideNegativeCacheKey(key);
+	AcquireSRWLockExclusive(&gShaderOverrideNegativeCacheLock);
+	if (gShaderOverrideNegativeCache.size() >= ShaderOverrideNegativeCacheMaxEntries)
+		gShaderOverrideNegativeCache.clear();
+	gShaderOverrideNegativeCache[hash] = key;
+	ReleaseSRWLockExclusive(&gShaderOverrideNegativeCacheLock);
+}
+
 static bool TryFindCachedShaderOverridesForPsoLocked(
 	ID3D12PipelineState *pipelineState, bool dispatch,
 	std::vector<const Bunny::ShaderOverrideConfig*> *configs)
@@ -215,6 +288,16 @@ bool DX12ModPrepareShaderOverrideReplacement(
 	if (!commandList || !pipelineState || !DX12ModHasActiveShaderOverrides())
 		return false;
 
+	const bool negativeCacheEnabled = ShaderOverrideNegativeCacheEnabled();
+	DX12ShaderOverrideNegativeCacheKey negativeCacheKey = {};
+	if (negativeCacheEnabled) {
+		negativeCacheKey = MakeShaderOverrideNegativeCacheKey(
+			pipelineState, iaState,
+			vertexCount, indexCount, instanceCount, firstVertex, firstIndex);
+		if (TryFindShaderOverrideNegativeCache(negativeCacheKey))
+			return false;
+	}
+
 	ID3D12Device *device = AcquireModDevice(commandList);
 	if (!device)
 		return false;
@@ -260,6 +343,9 @@ bool DX12ModPrepareShaderOverrideReplacement(
 	bool changed = executor.Changed() || replacement->skip || !replacement->draws.empty() ||
 		!replacement->dispatches.empty();
 	device->Release();
+
+	if (negativeCacheEnabled && !changed && pendingResourceViews.empty())
+		StoreShaderOverrideNegativeCache(negativeCacheKey);
 
 	return changed;
 }

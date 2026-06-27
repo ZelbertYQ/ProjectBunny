@@ -1220,6 +1220,9 @@ bool DX12ModRuntimeLoad(
 	InterlockedExchange(&gHasPresentRuntimeEffect, presentRuntimeEffect ? 1 : 0);
 	gLoaded = true;
 	++gReloadGeneration;
+	InterlockedExchange64(
+		reinterpret_cast<volatile LONG64*>(&gShaderOverrideNegativeCacheGeneration),
+		static_cast<LONG64>(gReloadGeneration));
 	loadedShaderOverrideCount = gShaderOverrides.size();
 	loadedShaderRegexCount = gShaderRegexes.size();
 	loadedTextureOverrideCount = gTextureOverrides.size();
