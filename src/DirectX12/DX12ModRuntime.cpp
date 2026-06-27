@@ -218,6 +218,11 @@ static volatile LONG gHasShaderTriggeredTextureOverrides = 0;
 static volatile LONG gHasPresentRuntimeEffect = 0;
 static bool gHasPreSkinVlrWithoutMatchCs = false;
 static std::unordered_set<uint64_t> gPreSkinMatchCsHashes;
+
+// Adaptive idle counter: after N consecutive frames with zero active pre-skin
+// overrides, binding tracking can be skipped to save ~1500+ lock acquisitions/frame.
+static volatile LONG gPreSkinBindingIdleFrames = 0;
+static constexpr LONG kPreSkinBindingIdleMax = 60;
 struct DX12PreSkinUavMatchCacheEntry
 {
 	uint64_t computeShaderHash = 0;

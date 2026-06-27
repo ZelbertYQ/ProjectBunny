@@ -105,6 +105,20 @@ void DX12CommandListCaptureDescriptorHeaps(
 		DX12BindingRecordStateEvent(commandList, "set_heaps");
 }
 
+// Overload that accepts pre-parsed heap pointers — avoids re-iterating heaps/GetDesc().
+void DX12CommandListCaptureDescriptorHeaps(
+	ID3D12GraphicsCommandList *commandList,
+	ID3D12DescriptorHeap *cbvSrvUavHeap,
+	ID3D12DescriptorHeap *samplerHeap)
+{
+	if (!DX12CommandListCaptureShouldTrackBindingsCached(commandList))
+		return;
+
+	const bool changed = DX12BindingSetDescriptorHeaps(commandList, cbvSrvUavHeap, samplerHeap);
+	if (changed && DX12CommandListCaptureShouldRecordBindingEventsCached(commandList))
+		DX12BindingRecordStateEvent(commandList, "set_heaps");
+}
+
 void DX12CommandListCaptureComputeRootSignature(
 	ID3D12GraphicsCommandList *commandList, ID3D12RootSignature *rootSignature)
 {

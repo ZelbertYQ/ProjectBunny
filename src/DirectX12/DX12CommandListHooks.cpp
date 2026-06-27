@@ -634,6 +634,23 @@ static DX12IaReplacementExecutorCallbacks MakeIaReplacementCallbacks(
 	return callbacks;
 }
 
+// Thread-local cache for IaReplacementCallbacks: avoids 6x vtable lookup per draw.
+struct ThreadLocalIaCallbacksCache {
+	ID3D12GraphicsCommandList *commandList = nullptr;
+	DX12IaReplacementExecutorCallbacks callbacks;
+};
+static thread_local ThreadLocalIaCallbacksCache tIaCallbacksCache;
+
+static const DX12IaReplacementExecutorCallbacks &GetCachedIaReplacementCallbacks(
+	ID3D12GraphicsCommandList *commandList)
+{
+	if (tIaCallbacksCache.commandList == commandList)
+		return tIaCallbacksCache.callbacks;
+	tIaCallbacksCache.commandList = commandList;
+	tIaCallbacksCache.callbacks = MakeIaReplacementCallbacks(commandList);
+	return tIaCallbacksCache.callbacks;
+}
+
 static void RegisterCommandList(IUnknown *commandList, ID3D12PipelineState *initialState)
 {
 	if (!commandList)
@@ -986,7 +1003,8 @@ static void STDMETHODCALLTYPE HookedDrawInstanced(
 	}
 	DX12_PROFILE_SCOPE(DrawInstanced);
 
-	InterlockedIncrement(&gPerFrameTotalDraws);
+	if (DX12Profiling::ShouldCollectCounters() || DX12DrawHookFlowNeedsModWork())
+		InterlockedIncrement(&gPerFrameTotalDraws);
 
 	if (DX12IaReplacementIsExecutingInternalDraw()) {
 		DX12_PROFILE_FAST_FORWARD();
@@ -1028,9 +1046,10 @@ static void STDMETHODCALLTYPE HookedDrawInstanced(
 				startVertexLocation, startInstanceLocation);
 		return;
 	}
+	// Cache runtime state ptr once — GetStatePtrFast TLS-caches after first call
 	const DX12CommandListRuntimeState *runtimeState = DX12CommandListRuntimeGetStatePtr(commandList);
-	const DX12IaReplacementExecutorCallbacks iaCallbacks =
-		MakeIaReplacementCallbacks(commandList);
+	const DX12IaReplacementExecutorCallbacks &iaCallbacks =
+		GetCachedIaReplacementCallbacks(commandList);
 	DX12IaDrawInvocation draw = {};
 	draw.vertexCount = vertexCountPerInstance;
 	draw.instanceCount = instanceCount;
@@ -1051,7 +1070,8 @@ static void STDMETHODCALLTYPE HookedDrawIndexedInstanced(
 	}
 	DX12_PROFILE_SCOPE(DrawIndexedInstanced);
 
-	InterlockedIncrement(&gPerFrameTotalDraws);
+	if (DX12Profiling::ShouldCollectCounters() || DX12DrawHookFlowNeedsModWork())
+		InterlockedIncrement(&gPerFrameTotalDraws);
 
 	if (DX12IaReplacementIsExecutingInternalDraw()) {
 		DX12_PROFILE_FAST_FORWARD();
@@ -1097,9 +1117,10 @@ static void STDMETHODCALLTYPE HookedDrawIndexedInstanced(
 				startIndexLocation, baseVertexLocation, startInstanceLocation);
 		return;
 	}
+	// Cache runtime state ptr once — GetStatePtrFast TLS-caches after first call
 	const DX12CommandListRuntimeState *runtimeState = DX12CommandListRuntimeGetStatePtr(commandList);
-	const DX12IaReplacementExecutorCallbacks iaCallbacks =
-		MakeIaReplacementCallbacks(commandList);
+	const DX12IaReplacementExecutorCallbacks &iaCallbacks =
+		GetCachedIaReplacementCallbacks(commandList);
 	DX12IaDrawInvocation draw = {};
 	draw.indexed = true;
 	draw.indexCount = indexCountPerInstance;
@@ -1120,7 +1141,10 @@ static void STDMETHODCALLTYPE HookedDispatch(
 		return;
 	}
 	DX12_PROFILE_SCOPE(Dispatch);
-	InterlockedIncrement(&gPerFrameTotalDispatches);
+	if (DX12Profiling::ShouldCollectCounters() ||
+	    DX12ModHasActiveShaderOverrides() || DX12ModNeedsPreSkinningUavProbe())
+		InterlockedIncrement(&gPerFrameTotalDispatches);
+
 	if (DX12IsInternalReplay()) {
 		PFN_DISPATCH original = DX12_CL_ORIG(commandList, 14, PFN_DISPATCH, Dispatch);
 		if (original)
@@ -1157,13 +1181,14 @@ static void STDMETHODCALLTYPE HookedDispatch(
 		return;
 	}
 	if (!DX12ModHasActiveShaderOverrides() && DX12ModNeedsPreSkinningUavProbe()) {
-		ID3D12PipelineState *pipelineState =
+		const DX12CommandListRuntimeState *runtimeState = DX12CommandListRuntimeGetStatePtr(commandList);
+		ID3D12PipelineState *pipelineState = runtimeState ? runtimeState->pipelineState :
 			DX12CommandListRuntimeGetPipelineState(commandList);
 		DX12PsoShaderInfo shaderInfo = {};
 		const bool hasConfiguredPreSkinCs =
 			pipelineState &&
 			DX12GetPipelineStateShaderInfo(pipelineState, &shaderInfo) &&
-			shaderInfo.hasCS &&
+			 shaderInfo.hasCS &&
 			DX12ModShouldTrackPreSkinBindingsForCs(shaderInfo.cs);
 		if (!hasConfiguredPreSkinCs) {
 			DX12_PROFILE_FAST_FORWARD();
@@ -1171,6 +1196,10 @@ static void STDMETHODCALLTYPE HookedDispatch(
 				original(commandList, threadGroupCountX, threadGroupCountY, threadGroupCountZ);
 			return;
 		}
+		DX12DispatchHookFlowExecute(
+			commandList, threadGroupCountX, threadGroupCountY, threadGroupCountZ,
+			runtimeState, original);
+		return;
 	}
 	const DX12CommandListRuntimeState *runtimeState = DX12CommandListRuntimeGetStatePtr(commandList);
 	DX12DispatchHookFlowExecute(

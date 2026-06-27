@@ -124,6 +124,17 @@ extern volatile LONG64 gGlobalDrawSerial;
 extern volatile LONG64 gGlobalDispatchSerial;
 extern UINT64 gDroppedEvents;
 
+// Per-thread read cache for binding tracker: avoids SRWLOCK on repeated identical calls.
+// Key insight: D3D12 command lists are single-threaded, so TLS cache is safe.
+struct BindingTlsTableCache {
+	ID3D12GraphicsCommandList *cl = nullptr;
+	UINT64 gpuHandle[MaxRootParameters] = {};
+};
+struct BindingTlsDescriptorCache {
+	ID3D12GraphicsCommandList *cl = nullptr;
+	UINT64 address[MaxRootParameters] = {};
+};
+
 inline BindingShard &BindingShardFor(ID3D12GraphicsCommandList *commandList)
 {
 	uintptr_t key = reinterpret_cast<uintptr_t>(commandList);

@@ -41,7 +41,8 @@ static void STDMETHODCALLTYPE HookedSetDescriptorHeaps(
 	}
 
 	LogDX12Call("ID3D12GraphicsCommandList::SetDescriptorHeaps", commandList, " count=%u", count);
-	DX12CommandListCaptureDescriptorHeaps(commandList, count, heaps);
+	// Use pre-parsed heap pointers — avoids second GetDesc() iteration loop
+	DX12CommandListCaptureDescriptorHeaps(commandList, cbvSrvUav, sampler);
 	DX12CommandListRuntimeBumpComputeBindingSerial(commandList);
 	PFN_SET_DESCRIPTOR_HEAPS original =
 		DX12_CL_ORIG(commandList, 28, PFN_SET_DESCRIPTOR_HEAPS, SetDescriptorHeaps);

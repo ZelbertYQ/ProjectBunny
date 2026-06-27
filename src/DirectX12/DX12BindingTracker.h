@@ -124,6 +124,11 @@ void DX12BindingRecordStateEvent(ID3D12GraphicsCommandList *commandList, const c
 bool DX12BindingSetDescriptorHeaps(
 	ID3D12GraphicsCommandList *commandList, UINT count,
 	ID3D12DescriptorHeap *const *heaps);
+// Overload with pre-parsed heap pointers — avoids re-iterating to call GetDesc().
+bool DX12BindingSetDescriptorHeaps(
+	ID3D12GraphicsCommandList *commandList,
+	ID3D12DescriptorHeap *cbvSrvUavHeap,
+	ID3D12DescriptorHeap *samplerHeap);
 void DX12BindingSetGraphicsRootDescriptorTable(
 	ID3D12GraphicsCommandList *commandList, UINT rootParameterIndex,
 	D3D12_GPU_DESCRIPTOR_HANDLE baseDescriptor);

@@ -83,6 +83,15 @@ void DX12ModBeginFrame()
 	std::vector<DX12RetiredLoadedResource> expired;
 	std::vector<ID3D12Resource*> releasePreSkinResources;
 	AcquireSRWLockExclusive(&gPreSkinLock);
+	// Track idle frames: if no active pre-skin overrides existed last frame, count idle.
+	// If pre-skin was actively matching, reset idle counter immediately.
+	if (gActivePreSkinTextureOverrides.empty()) {
+		LONG idle = InterlockedIncrement(&gPreSkinBindingIdleFrames);
+		if (idle > kPreSkinBindingIdleMax)
+			InterlockedExchange(&gPreSkinBindingIdleFrames, kPreSkinBindingIdleMax);
+	} else {
+		InterlockedExchange(&gPreSkinBindingIdleFrames, 0);
+	}
 	ClearActivePreSkinTextureOverridesLocked(&releasePreSkinResources);
 	gPreSkinCbvReadCache.clear();
 	gPreSkinSrvNegativeCache.clear();

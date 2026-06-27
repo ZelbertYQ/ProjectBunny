@@ -93,6 +93,16 @@ bool DX12ModNeedsPreSkinningUavProbe()
 		InterlockedCompareExchange(&gDx12SafeMode, 0, 0) == 0;
 }
 
+// Returns true when pre-skin binding tracking is actively needed.
+// Automatically disables after kPreSkinBindingIdleMax consecutive frames
+// with zero active overrides, saving ~1500+ lock acquisitions per frame.
+bool DX12ModNeedsPreSkinningBindingTracking()
+{
+	if (!DX12ModHasActivePreSkinTextureOverrides())
+		return gPreSkinBindingIdleFrames < kPreSkinBindingIdleMax;
+	return true;
+}
+
 bool DX12ModHasActivePreSkinTextureOverrides()
 {
 	if (InterlockedCompareExchange(&gDx12SafeMode, 0, 0) != 0)

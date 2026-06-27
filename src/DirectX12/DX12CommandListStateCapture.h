@@ -18,6 +18,10 @@ ID3D12PipelineState *DX12CommandListCapturePipelineState(
 	ID3D12GraphicsCommandList *commandList, ID3D12PipelineState *pipelineState);
 void DX12CommandListCaptureDescriptorHeaps(
 	ID3D12GraphicsCommandList *commandList, UINT count, ID3D12DescriptorHeap *const *heaps);
+void DX12CommandListCaptureDescriptorHeaps(
+	ID3D12GraphicsCommandList *commandList,
+	ID3D12DescriptorHeap *cbvSrvUavHeap,
+	ID3D12DescriptorHeap *samplerHeap);
 void DX12CommandListCaptureComputeRootSignature(
 	ID3D12GraphicsCommandList *commandList, ID3D12RootSignature *rootSignature);
 void DX12CommandListCaptureGraphicsRootSignature(

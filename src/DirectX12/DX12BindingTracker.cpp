@@ -14,6 +14,13 @@ UINT64 gEventSerial = 0;
 volatile LONG64 gGlobalDrawSerial = 0;
 volatile LONG64 gGlobalDispatchSerial = 0;
 UINT64 gDroppedEvents = 0;
+
+// Per-thread TLS read caches for binding tracker: avoid SRWLOCK on repeated identical calls.
+static thread_local BindingTlsTableCache tlsGraphicsTableCache;
+static thread_local BindingTlsTableCache tlsComputeTableCache;
+static thread_local BindingTlsDescriptorCache tlsGraphicsDescCache;
+static thread_local BindingTlsDescriptorCache tlsComputeDescCache;
+
 static const DX12RootParameterSummary *FindRootParameter(
 	const DX12RootSignatureSummary &rootSignature, UINT rootParameterIndex);
 static bool GetRootSignatureForEvent(
@@ -87,6 +94,12 @@ void DX12BindingResetCommandList(
 	state = CommandListBindingState();
 	state.pipelineState = initialState;
 	ReleaseSRWLockExclusive(&shard.lock);
+
+	// Invalidate per-thread TLS read caches for this command list
+	tlsGraphicsTableCache.cl = nullptr;
+	tlsComputeTableCache.cl = nullptr;
+	tlsGraphicsDescCache.cl = nullptr;
+	tlsComputeDescCache.cl = nullptr;
 }
 
 void DX12BindingSetPipelineState(
@@ -170,6 +183,19 @@ bool DX12BindingSetDescriptorHeaps(
 			samplerHeap = heap;
 	}
 
+	return DX12BindingSetDescriptorHeaps(commandList, cbvSrvUavHeap, samplerHeap);
+}
+
+// Overload that accepts pre-parsed heap pointers — avoids the second GetDesc() loop
+// when the caller has already resolved the heap types.
+bool DX12BindingSetDescriptorHeaps(
+	ID3D12GraphicsCommandList *commandList,
+	ID3D12DescriptorHeap *cbvSrvUavHeap,
+	ID3D12DescriptorHeap *samplerHeap)
+{
+	if (!commandList)
+		return false;
+
 	BindingShard &shard = BindingShardFor(commandList);
 	AcquireSRWLockExclusive(&shard.lock);
 	CommandListBindingState &state = shard.states[commandList];
@@ -191,6 +217,10 @@ void DX12BindingSetGraphicsRootDescriptorTable(
 {
 	if (!commandList || rootParameterIndex >= MaxRootParameters)
 		return;
+	// TLS read cache: skip SRWLOCK entirely if same value
+	if (tlsGraphicsTableCache.cl == commandList &&
+		tlsGraphicsTableCache.gpuHandle[rootParameterIndex] == baseDescriptor.ptr)
+		return;
 
 	BindingShard &shard = BindingShardFor(commandList);
 	AcquireSRWLockExclusive(&shard.lock);
@@ -203,6 +233,9 @@ void DX12BindingSetGraphicsRootDescriptorTable(
 	table.rootParameterIndex = rootParameterIndex;
 	table.baseDescriptor = baseDescriptor;
 	ReleaseSRWLockExclusive(&shard.lock);
+	// Update TLS cache
+	tlsGraphicsTableCache.cl = commandList;
+	tlsGraphicsTableCache.gpuHandle[rootParameterIndex] = baseDescriptor.ptr;
 }
 
 void DX12BindingSetComputeRootDescriptorTable(
@@ -210,6 +243,10 @@ void DX12BindingSetComputeRootDescriptorTable(
 	D3D12_GPU_DESCRIPTOR_HANDLE baseDescriptor)
 {
 	if (!commandList || rootParameterIndex >= MaxRootParameters)
+		return;
+	// TLS read cache: skip SRWLOCK entirely if same value
+	if (tlsComputeTableCache.cl == commandList &&
+		tlsComputeTableCache.gpuHandle[rootParameterIndex] == baseDescriptor.ptr)
 		return;
 
 	BindingShard &shard = BindingShardFor(commandList);
@@ -224,6 +261,9 @@ void DX12BindingSetComputeRootDescriptorTable(
 	table.baseDescriptor = baseDescriptor;
 	++shard.states[commandList].computeBindingSerial;
 	ReleaseSRWLockExclusive(&shard.lock);
+	// Update TLS cache
+	tlsComputeTableCache.cl = commandList;
+	tlsComputeTableCache.gpuHandle[rootParameterIndex] = baseDescriptor.ptr;
 }
 
 void DX12BindingSetPrimitiveTopology(
@@ -671,6 +711,10 @@ void DX12BindingSetGraphicsRootDescriptor(
 {
 	if (!commandList || rootParameterIndex >= MaxRootParameters)
 		return;
+	// TLS read cache: skip SRWLOCK if same value
+	if (tlsGraphicsDescCache.cl == commandList &&
+		tlsGraphicsDescCache.address[rootParameterIndex] == address)
+		return;
 
 	BindingShard &shard = BindingShardFor(commandList);
 	AcquireSRWLockExclusive(&shard.lock);
@@ -680,6 +724,9 @@ void DX12BindingSetGraphicsRootDescriptor(
 	descriptor.type = type;
 	descriptor.address = address;
 	ReleaseSRWLockExclusive(&shard.lock);
+	// Update TLS cache
+	tlsGraphicsDescCache.cl = commandList;
+	tlsGraphicsDescCache.address[rootParameterIndex] = address;
 }
 
 void DX12BindingSetComputeRootDescriptor(
@@ -687,6 +734,10 @@ void DX12BindingSetComputeRootDescriptor(
 	D3D12_ROOT_PARAMETER_TYPE type, D3D12_GPU_VIRTUAL_ADDRESS address)
 {
 	if (!commandList || rootParameterIndex >= MaxRootParameters)
+		return;
+	// TLS read cache: skip SRWLOCK if same value
+	if (tlsComputeDescCache.cl == commandList &&
+		tlsComputeDescCache.address[rootParameterIndex] == address)
 		return;
 
 	BindingShard &shard = BindingShardFor(commandList);
@@ -698,6 +749,9 @@ void DX12BindingSetComputeRootDescriptor(
 	descriptor.address = address;
 	++shard.states[commandList].computeBindingSerial;
 	ReleaseSRWLockExclusive(&shard.lock);
+	// Update TLS cache
+	tlsComputeDescCache.cl = commandList;
+	tlsComputeDescCache.address[rootParameterIndex] = address;
 }
 
 static void SetRootConstantsLocked(

@@ -109,7 +109,7 @@ void DX12HotPathUpdate()
 		DX12ModNeedsPreSkinningUavProbe();
 	const bool needsBindingState =
 		needsHeavyTracking ||
-		DX12ModNeedsPreSkinningUavProbe();
+		DX12ModNeedsPreSkinningBindingTracking();
 	const bool needsGraphicsBindingState =
 		needsHeavyTracking ||
 		DX12ModNeedsShaderDescriptorTracking();
@@ -127,18 +127,6 @@ void DX12HotPathUpdate()
 		(needsHeavyTracking || DX12ModNeedsPreSkinningUavProbe()) ? 1 : 0);
 }
 
-bool DX12ShouldLogHookCall(const char *api)
-{
-#if defined(_DEBUG)
-	if (!api || !api[0] || DX12IsInternalReplay() || !DX12DiagnosticsLoggingEnabled())
-		return false;
-	return true;
-#else
-	(void)api;
-	return false;
-#endif
-}
-
 static bool DX12EnvironmentFlagEnabled(const wchar_t *name)
 {
 	wchar_t value[32] = {};
@@ -150,6 +138,40 @@ static bool DX12EnvironmentFlagEnabled(const wchar_t *name)
 		value[0] == L't' || value[0] == L'T';
 }
 
+static bool DX12HookCallLoggingEnabled()
+{
+#if defined(_DEBUG)
+	// Per-hook-call logging: OFF by default (too expensive to log every API call).
+	// Enable with MIGOTO_DX12_DIAGNOSTIC_LOGS=1 env var.
+	return DX12EnvironmentFlagEnabled(L"MIGOTO_DX12_DIAGNOSTIC_LOGS");
+#else
+	return false;
+#endif
+}
+
+bool DX12DiagnosticsLoggingEnabled()
+{
+#if defined(_DEBUG)
+	// Debug builds: frame stats & profiling counters always active
+	return true;
+#else
+	return false;
+#endif
+}
+
+bool DX12ShouldLogHookCall(const char *api)
+{
+#if defined(_DEBUG)
+	// Per-hook-call logging is gated separately — too expensive to log every call
+	if (!api || !api[0] || DX12IsInternalReplay() || !DX12HookCallLoggingEnabled())
+		return false;
+	return true;
+#else
+	(void)api;
+	return false;
+#endif
+}
+
 void DX12SetModule(HINSTANCE module)
 {
 	gModule = module;
@@ -158,18 +180,6 @@ void DX12SetModule(HINSTANCE module)
 HINSTANCE DX12GetModule()
 {
 	return gModule;
-}
-
-bool DX12DiagnosticsLoggingEnabled()
-{
-	static std::atomic<int> enabled{ -1 };
-	int cached = enabled.load(std::memory_order_acquire);
-	if (cached >= 0)
-		return cached != 0;
-	int detected = DX12EnvironmentFlagEnabled(L"MIGOTO_DX12_DIAGNOSTIC_LOGS") ? 1 : 0;
-	int expected = -1;
-	enabled.compare_exchange_strong(expected, detected, std::memory_order_acq_rel);
-	return enabled.load(std::memory_order_acquire) != 0;
 }
 
 static DWORD WINAPI DX12LogThreadProc(void*)
