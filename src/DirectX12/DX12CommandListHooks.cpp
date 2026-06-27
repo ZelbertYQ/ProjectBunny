@@ -213,6 +213,9 @@ static volatile LONG gIaReplacementSummaryDraws = 0;
 static volatile LONG gIaReplacementSummaryIndexedDraws = 0;
 static volatile LONG gIaReplacementSummaryDispatches = 0;
 
+volatile LONG gPerFrameTotalDraws = 0;
+volatile LONG gPerFrameTotalDispatches = 0;
+
 static SRWLOCK gHookedVTableLock = SRWLOCK_INIT;
 static std::unordered_set<void*> gHookedCommandListVTables;
 static SRWLOCK gRegisteredListLock = SRWLOCK_INIT;
@@ -802,6 +805,11 @@ static HRESULT STDMETHODCALLTYPE HookedResetCommandList(
 	ID3D12GraphicsCommandList *commandList, ID3D12CommandAllocator *allocator,
 	ID3D12PipelineState *initialState)
 {
+	if (gDX12HotPathSkipAll) {
+		if (gOrigResetCommandList)
+			return gOrigResetCommandList(commandList, allocator, initialState);
+		return E_FAIL;
+	}
 	DX12_PROFILE_SCOPE(ResetCommandList);
 	LogDX12Call("ID3D12GraphicsCommandList::Reset", commandList,
 		" allocator=%p initialPso=%p", allocator, initialState);
@@ -840,16 +848,15 @@ static void STDMETHODCALLTYPE HookedDrawInstanced(
 	ID3D12GraphicsCommandList *commandList, UINT vertexCountPerInstance, UINT instanceCount,
 	UINT startVertexLocation, UINT startInstanceLocation)
 {
-	DX12_PROFILE_SCOPE(DrawInstanced);
-
 	if (gDX12HotPathSkipAll) {
-		DX12_PROFILE_FAST_FORWARD();
-		PFN_DRAW_INSTANCED original = DX12_CL_ORIG(commandList, 12, PFN_DRAW_INSTANCED, DrawInstanced);
-		if (original)
-			original(commandList, vertexCountPerInstance, instanceCount,
+		if (gOrigDrawInstanced)
+			gOrigDrawInstanced(commandList, vertexCountPerInstance, instanceCount,
 				startVertexLocation, startInstanceLocation);
 		return;
 	}
+	DX12_PROFILE_SCOPE(DrawInstanced);
+
+	InterlockedIncrement(&gPerFrameTotalDraws);
 
 	if (DX12IaReplacementIsExecutingInternalDraw()) {
 		DX12_PROFILE_FAST_FORWARD();
@@ -906,17 +913,15 @@ static void STDMETHODCALLTYPE HookedDrawIndexedInstanced(
 	ID3D12GraphicsCommandList *commandList, UINT indexCountPerInstance, UINT instanceCount,
 	UINT startIndexLocation, INT baseVertexLocation, UINT startInstanceLocation)
 {
-	DX12_PROFILE_SCOPE(DrawIndexedInstanced);
-
 	if (gDX12HotPathSkipAll) {
-		DX12_PROFILE_FAST_FORWARD();
-		PFN_DRAW_INDEXED_INSTANCED original =
-			DX12_CL_ORIG(commandList, 13, PFN_DRAW_INDEXED_INSTANCED, DrawIndexedInstanced);
-		if (original)
-			original(commandList, indexCountPerInstance, instanceCount,
+		if (gOrigDrawIndexedInstanced)
+			gOrigDrawIndexedInstanced(commandList, indexCountPerInstance, instanceCount,
 				startIndexLocation, baseVertexLocation, startInstanceLocation);
 		return;
 	}
+	DX12_PROFILE_SCOPE(DrawIndexedInstanced);
+
+	InterlockedIncrement(&gPerFrameTotalDraws);
 
 	if (DX12IaReplacementIsExecutingInternalDraw()) {
 		DX12_PROFILE_FAST_FORWARD();
@@ -979,16 +984,14 @@ static void STDMETHODCALLTYPE HookedDispatch(
 	ID3D12GraphicsCommandList *commandList, UINT threadGroupCountX,
 	UINT threadGroupCountY, UINT threadGroupCountZ)
 {
-	DX12_PROFILE_SCOPE(Dispatch);
-	if (DX12IsInternalReplay()) {
-		PFN_DISPATCH original = DX12_CL_ORIG(commandList, 14, PFN_DISPATCH, Dispatch);
-		if (original)
-			original(commandList, threadGroupCountX, threadGroupCountY, threadGroupCountZ);
+	if (gDX12HotPathSkipAll) {
+		if (gOrigDispatch)
+			gOrigDispatch(commandList, threadGroupCountX, threadGroupCountY, threadGroupCountZ);
 		return;
 	}
-
-	if (gDX12HotPathSkipAll) {
-		DX12_PROFILE_FAST_FORWARD();
+	DX12_PROFILE_SCOPE(Dispatch);
+	InterlockedIncrement(&gPerFrameTotalDispatches);
+	if (DX12IsInternalReplay()) {
 		PFN_DISPATCH original = DX12_CL_ORIG(commandList, 14, PFN_DISPATCH, Dispatch);
 		if (original)
 			original(commandList, threadGroupCountX, threadGroupCountY, threadGroupCountZ);
@@ -1099,6 +1102,11 @@ static void STDMETHODCALLTYPE HookedResolveSubresource(
 static void STDMETHODCALLTYPE HookedIASetPrimitiveTopology(
 	ID3D12GraphicsCommandList *commandList, D3D12_PRIMITIVE_TOPOLOGY topology)
 {
+	if (gDX12HotPathSkipAll) {
+		if (gOrigIASetPrimitiveTopology)
+			gOrigIASetPrimitiveTopology(commandList, topology);
+		return;
+	}
 	DX12_PROFILE_SCOPE(IASetPrimitiveTopology);
 
 	if (!gDX12HotPathSkipBindings) {
@@ -1146,15 +1154,12 @@ static void STDMETHODCALLTYPE HookedOMSetStencilRef(ID3D12GraphicsCommandList *c
 static void STDMETHODCALLTYPE HookedSetPipelineState(
 	ID3D12GraphicsCommandList *commandList, ID3D12PipelineState *pipelineState)
 {
-	DX12_PROFILE_SCOPE(SetPipelineState);
-
 	if (gDX12HotPathSkipAll) {
-		DX12_PROFILE_FAST_FORWARD();
-		PFN_SET_PIPELINE_STATE original = DX12_CL_ORIG(commandList, 25, PFN_SET_PIPELINE_STATE, SetPipelineState);
-		if (original)
-			original(commandList, pipelineState);
+		if (gOrigSetPipelineState)
+			gOrigSetPipelineState(commandList, pipelineState);
 		return;
 	}
+	DX12_PROFILE_SCOPE(SetPipelineState);
 
 	if (gDX12HotPathSkipBindings && DX12HuntIsEnabled() &&
 	    !DX12ModHasActiveShaderOverrides()) {
@@ -1180,6 +1185,11 @@ static void STDMETHODCALLTYPE HookedResourceBarrier(
 	ID3D12GraphicsCommandList *commandList, UINT numBarriers,
 	const D3D12_RESOURCE_BARRIER *barriers)
 {
+	if (gDX12HotPathSkipAll) {
+		if (gOrigResourceBarrier)
+			gOrigResourceBarrier(commandList, numBarriers, barriers);
+		return;
+	}
 	DX12_PROFILE_SCOPE(ResourceBarrier);
 	if (DX12IsInternalReplay()) {
 		PFN_RESOURCE_BARRIER original = DX12_CL_ORIG(commandList, 26, PFN_RESOURCE_BARRIER, ResourceBarrier);
@@ -1218,6 +1228,11 @@ static void STDMETHODCALLTYPE HookedExecuteBundle(
 static void STDMETHODCALLTYPE HookedSetGraphicsRootUnorderedAccessView(
 	ID3D12GraphicsCommandList *commandList, UINT rootParameterIndex, D3D12_GPU_VIRTUAL_ADDRESS address)
 {
+	if (gDX12HotPathSkipAll) {
+		if (gOrigSetGraphicsRootUnorderedAccessView)
+			gOrigSetGraphicsRootUnorderedAccessView(commandList, rootParameterIndex, address);
+		return;
+	}
 	DX12_PROFILE_SCOPE(SetGraphicsRootUnorderedAccessView);
 
 	if (gDX12HotPathSkipGraphicsBindings) {
@@ -1242,6 +1257,11 @@ static void STDMETHODCALLTYPE HookedSetGraphicsRootUnorderedAccessView(
 static void STDMETHODCALLTYPE HookedIASetIndexBuffer(
 	ID3D12GraphicsCommandList *commandList, const D3D12_INDEX_BUFFER_VIEW *view)
 {
+	if (gDX12HotPathSkipAll) {
+		if (gOrigIASetIndexBuffer)
+			gOrigIASetIndexBuffer(commandList, view);
+		return;
+	}
 	DX12_PROFILE_SCOPE(IASetIndexBuffer);
 
 	if (!gDX12HotPathSkipBindings) {
@@ -1270,6 +1290,11 @@ static void STDMETHODCALLTYPE HookedIASetVertexBuffers(
 	ID3D12GraphicsCommandList *commandList, UINT startSlot, UINT count,
 	const D3D12_VERTEX_BUFFER_VIEW *views)
 {
+	if (gDX12HotPathSkipAll) {
+		if (gOrigIASetVertexBuffers)
+			gOrigIASetVertexBuffers(commandList, startSlot, count, views);
+		return;
+	}
 	DX12_PROFILE_SCOPE(IASetVertexBuffers);
 
 	if (!gDX12HotPathSkipBindings) {

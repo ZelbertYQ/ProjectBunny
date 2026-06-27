@@ -366,6 +366,14 @@ static HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain *swapChain, UINT s
 {
 	LogDXGIHookCall("IDXGISwapChain::Present", swapChain);
 	DX12_PROFILE_SCOPE(Present);
+
+	{
+		const LONG draws = InterlockedExchange(&gPerFrameTotalDraws, 0);
+		const LONG dispatches = InterlockedExchange(&gPerFrameTotalDispatches, 0);
+		DX12LogJsonFunc("DX12PerFrameCounters",
+			"\"draws\":%ld,\"dispatches\":%ld", draws, dispatches);
+	}
+
 	DX12PollInput();
 	DX12Profiling::BeginFrame();
 	const bool dumpFrame = DX12FrameAnalysisEndCapture();
@@ -421,6 +429,14 @@ static HRESULT STDMETHODCALLTYPE HookedPresent1(
 	IDXGISwapChain1 *swapChain, UINT syncInterval, UINT flags, const DXGI_PRESENT_PARAMETERS *presentParameters)
 {
 	LogDXGIHookCall("IDXGISwapChain1::Present1", swapChain);
+
+	{
+		const LONG draws = InterlockedExchange(&gPerFrameTotalDraws, 0);
+		const LONG dispatches = InterlockedExchange(&gPerFrameTotalDispatches, 0);
+		DX12LogJsonFunc("DX12PerFrameCounters",
+			"\"draws\":%ld,\"dispatches\":%ld", draws, dispatches);
+	}
+
 	DX12PollInput();
 	DX12Profiling::BeginFrame();
 	const bool dumpFrame = DX12FrameAnalysisEndCapture();

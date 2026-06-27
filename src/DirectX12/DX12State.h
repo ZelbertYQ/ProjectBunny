@@ -48,6 +48,9 @@ extern volatile LONG gDX12HotPathSkipBindings;
 extern volatile LONG gDX12HotPathSkipGraphicsBindings;
 extern volatile LONG gDX12HotPathTrackResourceMetadata;
 
+extern volatile LONG gPerFrameTotalDraws;
+extern volatile LONG gPerFrameTotalDispatches;
+
 void DX12HotPathUpdate();
 bool DX12ShouldLogHookCall(const char *api);
 
