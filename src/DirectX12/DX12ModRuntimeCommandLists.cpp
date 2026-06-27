@@ -218,11 +218,11 @@ private:
 
 	bool FindTargetTextureOverride(
 		const Bunny::CommandListTarget &target,
-		Bunny::TextureOverrideConfig *config) const
+		std::vector<Bunny::TextureOverrideConfig> *configs) const
 	{
 		return ::FindTargetTextureOverride(
 			mCommandList, mIaState, target, mVertexCount, mIndexCount, mInstanceCount,
-			mFirstVertex, mFirstIndex, config);
+			mFirstVertex, mFirstIndex, configs);
 	}
 
 	void RunTextureOverride(
@@ -338,9 +338,11 @@ private:
 				break;
 			}
 			case Bunny::CommandListActionKind::CheckTextureOverride: {
-				Bunny::TextureOverrideConfig config;
-				if (FindTargetTextureOverride(action.target, &config))
-					RunTextureOverride(config, depth + 1, includePost);
+				std::vector<Bunny::TextureOverrideConfig> configs;
+				if (FindTargetTextureOverride(action.target, &configs)) {
+					for (const Bunny::TextureOverrideConfig &config : configs)
+						RunTextureOverride(config, depth + 1, includePost);
+				}
 				break;
 			}
 			case Bunny::CommandListActionKind::HandlingSkip:
@@ -388,9 +390,11 @@ private:
 			case Bunny::CommandListActionKind::CheckTextureOverride: {
 				if (!mExecuteCommands)
 					break;
-				Bunny::TextureOverrideConfig matchedConfig;
-				if (FindTargetTextureOverride(action.target, &matchedConfig))
-					RunTextureOverride(matchedConfig, depth + 1, includePost);
+				std::vector<Bunny::TextureOverrideConfig> matchedConfigs;
+				if (FindTargetTextureOverride(action.target, &matchedConfigs)) {
+					for (const Bunny::TextureOverrideConfig &matchedConfig : matchedConfigs)
+						RunTextureOverride(matchedConfig, depth + 1, includePost);
+				}
 				break;
 			}
 			case Bunny::CommandListActionKind::HandlingSkip:

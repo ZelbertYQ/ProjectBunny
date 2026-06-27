@@ -168,58 +168,65 @@ static const Bunny::TextureOverrideConfig *ConfigFromIaCandidateIndexLocked(size
 
 static bool TryFindCachedIaTextureOverrideLocked(
 	const DX12TextureOverrideLookupCacheKey &key,
-	const Bunny::TextureOverrideConfig **config)
+	std::vector<Bunny::TextureOverrideConfig> *configs)
 {
-	if (config)
-		*config = nullptr;
+	if (configs)
+		configs->clear();
 	auto cached = gTextureOverrideLookupCache.find(key);
 	if (cached == gTextureOverrideLookupCache.end())
 		return false;
 	if (!cached->second.matched)
 		return true;
-	const Bunny::TextureOverrideConfig *cachedConfig =
-		ConfigFromIaCandidateIndexLocked(cached->second.iaCandidateIndex);
-	if (!cachedConfig)
-		return false;
-	if (config)
-		*config = cachedConfig;
+	if (configs)
+		configs->reserve(cached->second.iaCandidateIndexes.size());
+	for (size_t index : cached->second.iaCandidateIndexes) {
+		const Bunny::TextureOverrideConfig *cachedConfig =
+			ConfigFromIaCandidateIndexLocked(index);
+		if (!cachedConfig)
+			return false;
+		if (configs)
+			configs->push_back(*cachedConfig);
+	}
 	return true;
 }
 
 static void StoreIaTextureOverrideLookupCacheLocked(
-	const DX12TextureOverrideLookupCacheKey &key, bool matched, size_t candidateIndex)
+	const DX12TextureOverrideLookupCacheKey &key, const std::vector<size_t> &candidateIndexes)
 {
 	if (gTextureOverrideLookupCache.size() >= MaxTextureOverrideLookupCacheEntries)
 		gTextureOverrideLookupCache.clear();
 	DX12TextureOverrideLookupCacheEntry entry = {};
-	entry.matched = matched;
-	entry.iaCandidateIndex = candidateIndex;
+	entry.matched = !candidateIndexes.empty();
+	entry.iaCandidateIndexes = candidateIndexes;
 	gTextureOverrideLookupCache[key] = entry;
 }
 
-static const Bunny::TextureOverrideConfig *FindIaTextureOverrideCachedLocked(
+static bool FindIaTextureOverridesCachedLocked(
 	const Bunny::CommandListTarget &target, uint32_t hash,
 	uint32_t vertexCount, uint32_t indexCount, uint32_t instanceCount,
 	uint32_t firstVertex, uint32_t firstIndex, uint32_t firstInstance,
 	bool indexBuffer, uint32_t vertexSlot,
 	const std::unordered_set<std::wstring> &activePreSkinSections,
-	UINT64 preSkinGeneration)
+	UINT64 preSkinGeneration,
+	std::vector<Bunny::TextureOverrideConfig> *configs)
 {
+	if (configs)
+		configs->clear();
 	const DX12TextureOverrideLookupCacheKey key =
 		MakeIaTextureOverrideLookupCacheKey(
 			target, hash, vertexCount, indexCount, instanceCount,
 			firstVertex, firstIndex, firstInstance, preSkinGeneration);
-	const Bunny::TextureOverrideConfig *cachedConfig = nullptr;
-	if (TryFindCachedIaTextureOverrideLocked(key, &cachedConfig))
-		return cachedConfig;
+	if (TryFindCachedIaTextureOverrideLocked(key, configs))
+		return configs && !configs->empty();
 
 	const std::vector<size_t> *candidateIndexes =
 		FindIaTextureOverrideCandidatesLocked(hash, indexBuffer, vertexSlot);
 	if (!candidateIndexes || candidateIndexes->empty()) {
-		StoreIaTextureOverrideLookupCacheLocked(key, false, 0);
-		return nullptr;
+		StoreIaTextureOverrideLookupCacheLocked(key, std::vector<size_t>());
+		return false;
 	}
 
+	std::vector<size_t> matchedIndexes;
 	for (size_t index : *candidateIndexes) {
 		if (index >= gIaTextureOverrides.size())
 			continue;
@@ -233,21 +240,24 @@ static const Bunny::TextureOverrideConfig *FindIaTextureOverrideCachedLocked(
 			config, vertexCount, indexCount, instanceCount,
 			firstVertex, firstIndex, firstInstance))
 			continue;
-		StoreIaTextureOverrideLookupCacheLocked(key, true, index);
-		return &config;
+		matchedIndexes.push_back(index);
+		if (configs)
+			configs->push_back(config);
 	}
 
-	StoreIaTextureOverrideLookupCacheLocked(key, false, 0);
-	return nullptr;
+	StoreIaTextureOverrideLookupCacheLocked(key, matchedIndexes);
+	return !matchedIndexes.empty();
 }
 
-static bool FindIaTextureOverrideCached(
+static bool FindIaTextureOverridesCached(
 	const Bunny::CommandListTarget &target, uint32_t hash,
 	uint32_t vertexCount, uint32_t indexCount, uint32_t instanceCount,
 	uint32_t firstVertex, uint32_t firstIndex, uint32_t firstInstance,
 	bool indexBuffer, uint32_t vertexSlot,
-	Bunny::TextureOverrideConfig *configOut)
+	std::vector<Bunny::TextureOverrideConfig> *configs)
 {
+	if (configs)
+		configs->clear();
 	std::unordered_set<std::wstring> activePreSkinSections;
 	const UINT64 preSkinGeneration =
 		SnapshotActivePreSkinSections(&activePreSkinSections);
@@ -257,25 +267,21 @@ static bool FindIaTextureOverrideCached(
 		MakeIaTextureOverrideLookupCacheKey(
 			target, hash, vertexCount, indexCount, instanceCount,
 			firstVertex, firstIndex, firstInstance, preSkinGeneration);
-	const Bunny::TextureOverrideConfig *cachedConfig = nullptr;
-	if (TryFindCachedIaTextureOverrideLocked(key, &cachedConfig)) {
-		if (cachedConfig && configOut)
-			*configOut = *cachedConfig;
+	if (TryFindCachedIaTextureOverrideLocked(key, configs)) {
+		const bool matched = configs && !configs->empty();
 		ReleaseSRWLockShared(&gModLock);
-		return cachedConfig != nullptr;
+		return matched;
 	}
 	ReleaseSRWLockShared(&gModLock);
 
 	AcquireSRWLockExclusive(&gModLock);
-	const Bunny::TextureOverrideConfig *config =
-		FindIaTextureOverrideCachedLocked(
+	const bool matched =
+		FindIaTextureOverridesCachedLocked(
 			target, hash, vertexCount, indexCount, instanceCount,
 			firstVertex, firstIndex, firstInstance, indexBuffer, vertexSlot,
-			activePreSkinSections, preSkinGeneration);
-	if (config && configOut)
-		*configOut = *config;
+			activePreSkinSections, preSkinGeneration, configs);
 	ReleaseSRWLockExclusive(&gModLock);
-	return config != nullptr;
+	return matched;
 }
 
 static const DX12IaBufferHash *FindIaVertexSlot(const DX12IaHashState &iaState, uint32_t slot)
@@ -344,17 +350,20 @@ static uint32_t HashDescriptorBinding(const DX12CurrentShaderResourceBinding &bi
 	return 0;
 }
 
-static const Bunny::TextureOverrideConfig *FindTextureOverrideByHashLocked(
+static bool FindTextureOverridesByHashLocked(
 	uint32_t hash, uint32_t vertexCount, uint32_t indexCount, uint32_t instanceCount,
 	uint32_t firstVertex, uint32_t firstIndex, uint32_t firstInstance,
-	const std::unordered_set<std::wstring> &activePreSkinSections)
+	const std::unordered_set<std::wstring> &activePreSkinSections,
+	std::vector<Bunny::TextureOverrideConfig> *configs)
 {
+	if (configs)
+		configs->clear();
 	if (!hash)
-		return nullptr;
+		return false;
 
 	auto bucket = gTextureOverrides.find(hash);
 	if (bucket == gTextureOverrides.end())
-		return nullptr;
+		return false;
 
 	for (const Bunny::TextureOverrideConfig &config : bucket->second) {
 		if (!TextureOverrideMatchCsSatisfied(config, activePreSkinSections))
@@ -363,37 +372,40 @@ static const Bunny::TextureOverrideConfig *FindTextureOverrideByHashLocked(
 			config, vertexCount, indexCount, instanceCount,
 			firstVertex, firstIndex, firstInstance))
 			continue;
-		return &config;
+		if (configs)
+			configs->push_back(config);
 	}
-	return nullptr;
+	return configs && !configs->empty();
 }
 
-static bool FindTextureOverrideByHash(
+static bool FindTextureOverridesByHash(
 	uint32_t hash, uint32_t vertexCount, uint32_t indexCount, uint32_t instanceCount,
 	uint32_t firstVertex, uint32_t firstIndex, uint32_t firstInstance,
-	Bunny::TextureOverrideConfig *configOut)
+	std::vector<Bunny::TextureOverrideConfig> *configs)
 {
+	if (configs)
+		configs->clear();
 	std::unordered_set<std::wstring> activePreSkinSections;
 	SnapshotActivePreSkinSections(&activePreSkinSections);
 
 	AcquireSRWLockShared(&gModLock);
-	const Bunny::TextureOverrideConfig *config =
-		FindTextureOverrideByHashLocked(
+	const bool matched =
+		FindTextureOverridesByHashLocked(
 			hash, vertexCount, indexCount, instanceCount,
-			firstVertex, firstIndex, firstInstance, activePreSkinSections);
-	if (config && configOut)
-		*configOut = *config;
+			firstVertex, firstIndex, firstInstance, activePreSkinSections, configs);
 	ReleaseSRWLockShared(&gModLock);
-	return config != nullptr;
+	return matched;
 }
 
-static bool FindDescriptorTextureOverride(
+static bool FindDescriptorTextureOverrides(
 	ID3D12GraphicsCommandList *commandList,
 	const Bunny::CommandListTarget &target,
 	uint32_t vertexCount, uint32_t indexCount, uint32_t instanceCount,
 	uint32_t firstVertex, uint32_t firstIndex,
-	Bunny::TextureOverrideConfig *configOut)
+	std::vector<Bunny::TextureOverrideConfig> *configs)
 {
+	if (configs)
+		configs->clear();
 	if (!commandList)
 		return false;
 
@@ -407,12 +419,13 @@ static bool FindDescriptorTextureOverride(
 		if (!DescriptorBindingMatchesTarget(binding, target))
 			continue;
 		const uint32_t hash = HashDescriptorBinding(binding);
-		if (FindTextureOverrideByHash(
+		std::vector<Bunny::TextureOverrideConfig> bindingConfigs;
+		if (FindTextureOverridesByHash(
 			    hash, vertexCount, indexCount, instanceCount,
-			    firstVertex, firstIndex, 0, configOut))
-			return true;
+			    firstVertex, firstIndex, 0, &bindingConfigs) && configs)
+			configs->insert(configs->end(), bindingConfigs.begin(), bindingConfigs.end());
 	}
-	return false;
+	return configs && !configs->empty();
 }
 
 struct DX12IaResourceViewSnapshot
@@ -666,33 +679,35 @@ static bool FindTargetTextureOverride(
 	const DX12IaHashState &iaState, const Bunny::CommandListTarget &target,
 	uint32_t vertexCount, uint32_t indexCount, uint32_t instanceCount,
 	uint32_t firstVertex, uint32_t firstIndex,
-	Bunny::TextureOverrideConfig *configOut)
+	std::vector<Bunny::TextureOverrideConfig> *configs)
 {
+	if (configs)
+		configs->clear();
 	if (target.kind == Bunny::CommandListTargetKind::IndexBuffer) {
 		if (!iaState.hasIndexBuffer || !iaState.indexHash)
 			return false;
-		return FindIaTextureOverrideCached(
+		return FindIaTextureOverridesCached(
 			target, iaState.indexHash,
 			vertexCount, indexCount, instanceCount,
-			firstVertex, firstIndex, 0, true, 0, configOut);
+			firstVertex, firstIndex, 0, true, 0, configs);
 	}
 
 	if (target.kind == Bunny::CommandListTargetKind::VertexBuffer) {
 		const DX12IaBufferHash *slot = FindIaVertexSlot(iaState, target.slot);
 		if (!slot || !slot->hash)
 			return false;
-		return FindIaTextureOverrideCached(
+		return FindIaTextureOverridesCached(
 			target, slot->hash,
 			vertexCount, indexCount, instanceCount,
-			firstVertex, firstIndex, 0, false, target.slot, configOut);
+			firstVertex, firstIndex, 0, false, target.slot, configs);
 	}
 
 	if (target.kind == Bunny::CommandListTargetKind::ConstantBuffer ||
 	    target.kind == Bunny::CommandListTargetKind::ShaderResource ||
 	    target.kind == Bunny::CommandListTargetKind::UnorderedAccessView) {
-		return FindDescriptorTextureOverride(
+		return FindDescriptorTextureOverrides(
 			commandList, target, vertexCount, indexCount, instanceCount,
-			firstVertex, firstIndex, configOut);
+			firstVertex, firstIndex, configs);
 	}
 
 	return false;

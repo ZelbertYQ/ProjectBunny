@@ -40,11 +40,6 @@ static bool TextureOverrideMatchesDrawContext(
 	return true;
 }
 
-static bool ContainsI(const std::wstring &value, const wchar_t *needle)
-{
-	return Bunny::ToLower(value).find(Bunny::ToLower(needle)) != std::wstring::npos;
-}
-
 static bool TextureOverrideHasDrawKind(
 	const Bunny::TextureOverrideConfig &config, Bunny::CommandListActionKind kind)
 {
@@ -105,9 +100,7 @@ static bool TextureOverrideMatchesIaBinding(
 
 	if (indexBuffer) {
 		if (config.indexBufferResource.empty() &&
-		    !TextureOverrideHasDrawKind(config, Bunny::CommandListActionKind::DrawIndexed) &&
-		    !ContainsI(config.section, L"TextureOverride_IB") &&
-		    !ContainsI(config.section, L"\\_IB_"))
+		    !TextureOverrideHasDrawKind(config, Bunny::CommandListActionKind::DrawIndexed))
 			return false;
 		return true;
 	}
@@ -179,16 +172,37 @@ static void BuildDx12IaTextureOverrideIndex(
 		}
 	}
 
+	auto sortCandidates = [iaTextureOverrides](std::vector<size_t> *indexes) {
+		if (!indexes)
+			return;
+		std::sort(indexes->begin(), indexes->end(),
+			[iaTextureOverrides](size_t lhs, size_t rhs) {
+				const DX12IaTextureOverrideCandidate &left = (*iaTextureOverrides)[lhs];
+				const DX12IaTextureOverrideCandidate &right = (*iaTextureOverrides)[rhs];
+				if (left.config.matchPriority != right.config.matchPriority)
+					return left.config.matchPriority > right.config.matchPriority;
+				const std::wstring leftSection = Bunny::ToLower(left.config.section);
+				const std::wstring rightSection = Bunny::ToLower(right.config.section);
+				if (leftSection != rightSection)
+					return leftSection < rightSection;
+				return left.order < right.order;
+			});
+	};
+
+	for (auto &bucket : *indexTextureOverrideIndex)
+		sortCandidates(&bucket.second);
+	for (auto &bucket : *vertexTextureOverrideIndex)
+		sortCandidates(&bucket.second);
+	for (auto &bucket : *anyVertexTextureOverrideIndex)
+		sortCandidates(&bucket.second);
+
 	for (const auto &bucket : *vertexTextureOverrideIndex) {
 		std::vector<size_t> merged = bucket.second;
 		const uint32_t hash = static_cast<uint32_t>(bucket.first >> 32);
 		auto anySlot = anyVertexTextureOverrideIndex->find(hash);
 		if (anySlot != anyVertexTextureOverrideIndex->end())
 			merged.insert(merged.end(), anySlot->second.begin(), anySlot->second.end());
-		std::sort(merged.begin(), merged.end(),
-			[iaTextureOverrides](size_t lhs, size_t rhs) {
-				return (*iaTextureOverrides)[lhs].order < (*iaTextureOverrides)[rhs].order;
-			});
+		sortCandidates(&merged);
 		(*mergedVertexTextureOverrideIndex)[bucket.first] = std::move(merged);
 	}
 }

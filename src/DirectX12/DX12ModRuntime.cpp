@@ -296,7 +296,7 @@ struct DX12TextureOverrideLookupCacheKeyHash
 struct DX12TextureOverrideLookupCacheEntry
 {
 	bool matched = false;
-	size_t iaCandidateIndex = 0;
+	std::vector<size_t> iaCandidateIndexes;
 };
 static std::unordered_map<
 	DX12TextureOverrideLookupCacheKey,
