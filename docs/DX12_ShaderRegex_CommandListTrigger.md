@@ -55,6 +55,14 @@ Descriptor binding tracking is enabled only when a ShaderOverride or executable 
 
 This keeps the default path aligned with DX11: loaded TextureOverride data is passive, ShaderOverride or ShaderRegex selects the shader scope, and only the selected command list performs the TextureOverride lookup.
 
+### 2026-06-27 Namespace Dot Parsing Fix
+
+The first KeFUY retest still logged `shaderRegexes:0` even though `KeFUY.ini` contained `[ShaderRegex_KeFUY_Trigger]`.
+
+The loaded section name was namespaced through the include path, which contains `KeFUY.ini`. DX12 split ShaderRegex groups at the first dot after the `ShaderRegex` prefix, so it treated the dot in `.ini` as a ShaderRegex subsection separator. The main section was therefore marked pattern-backed, `shader_model` was never parsed, and the group was erased.
+
+DX12 now mirrors the DX11 rule: namespaced section text can contain dots, so ShaderRegex subsection splitting only happens after the namespace. In the current DX12 namespaced section format, that means only dots after the final namespace separator can create `.Pattern`, `.Replace`, or `.InsertDeclarations` style sub-sections.
+
 ### References
 
 - https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ns-d3d12-d3d12_graphics_pipeline_state_desc

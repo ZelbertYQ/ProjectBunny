@@ -12,11 +12,10 @@ static bool StartsWithI(const std::wstring &value, const wchar_t *prefix)
 static std::wstring ShaderRegexGroupName(const std::wstring &section)
 {
 	size_t namespaceEnd = 0;
-	size_t prefixEnd = section.find(L'\\');
-	if (prefixEnd != std::wstring::npos) {
-		prefixEnd = section.find(L'\\', prefixEnd + 1);
-		if (prefixEnd != std::wstring::npos)
-			namespaceEnd = prefixEnd + 1;
+	if (ToLower(section).rfind(L"shaderregex\\", 0) == 0) {
+		size_t suffixStart = section.find_last_of(L'\\');
+		if (suffixStart != std::wstring::npos)
+			namespaceEnd = suffixStart + 1;
 	}
 	size_t dot = section.find(L'.', namespaceEnd);
 	if (dot == std::wstring::npos)
@@ -41,8 +40,20 @@ static void AppendShaderModels(
 		std::wstring token = space == std::wstring::npos ?
 			value.substr(start) : value.substr(start, space - start);
 		token = ToLower(Trim(token));
-		if (!token.empty())
-			shaderModels->push_back(std::string(token.begin(), token.end()));
+		if (!token.empty()) {
+			std::string model;
+			model.reserve(token.size());
+			bool ascii = true;
+			for (wchar_t ch : token) {
+				if (ch > 0x7f) {
+					ascii = false;
+					break;
+				}
+				model.push_back(static_cast<char>(ch));
+			}
+			if (ascii)
+				shaderModels->push_back(model);
+		}
 		if (space == std::wstring::npos)
 			break;
 		start = space + 1;

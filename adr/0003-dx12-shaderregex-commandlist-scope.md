@@ -58,3 +58,5 @@ Existing DX11-style no-pattern ShaderRegex trigger Mods can select TextureOverri
 The implementation stays inside the existing command-list execution model instead of adding a new global TextureOverride lookup path.
 
 The current scope covers VS, PS, and CS shader model matching. HS, DS, and GS model matching are not part of this change because the immediate DX12 runtime only had draw and dispatch command-list selection for VS, PS, and CS.
+
+Namespaced ShaderRegex section parsing must ignore dots that belong to include namespaces or file names such as `KeFUY.ini`. Only dots in the section suffix after the namespace separator are valid ShaderRegex subsection separators.
