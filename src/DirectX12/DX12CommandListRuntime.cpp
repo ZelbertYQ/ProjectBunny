@@ -376,19 +376,20 @@ DX12CommandListRuntimeState DX12CommandListRuntimeGetState(
 	if (!commandList)
 		return result;
 
-	DX12CommandListRuntimeState *state = GetStatePtrFast(commandList);
+	const DX12CommandListRuntimeState *state = DX12CommandListRuntimeGetStatePtr(commandList);
 	if (state) {
 		result = *state;
 		return result;
 	}
-
-	RuntimeShard &shard = ShardFor(commandList);
-	AcquireSRWLockShared(&shard.lock);
-	auto it = shard.states.find(commandList);
-	if (it != shard.states.end())
-		result = it->second;
-	ReleaseSRWLockShared(&shard.lock);
 	return result;
+}
+
+const DX12CommandListRuntimeState *DX12CommandListRuntimeGetStatePtr(
+	ID3D12GraphicsCommandList *commandList)
+{
+	if (!commandList)
+		return nullptr;
+	return GetStatePtrFast(commandList);
 }
 
 

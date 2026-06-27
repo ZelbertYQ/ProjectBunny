@@ -188,7 +188,7 @@ void DX12DispatchHookFlowExecute(
 	UINT threadGroupCountX,
 	UINT threadGroupCountY,
 	UINT threadGroupCountZ,
-	const DX12CommandListRuntimeState &runtimeState,
+	const DX12CommandListRuntimeState *runtimeState,
 	DX12DispatchHookFlowDispatch originalDispatch)
 {
 	if (!originalDispatch)
@@ -198,8 +198,8 @@ void DX12DispatchHookFlowExecute(
 		originalDispatch(commandList, threadGroupCountX, threadGroupCountY, threadGroupCountZ);
 		return;
 	}
-	if (DX12ModHasActiveShaderOverrides() &&
-	    DX12ModShouldSkipPipelineState(runtimeState.pipelineState, true))
+	if (runtimeState && DX12ModHasActiveShaderOverrides() &&
+	    DX12ModShouldSkipPipelineState(runtimeState->pipelineState, true))
 		return;
 
 	struct DispatchHookFlowGuard {
@@ -210,35 +210,13 @@ void DX12DispatchHookFlowExecute(
 		DispatchHookFlowGuard &operator=(const DispatchHookFlowGuard&) = delete;
 	} guard(sInDispatchHookFlow);
 
-	if (!DX12ModNeedsPreSkinningUavProbe()) {
+	if (!DX12ModNeedsPreSkinningUavProbe() || !runtimeState) {
 		originalDispatch(commandList, threadGroupCountX, threadGroupCountY, threadGroupCountZ);
 		return;
 	}
 
-	// Early cache check: avoid scratch allocation if probe will be a no-op.
-	{
-		DX12PsoShaderInfo shaderInfo = {};
-		uint64_t csHash = 0;
-		if (DX12GetPipelineStateShaderInfo(runtimeState.pipelineState, &shaderInfo) &&
-		    shaderInfo.hasCS)
-			csHash = shaderInfo.cs;
-		if (csHash && DX12ModShouldProbePreSkinningForCs(csHash)) {
-			const UINT64 bindingSerial = DX12BindingGetComputeBindingSerial(commandList);
-			if (bindingSerial != 0) {
-				bool cachedMatch = false;
-				if (DX12ModHasCachedPreSkinningUavMatch(
-					commandList, csHash, bindingSerial, &cachedMatch) &&
-				    !cachedMatch) {
-					// Cache says no match — skip probe entirely.
-					originalDispatch(commandList, threadGroupCountX, threadGroupCountY, threadGroupCountZ);
-					return;
-				}
-			}
-		}
-	}
-
 	DX12DispatchPreSkinProbe &probe = GetDispatchPreSkinProbeScratch();
-	PreparePreSkinProbe(commandList, runtimeState, &probe);
+	PreparePreSkinProbe(commandList, *runtimeState, &probe);
 	UINT dispatchGroupX = threadGroupCountX;
 	UINT dispatchGroupY = threadGroupCountY;
 	UINT dispatchGroupZ = threadGroupCountZ;

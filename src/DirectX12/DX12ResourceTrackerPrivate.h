@@ -92,6 +92,7 @@ struct PsoRootRecord
 };
 
 extern SRWLOCK gResourceLock;
+extern SRWLOCK gDescriptorLock;
 extern std::vector<RootSignatureRecord> gRootSignatures;
 extern std::vector<DescriptorHeapRecord> gDescriptorHeaps;
 extern std::vector<DescriptorRecord> gDescriptors;

@@ -12,5 +12,5 @@ void DX12DispatchHookFlowExecute(
 	UINT threadGroupCountX,
 	UINT threadGroupCountY,
 	UINT threadGroupCountZ,
-	const DX12CommandListRuntimeState &runtimeState,
+	const DX12CommandListRuntimeState *runtimeState,
 	DX12DispatchHookFlowDispatch originalDispatch);

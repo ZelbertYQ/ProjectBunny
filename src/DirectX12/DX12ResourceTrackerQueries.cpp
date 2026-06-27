@@ -6,7 +6,7 @@ bool DX12GetRootSignatureSummary(
 	if (!rootSignature || !summary)
 		return false;
 
-	AcquireSRWLockShared(&gResourceLock);
+	AcquireSRWLockShared(&gDescriptorLock);
 	for (const RootSignatureRecord &record : gRootSignatures) {
 		if (record.rootSignature != rootSignature)
 			continue;
@@ -19,10 +19,10 @@ bool DX12GetRootSignatureSummary(
 		summary->staticSamplerCount = record.staticSamplerCount;
 		summary->parsed = record.parsed;
 		summary->parameters = record.parameters;
-		ReleaseSRWLockShared(&gResourceLock);
+		ReleaseSRWLockShared(&gDescriptorLock);
 		return true;
 	}
-	ReleaseSRWLockShared(&gResourceLock);
+	ReleaseSRWLockShared(&gDescriptorLock);
 	return false;
 }
 
@@ -32,15 +32,15 @@ bool DX12GetPsoRootSignature(UINT64 psoIndex, ID3D12RootSignature **rootSignatur
 		return false;
 
 	*rootSignature = nullptr;
-	AcquireSRWLockShared(&gResourceLock);
+	AcquireSRWLockShared(&gDescriptorLock);
 	for (auto it = gPsoRoots.rbegin(); it != gPsoRoots.rend(); ++it) {
 		if (it->psoIndex != psoIndex || !it->rootSignature)
 			continue;
 		*rootSignature = it->rootSignature;
-		ReleaseSRWLockShared(&gResourceLock);
+		ReleaseSRWLockShared(&gDescriptorLock);
 		return true;
 	}
-	ReleaseSRWLockShared(&gResourceLock);
+	ReleaseSRWLockShared(&gDescriptorLock);
 	return false;
 }
 bool DX12ResolveBufferResourceByGpuVa(
@@ -253,6 +253,7 @@ void DX12GetResourceMetadataSnapshot(
 	std::vector<DX12DescriptorHeapSummary> *descriptorHeaps)
 {
 	AcquireSRWLockShared(&gResourceLock);
+	AcquireSRWLockShared(&gDescriptorLock);
 	size_t descriptorStateKnown = 0;
 	for (const DescriptorRecord &record : gDescriptors) {
 		if (record.hasCurrentState)
@@ -335,6 +336,7 @@ void DX12GetResourceMetadataSnapshot(
 			"\"kind\":\"heaps\",\"count\":%zu", descriptorHeaps->size());
 	}
 
+	ReleaseSRWLockShared(&gDescriptorLock);
 	ReleaseSRWLockShared(&gResourceLock);
 	DX12FrameAnalysisLogJsonFunc("MetadataSnapshotComplete", nullptr);
 }
@@ -345,14 +347,14 @@ bool DX12FindDescriptorSummaryByCpuHandle(
 	if (!cpuHandle || !summary)
 		return false;
 
-	AcquireSRWLockShared(&gResourceLock);
+	AcquireSRWLockShared(&gDescriptorLock);
 	auto found = gDescriptorByCpuHandle.find(cpuHandle);
 	if (found == gDescriptorByCpuHandle.end() || found->second >= gDescriptors.size()) {
-		ReleaseSRWLockShared(&gResourceLock);
+		ReleaseSRWLockShared(&gDescriptorLock);
 		return false;
 	}
 	FillDescriptorSummary(summary, gDescriptors[found->second]);
-	ReleaseSRWLockShared(&gResourceLock);
+	ReleaseSRWLockShared(&gDescriptorLock);
 	return true;
 }
 
@@ -363,7 +365,7 @@ bool DX12FindDescriptorHeapByGpuHandle(
 	if (!gpuHandle.ptr || !summary)
 		return false;
 
-	AcquireSRWLockShared(&gResourceLock);
+	AcquireSRWLockShared(&gDescriptorLock);
 	for (const DescriptorHeapRecord &record : gDescriptorHeaps) {
 		if (record.desc.Type != type || record.gpuStart == 0 || record.increment == 0)
 			continue;
@@ -380,9 +382,9 @@ bool DX12FindDescriptorHeapByGpuHandle(
 		summary->cpuStart = record.cpuStart;
 		summary->gpuStart = record.gpuStart;
 		summary->increment = record.increment;
-		ReleaseSRWLockShared(&gResourceLock);
+		ReleaseSRWLockShared(&gDescriptorLock);
 		return true;
 	}
-	ReleaseSRWLockShared(&gResourceLock);
+	ReleaseSRWLockShared(&gDescriptorLock);
 	return false;
 }

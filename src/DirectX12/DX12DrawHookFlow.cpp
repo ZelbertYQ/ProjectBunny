@@ -27,12 +27,12 @@ static void ExecuteOriginalDraw(
 void DX12DrawHookFlowExecute(
 	ID3D12GraphicsCommandList *commandList,
 	const DX12IaDrawInvocation &draw,
-	const DX12CommandListRuntimeState &runtimeState,
+	const DX12CommandListRuntimeState *runtimeState,
 	const DX12IaReplacementExecutorCallbacks &callbacks)
 {
-	if (DX12ModNeedsPresentReplacement())
-		DX12IaReplacementExecutePresent(commandList, runtimeState, callbacks);
-	if (DX12IaReplacementHandleDrawOverrides(commandList, draw, runtimeState, callbacks))
+	if (runtimeState && DX12ModNeedsPresentReplacement())
+		DX12IaReplacementExecutePresent(commandList, *runtimeState, callbacks);
+	if (runtimeState && DX12IaReplacementHandleDrawOverrides(commandList, draw, *runtimeState, callbacks))
 		return;
 	ExecuteOriginalDraw(commandList, draw, callbacks);
 }

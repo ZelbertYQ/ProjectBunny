@@ -77,6 +77,8 @@ ID3D12PipelineState *DX12CommandListRuntimeGetPipelineState(
 	ID3D12GraphicsCommandList *commandList);
 DX12CommandListRuntimeState DX12CommandListRuntimeGetState(
 	ID3D12GraphicsCommandList *commandList);
+const DX12CommandListRuntimeState *DX12CommandListRuntimeGetStatePtr(
+	ID3D12GraphicsCommandList *commandList);
 
 void DX12CommandListRuntimeSetDescriptorHeaps(
 	ID3D12GraphicsCommandList *commandList,

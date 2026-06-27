@@ -272,6 +272,7 @@ static void ForgetRegisteredCommandListPointer(void *commandList)
 
 static void LogDX12Call(const char *api, const void *object, const char *fmt = nullptr, ...)
 {
+#if defined(_DEBUG)
 	if (!DX12ShouldLogHookCall(api))
 		return;
 
@@ -291,6 +292,11 @@ static void LogDX12Call(const char *api, const void *object, const char *fmt = n
 	DX12LogDebugJsonFunc("DX12HookCall",
 		"\"api\":%s,\"present\":%ld,\"this\":\"%p\",\"detail\":%s",
 		apiJson, DX12GetPresentCount(), object, detailJson);
+#else
+	(void)api;
+	(void)object;
+	(void)fmt;
+#endif
 }
 
 #if defined(_DEBUG)
@@ -385,12 +391,19 @@ static thread_local ThreadLocalCommandListOriginal tCommandQueueOriginals[32];
 
 static void LogOriginalFallback(const char *api, const void *object, UINT slot, const void *fallback)
 {
+#if defined(_DEBUG)
 	if (!DX12ShouldLogHookCall(api))
 		return;
 	DX12LogDebugJsonFunc("DX12FallbackPath",
 		"\"kind\":\"original_lookup\",\"api\":\"%s\",\"present\":%ld,\"this\":\"%p\","
 		"\"slot\":%u,\"fallback\":\"%p\"",
 		api ? api : "", DX12GetPresentCount(), object, slot, fallback);
+#else
+	(void)api;
+	(void)object;
+	(void)slot;
+	(void)fallback;
+#endif
 }
 
 template <typename T>
@@ -478,6 +491,7 @@ static void LogQueueStage(
 	UINT count = 0, ID3D12Fence *fence = nullptr, UINT64 value = 0, HRESULT hr = S_OK,
 	ULONGLONG elapsedMs = 0)
 {
+#if defined(_DEBUG)
 	if (SUCCEEDED(hr) && elapsedMs < 4 && stage && !strcmp(stage, "beforeOriginal"))
 		return;
 	if (SUCCEEDED(hr) && elapsedMs < 4 && api)
@@ -488,12 +502,23 @@ static void LogQueueStage(
 		api ? api : "", stage ? stage : "", DX12GetPresentCount(), queue,
 		count, fence, static_cast<unsigned long long>(value), hr,
 		static_cast<unsigned long long>(elapsedMs));
+#else
+	(void)api;
+	(void)stage;
+	(void)queue;
+	(void)count;
+	(void)fence;
+	(void)value;
+	(void)hr;
+	(void)elapsedMs;
+#endif
 }
 
 static void LogCommandListStage(
 	const char *api, const char *stage, ID3D12GraphicsCommandList *commandList,
 	HRESULT hr = S_OK, ULONGLONG elapsedMs = 0)
 {
+#if defined(_DEBUG)
 	if (SUCCEEDED(hr) && elapsedMs < 4)
 		return;
 	DX12LogDebugJsonFunc("DX12CommandListStage",
@@ -501,6 +526,13 @@ static void LogCommandListStage(
 		"\"hr\":\"0x%lx\",\"elapsedMs\":%llu",
 		api ? api : "", stage ? stage : "", DX12GetPresentCount(), commandList,
 		hr, static_cast<unsigned long long>(elapsedMs));
+#else
+	(void)api;
+	(void)stage;
+	(void)commandList;
+	(void)hr;
+	(void)elapsedMs;
+#endif
 }
 
 static void LogCommandListStageEdge(
@@ -996,7 +1028,7 @@ static void STDMETHODCALLTYPE HookedDrawInstanced(
 				startVertexLocation, startInstanceLocation);
 		return;
 	}
-	const DX12CommandListRuntimeState runtimeState = DX12CommandListRuntimeGetState(commandList);
+	const DX12CommandListRuntimeState *runtimeState = DX12CommandListRuntimeGetStatePtr(commandList);
 	const DX12IaReplacementExecutorCallbacks iaCallbacks =
 		MakeIaReplacementCallbacks(commandList);
 	DX12IaDrawInvocation draw = {};
@@ -1065,7 +1097,7 @@ static void STDMETHODCALLTYPE HookedDrawIndexedInstanced(
 				startIndexLocation, baseVertexLocation, startInstanceLocation);
 		return;
 	}
-	const DX12CommandListRuntimeState runtimeState = DX12CommandListRuntimeGetState(commandList);
+	const DX12CommandListRuntimeState *runtimeState = DX12CommandListRuntimeGetStatePtr(commandList);
 	const DX12IaReplacementExecutorCallbacks iaCallbacks =
 		MakeIaReplacementCallbacks(commandList);
 	DX12IaDrawInvocation draw = {};
@@ -1140,7 +1172,7 @@ static void STDMETHODCALLTYPE HookedDispatch(
 			return;
 		}
 	}
-	const DX12CommandListRuntimeState runtimeState = DX12CommandListRuntimeGetState(commandList);
+	const DX12CommandListRuntimeState *runtimeState = DX12CommandListRuntimeGetStatePtr(commandList);
 	DX12DispatchHookFlowExecute(
 		commandList, threadGroupCountX, threadGroupCountY, threadGroupCountZ,
 		runtimeState, original);

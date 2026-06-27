@@ -120,16 +120,6 @@ void DX12BindingSetComputeRootSignature(
 		return;
 
 	BindingShard &shard = BindingShardFor(commandList);
-	// Read-check with shared lock first.
-	AcquireSRWLockShared(&shard.lock);
-	auto readIt = shard.states.find(commandList);
-	if (readIt != shard.states.end() &&
-	    readIt->second.computeRootSignature == rootSignature) {
-		ReleaseSRWLockShared(&shard.lock);
-		return;
-	}
-	ReleaseSRWLockShared(&shard.lock);
-
 	AcquireSRWLockExclusive(&shard.lock);
 	CommandListBindingState &state = shard.states[commandList];
 	state.computeRootSignature = rootSignature;
@@ -181,19 +171,13 @@ bool DX12BindingSetDescriptorHeaps(
 	}
 
 	BindingShard &shard = BindingShardFor(commandList);
-	// Read-check with shared lock first — avoids exclusive lock when unchanged.
-	AcquireSRWLockShared(&shard.lock);
-	auto readIt = shard.states.find(commandList);
-	if (readIt != shard.states.end() &&
-	    readIt->second.cbvSrvUavHeap == cbvSrvUavHeap &&
-	    readIt->second.samplerHeap == samplerHeap) {
-		ReleaseSRWLockShared(&shard.lock);
-		return false;
-	}
-	ReleaseSRWLockShared(&shard.lock);
-
 	AcquireSRWLockExclusive(&shard.lock);
 	CommandListBindingState &state = shard.states[commandList];
+	if (state.cbvSrvUavHeap == cbvSrvUavHeap &&
+	    state.samplerHeap == samplerHeap) {
+		ReleaseSRWLockExclusive(&shard.lock);
+		return false;
+	}
 	state.cbvSrvUavHeap = cbvSrvUavHeap;
 	state.samplerHeap = samplerHeap;
 	++state.computeBindingSerial;
@@ -209,19 +193,12 @@ void DX12BindingSetGraphicsRootDescriptorTable(
 		return;
 
 	BindingShard &shard = BindingShardFor(commandList);
-	// Read-check with shared lock first.
-	AcquireSRWLockShared(&shard.lock);
-	auto readIt = shard.states.find(commandList);
-	if (readIt != shard.states.end() &&
-	    readIt->second.graphicsTables[rootParameterIndex].valid &&
-	    readIt->second.graphicsTables[rootParameterIndex].baseDescriptor.ptr == baseDescriptor.ptr) {
-		ReleaseSRWLockShared(&shard.lock);
-		return;
-	}
-	ReleaseSRWLockShared(&shard.lock);
-
 	AcquireSRWLockExclusive(&shard.lock);
 	RootTableState &table = shard.states[commandList].graphicsTables[rootParameterIndex];
+	if (table.valid && table.baseDescriptor.ptr == baseDescriptor.ptr) {
+		ReleaseSRWLockExclusive(&shard.lock);
+		return;
+	}
 	table.valid = true;
 	table.rootParameterIndex = rootParameterIndex;
 	table.baseDescriptor = baseDescriptor;
@@ -236,19 +213,12 @@ void DX12BindingSetComputeRootDescriptorTable(
 		return;
 
 	BindingShard &shard = BindingShardFor(commandList);
-	// Read-check with shared lock first.
-	AcquireSRWLockShared(&shard.lock);
-	auto readIt = shard.states.find(commandList);
-	if (readIt != shard.states.end() &&
-	    readIt->second.computeTables[rootParameterIndex].valid &&
-	    readIt->second.computeTables[rootParameterIndex].baseDescriptor.ptr == baseDescriptor.ptr) {
-		ReleaseSRWLockShared(&shard.lock);
-		return;
-	}
-	ReleaseSRWLockShared(&shard.lock);
-
 	AcquireSRWLockExclusive(&shard.lock);
 	RootTableState &table = shard.states[commandList].computeTables[rootParameterIndex];
+	if (table.valid && table.baseDescriptor.ptr == baseDescriptor.ptr) {
+		ReleaseSRWLockExclusive(&shard.lock);
+		return;
+	}
 	table.valid = true;
 	table.rootParameterIndex = rootParameterIndex;
 	table.baseDescriptor = baseDescriptor;

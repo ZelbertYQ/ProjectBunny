@@ -13,6 +13,7 @@ uint32_t HashBytes(uint32_t seed, const void *data, size_t size)
 }
 
 SRWLOCK gResourceLock = SRWLOCK_INIT;
+SRWLOCK gDescriptorLock = SRWLOCK_INIT;
 std::vector<RootSignatureRecord> gRootSignatures;
 std::vector<DescriptorHeapRecord> gDescriptorHeaps;
 std::vector<DescriptorRecord> gDescriptors;
@@ -164,6 +165,7 @@ void RecordResource(
 void CleanupTrackedResources()
 {
 	AcquireSRWLockExclusive(&gResourceLock);
+	AcquireSRWLockExclusive(&gDescriptorLock);
 	gRootSignatures.clear();
 	gDescriptorHeaps.clear();
 	gDescriptors.clear();
@@ -175,6 +177,7 @@ void CleanupTrackedResources()
 	gResources.clear();
 	gResourceByPtr.clear();
 	gBufferResolveCache.clear();
+	ReleaseSRWLockExclusive(&gDescriptorLock);
 	ReleaseSRWLockExclusive(&gResourceLock);
 }
 
@@ -660,7 +663,7 @@ static void UpdateDescriptorResourceStateLocked(
 
 void RecordDescriptor(DescriptorRecord &&record)
 {
-	AcquireSRWLockExclusive(&gResourceLock);
+	AcquireSRWLockExclusive(&gDescriptorLock);
 	++gDescriptorRecordsSeen;
 	auto found = gDescriptorByCpuHandle.find(record.cpuHandle);
 	if (found != gDescriptorByCpuHandle.end()) {
@@ -671,7 +674,7 @@ void RecordDescriptor(DescriptorRecord &&record)
 	}
 	PruneDescriptorCacheLocked();
 	LogResourceTrackerStatsLocked();
-	ReleaseSRWLockExclusive(&gResourceLock);
+	ReleaseSRWLockExclusive(&gDescriptorLock);
 }
 
 bool ShouldTrackFullDescriptorMetadata()
@@ -726,7 +729,7 @@ void RecordDescriptorCopyRange(
 	if (increment == 0)
 		return;
 
-	AcquireSRWLockExclusive(&gResourceLock);
+	AcquireSRWLockExclusive(&gDescriptorLock);
 	for (UINT i = 0; i < count; ++i) {
 		const SIZE_T srcHandle = srcStart.ptr + static_cast<SIZE_T>(i) * increment;
 		const SIZE_T destHandle = destStart.ptr + static_cast<SIZE_T>(i) * increment;
@@ -738,7 +741,7 @@ void RecordDescriptorCopyRange(
 	}
 	PruneDescriptorCacheLocked();
 	LogResourceTrackerStatsLocked();
-	ReleaseSRWLockExclusive(&gResourceLock);
+	ReleaseSRWLockExclusive(&gDescriptorLock);
 }
 
 void DX12RecordPsoRootSignature(
@@ -751,7 +754,7 @@ void DX12RecordPsoRootSignature(
 	record.pipelineState = pipelineState;
 	record.rootSignature = rootSignature;
 
-	AcquireSRWLockExclusive(&gResourceLock);
+	AcquireSRWLockExclusive(&gDescriptorLock);
 	++gPsoRootRecordsSeen;
 	auto found = gPsoRootByIndex.find(psoIndex);
 	if (found != gPsoRootByIndex.end()) {
@@ -761,7 +764,7 @@ void DX12RecordPsoRootSignature(
 		gPsoRoots.push_back(std::move(record));
 	}
 	LogResourceTrackerStatsLocked();
-	ReleaseSRWLockExclusive(&gResourceLock);
+	ReleaseSRWLockExclusive(&gDescriptorLock);
 }
 void DX12RecordResourceBarrier(UINT numBarriers, const D3D12_RESOURCE_BARRIER *barriers)
 {
@@ -769,6 +772,7 @@ void DX12RecordResourceBarrier(UINT numBarriers, const D3D12_RESOURCE_BARRIER *b
 		return;
 
 	AcquireSRWLockExclusive(&gResourceLock);
+	AcquireSRWLockExclusive(&gDescriptorLock);
 	bool resourceStateChanged = false;
 	for (UINT i = 0; i < numBarriers; ++i) {
 		const D3D12_RESOURCE_BARRIER &barrier = barriers[i];
@@ -798,5 +802,6 @@ void DX12RecordResourceBarrier(UINT numBarriers, const D3D12_RESOURCE_BARRIER *b
 	}
 	if (resourceStateChanged)
 		gBufferResolveCache.clear();
+	ReleaseSRWLockExclusive(&gDescriptorLock);
 	ReleaseSRWLockExclusive(&gResourceLock);
 }

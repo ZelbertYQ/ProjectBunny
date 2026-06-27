@@ -144,7 +144,7 @@ static HRESULT STDMETHODCALLTYPE HookedCreateDescriptorHeap(
 			record.increment = device->GetDescriptorHandleIncrementSize(desc->Type);
 			descriptorHeap->Release();
 
-			AcquireSRWLockExclusive(&gResourceLock);
+			AcquireSRWLockExclusive(&gDescriptorLock);
 			++gDescriptorHeapRecordsSeen;
 			auto found = gDescriptorHeapByPtr.find(record.heap);
 			if (found != gDescriptorHeapByPtr.end()) {
@@ -154,7 +154,7 @@ static HRESULT STDMETHODCALLTYPE HookedCreateDescriptorHeap(
 				gDescriptorHeaps.push_back(record);
 			}
 			LogResourceTrackerStatsLocked();
-			ReleaseSRWLockExclusive(&gResourceLock);
+			ReleaseSRWLockExclusive(&gDescriptorLock);
 		}
 	}
 	return hr;
@@ -178,7 +178,7 @@ static HRESULT STDMETHODCALLTYPE HookedCreateRootSignature(
 		record.nodeMask = nodeMask;
 		ParseRootSignatureBlob(&record, blob, blobLength);
 
-		AcquireSRWLockExclusive(&gResourceLock);
+		AcquireSRWLockExclusive(&gDescriptorLock);
 		++gRootSignatureRecordsSeen;
 		auto found = gRootSignatureByPtr.find(record.rootSignature);
 		if (found != gRootSignatureByPtr.end()) {
@@ -188,7 +188,7 @@ static HRESULT STDMETHODCALLTYPE HookedCreateRootSignature(
 			gRootSignatures.push_back(std::move(record));
 		}
 		LogResourceTrackerStatsLocked();
-		ReleaseSRWLockExclusive(&gResourceLock);
+		ReleaseSRWLockExclusive(&gDescriptorLock);
 	}
 	return hr;
 }
