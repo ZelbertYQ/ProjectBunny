@@ -442,6 +442,12 @@ static void LogShaderOverrideCommandListLimited(
 	const DX12ModIaReplacement &replacement)
 {
 #if defined(_DEBUG)
+	if (!DX12DiagnosticsLoggingEnabled())
+		return;
+	static volatile LONG logCount = 0;
+	if (InterlockedIncrement(&logCount) > 512)
+		return;
+
 	std::wstring sections;
 	for (const Bunny::ShaderOverrideConfig *config : configs) {
 		if (!config)

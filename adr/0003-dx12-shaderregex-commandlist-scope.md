@@ -32,6 +32,10 @@ DX12 supports no-pattern ShaderRegex as a command-list trigger scope.
 
 At PSO creation time, DX12 records VS, PS, and CS shader models from DXBC or DXIL bytecode. At draw or dispatch time, the active PSO is matched against executable no-pattern ShaderRegex configs. Matches are executed through the existing ShaderOverride command-list executor, preserving the same passive TextureOverride model.
 
+For graphics PSOs, matching is unique by ShaderRegex section. If the same no-pattern ShaderRegex section lists both VS and PS models and both stages match the active PSO, DX12 executes that section once for the draw. The stage hashes may both explain why the section matched, but command-list execution is section scoped inside the PSO match cache.
+
+The PSO match cache is read under the shared Mod lock only on cache hits. Cache misses are built and stored under the exclusive Mod lock. Shared-lock writes to containers are not allowed.
+
 Pattern-backed ShaderRegex groups are parsed as non-executable in DX12 until shader patching is implemented. They do not activate ShaderOverride hot-path predicates by themselves.
 
 `CheckTextureOverride` now supports DX11-style targets for IA and explicit shader-stage CBV/SRV/UAV bindings:
@@ -60,3 +64,5 @@ The implementation stays inside the existing command-list execution model instea
 The current scope covers VS, PS, and CS shader model matching. HS, DS, and GS model matching are not part of this change because the immediate DX12 runtime only had draw and dispatch command-list selection for VS, PS, and CS.
 
 Namespaced ShaderRegex section parsing must ignore dots that belong to include namespaces or file names such as `KeFUY.ini`. Only dots in the section suffix after the namespace separator are valid ShaderRegex subsection separators.
+
+Broad ShaderRegex scopes such as `vs_6_0 ps_6_0` can still select many draws. That is compatible with DX11 authoring, but any further optimization must stay in the command-list-triggered TextureOverride lookup path. It must not reintroduce a global automatic TextureOverride matcher.

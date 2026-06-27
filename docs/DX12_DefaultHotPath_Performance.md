@@ -92,12 +92,33 @@ This also documents a build-system hazard: header-only layout changes in hook ho
 
 ### Debug Logging Policy
 
-DEBUG builds now enable DX12 diagnostic logging unconditionally. The `MIGOTO_DX12_DIAGNOSTIC_LOGS` environment switch and the DEBUG hook-call noisy API filter were removed from the active code path.
+DX12 diagnostic logging is controlled by `MIGOTO_DX12_DIAGNOSTIC_LOGS=1`.
 
-DEBUG logging still uses the background log queue instead of synchronous hook-side disk writes. The queue capacity is larger in DEBUG so full hook logging is less likely to drop lines during diagnosis.
+Startup, reload, and error-level logs remain available without the switch. Hook-call logs, `DX12FrameStats`, ShaderRegex match logs, and per-draw ShaderOverride command-list logs are diagnostic data and must not run by default.
+
+DEBUG logging still uses the background log queue instead of synchronous hook-side disk writes. The queue capacity is larger in DEBUG so full hook logging is less likely to drop lines during diagnosis, but hot-path debug logs are also capped where they can repeat every draw.
+
+### ShaderRegex Hot Path Failure
+
+The KeFUY ShaderRegex retest produced a 62 MB log and then became unresponsive. The log showed nearly every graphics draw executing the same ShaderRegex command list twice:
+
+- `DX12ShaderOverrideCommandList.matches:2`
+- both matched sections were identical
+- one entry came from the VS model match
+- one entry came from the PS model match
+
+This doubled every `CheckTextureOverride = ib/vb0/vb1` command-list lookup on an intentionally broad no-pattern ShaderRegex. It also multiplied diagnostic JSON formatting and queue pressure.
+
+DX12 now deduplicates no-pattern ShaderRegex configs by section within one PSO match cache, so a graphics PSO whose VS and PS both match the same ShaderRegex section executes that section once per draw.
+
+The PSO match cache also no longer writes under an SRW shared lock. Cache hits can be read under shared lock, but cache misses are built and stored under the exclusive Mod lock.
+
+The remaining risk is broad ShaderRegex scope itself: if a Mod lists common models such as `vs_6_0 ps_6_0`, many draws will still run one command-list check. DX11 has resource-hash caching optimized for this style. If GPU utilization remains low after deduplication, the next fix should be a clean command-list TextureOverride lookup cache keyed by current IA binding hash state and draw context, not a global TextureOverride fallback path.
 
 ### References
 
 - https://learn.microsoft.com/en-us/windows/win32/api/winnt/nf-winnt-interlockedincrement
 - https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12device-createcommittedresource
 - https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12device-createdescriptorheap
+- https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ns-d3d12-d3d12_graphics_pipeline_state_desc
+- https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12graphicscommandlist-setpipelinestate

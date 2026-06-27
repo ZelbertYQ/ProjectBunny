@@ -40,3 +40,5 @@ DX12 now matches the DX11 performance model more closely. Mod packs that only co
 The default injected path is lighter when TextureOverrides are loaded but no shader scope selected them. Loading `match_cs` TextureOverrides by itself no longer enables global compute binding capture, PSO tracking, per-frame binding resets, or resource metadata tracking.
 
 The old fallback-like automatic IA expansion path is removed instead of being bypassed. Future TextureOverride work should extend command-list execution or ShaderOverride matching, not reintroduce a global per-draw matcher.
+
+When a no-pattern ShaderRegex selects a broad shader scope, repeated `CheckTextureOverride` cost should be handled with caches inside the command-list lookup path. Optimizations must preserve the same trigger rule: TextureOverride stays passive until selected ShaderOverride or ShaderRegex command-list execution requests a specific target.

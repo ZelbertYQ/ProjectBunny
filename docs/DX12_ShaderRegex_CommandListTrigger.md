@@ -63,6 +63,23 @@ The loaded section name was namespaced through the include path, which contains 
 
 DX12 now mirrors the DX11 rule: namespaced section text can contain dots, so ShaderRegex subsection splitting only happens after the namespace. In the current DX12 namespaced section format, that means only dots after the final namespace separator can create `.Pattern`, `.Replace`, or `.InsertDeclarations` style sub-sections.
 
+### 2026-06-27 PSO Section Deduplication
+
+The next KeFUY retest parsed ShaderRegex successfully, but the runtime became unresponsive. The log showed the same ShaderRegex section executing twice for almost every graphics draw:
+
+- `matches:2`
+- both entries were `ShaderRegex\Mods\SSMTGeneratedMod\KeFUY\KeFUY.ini\_KeFUY_Trigger`
+- the first match came from `vs_6_0`
+- the second match came from `ps_6_0`
+
+The Mod's no-pattern ShaderRegex intentionally listed both VS and PS models so it could select a broad DX11-style command-list scope. In DX12, graphics draws execute against a selected PSO. Microsoft documents `SetPipelineState` as setting all shaders for the GPU pipeline, and the graphics PSO descriptor contains separate VS and PS shader bytecode fields. That means the DX12 draw-scope command-list match must be unique by ShaderRegex section within the active graphics PSO, not duplicated once per shader stage.
+
+DX12 now deduplicates no-pattern ShaderRegex transient configs by section for each PSO match cache. If the same section matches VS and PS in one graphics PSO, its command list runs once for that draw. Compute PSOs still match CS once.
+
+The PSO match cache was also corrected so shared locking only reads existing cache entries. Cache misses are built and stored under the exclusive Mod lock. Shared-lock writes to `gShaderOverridePsoMatchCache` were unsafe because SRW shared mode allows concurrent readers, while `unordered_map` mutation requires exclusive ownership.
+
+Hot-path ShaderRegex and ShaderOverride diagnostic logs are capped and remain behind `MIGOTO_DX12_DIAGNOSTIC_LOGS=1`, so diagnosis can be enabled deliberately without turning every draw into unbounded JSON queue work.
+
 ### References
 
 - https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ns-d3d12-d3d12_graphics_pipeline_state_desc

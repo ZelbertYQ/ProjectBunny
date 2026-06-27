@@ -100,13 +100,24 @@ void DX12HotPathUpdate()
 bool DX12ShouldLogHookCall(const char *api)
 {
 #if defined(_DEBUG)
-	if (!api || !api[0] || DX12IsInternalReplay())
+	if (!api || !api[0] || DX12IsInternalReplay() || !DX12DiagnosticsLoggingEnabled())
 		return false;
 	return true;
 #else
 	(void)api;
 	return false;
 #endif
+}
+
+static bool DX12EnvironmentFlagEnabled(const wchar_t *name)
+{
+	wchar_t value[32] = {};
+	DWORD chars = GetEnvironmentVariableW(name, value, ARRAYSIZE(value));
+	if (!chars)
+		return false;
+	return value[0] == L'1' ||
+		value[0] == L'y' || value[0] == L'Y' ||
+		value[0] == L't' || value[0] == L'T';
 }
 
 void DX12SetModule(HINSTANCE module)
@@ -121,11 +132,14 @@ HINSTANCE DX12GetModule()
 
 bool DX12DiagnosticsLoggingEnabled()
 {
-#if defined(_DEBUG)
-	return true;
-#else
-	return false;
-#endif
+	static std::atomic<int> enabled{ -1 };
+	int cached = enabled.load(std::memory_order_acquire);
+	if (cached >= 0)
+		return cached != 0;
+	int detected = DX12EnvironmentFlagEnabled(L"MIGOTO_DX12_DIAGNOSTIC_LOGS") ? 1 : 0;
+	int expected = -1;
+	enabled.compare_exchange_strong(expected, detected, std::memory_order_acq_rel);
+	return enabled.load(std::memory_order_acquire) != 0;
 }
 
 static DWORD WINAPI DX12LogThreadProc(void*)

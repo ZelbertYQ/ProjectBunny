@@ -24,6 +24,21 @@ static bool ShaderModelMatchesRegex(
 	return false;
 }
 
+static constexpr LONG ShaderOverrideHotPathLogLimit = 512;
+static volatile LONG gShaderOverridePsoCacheHitLogCount = 0;
+
+static bool AllowShaderOverrideHotPathLog(volatile LONG *counter)
+{
+#if defined(_DEBUG)
+	if (!DX12DiagnosticsLoggingEnabled())
+		return false;
+	return InterlockedIncrement(counter) <= ShaderOverrideHotPathLogLimit;
+#else
+	(void)counter;
+	return false;
+#endif
+}
+
 static Bunny::ShaderOverrideConfig MakeShaderOverrideFromRegex(
 	const Bunny::ShaderRegexConfig &regex, uint64_t hash)
 {
@@ -41,13 +56,11 @@ static Bunny::ShaderOverrideConfig MakeShaderOverrideFromRegex(
 }
 
 static void AppendShaderRegexForShaderLocked(
-	const DX12PsoShaderInfo &info,
 	uint64_t hash,
 	const std::string &shaderModel,
 	std::vector<Bunny::ShaderOverrideConfig> *regexConfigs,
 	std::unordered_set<std::wstring> *seen)
 {
-	(void)info;
 	if (!hash || shaderModel.empty() || !regexConfigs || !seen)
 		return;
 
@@ -55,15 +68,16 @@ static void AppendShaderRegexForShaderLocked(
 		const Bunny::ShaderRegexConfig &regex = item.second;
 		if (!ShaderModelMatchesRegex(regex, shaderModel))
 			continue;
-		std::wstring key = regex.section + L"#" + std::to_wstring(hash);
-		if (!seen->insert(key).second)
+		if (!seen->insert(regex.section).second)
 			continue;
 		regexConfigs->push_back(MakeShaderOverrideFromRegex(regex, hash));
 #if defined(_DEBUG)
-		DX12LogDebugJsonFunc("DX12ShaderRegexMatch",
-			"\"section\":\"%S\",\"hash\":\"%016llx\",\"model\":\"%S\"",
-			regex.section.c_str(), static_cast<unsigned long long>(hash),
-			std::wstring(shaderModel.begin(), shaderModel.end()).c_str());
+		if (DX12DiagnosticsLoggingEnabled()) {
+			DX12LogDebugJsonFunc("DX12ShaderRegexMatch",
+				"\"section\":\"%S\",\"hash\":\"%016llx\",\"model\":\"%S\"",
+				regex.section.c_str(), static_cast<unsigned long long>(hash),
+				std::wstring(shaderModel.begin(), shaderModel.end()).c_str());
+		}
 #endif
 	}
 }
@@ -85,27 +99,38 @@ static void BuildShaderOverrideConfigPointers(
 		configs->push_back(&config);
 }
 
-static void FindShaderOverridesForPsoLocked(
+static bool TryFindCachedShaderOverridesForPsoLocked(
 	ID3D12PipelineState *pipelineState, bool dispatch,
 	std::vector<const Bunny::ShaderOverrideConfig*> *configs)
 {
 	if (!configs)
-		return;
+		return true;
 	configs->clear();
 	if (!pipelineState)
-		return;
+		return true;
 
 	auto cached = gShaderOverridePsoMatchCache.find(pipelineState);
 	if (cached != gShaderOverridePsoMatchCache.end() &&
 	    cached->second.generation == gReloadGeneration) {
 		BuildShaderOverrideConfigPointers(&cached->second, dispatch, configs);
 #if defined(_DEBUG)
+		if (AllowShaderOverrideHotPathLog(&gShaderOverridePsoCacheHitLogCount)) {
 			DX12LogDebugJsonFunc("DX12ShaderOverridePsoMatchCache",
 				"\"status\":\"hit\",\"pso\":\"%p\",\"dispatch\":%s,\"matches\":%zu",
 				pipelineState, dispatch ? "true" : "false", configs->size());
+		}
 #endif
-		return;
+		return true;
 	}
+	return false;
+}
+
+static void FindShaderOverridesForPsoLocked(
+	ID3D12PipelineState *pipelineState, bool dispatch,
+	std::vector<const Bunny::ShaderOverrideConfig*> *configs)
+{
+	if (TryFindCachedShaderOverridesForPsoLocked(pipelineState, dispatch, configs))
+		return;
 
 	DX12PsoShaderInfo info = {};
 	if (!DX12GetPipelineStateShaderInfo(pipelineState, &info))
@@ -119,7 +144,7 @@ static void FindShaderOverridesForPsoLocked(
 		if (info.hasCS) {
 			AppendShaderOverrideForHashLocked(info.cs, &matchCache.dispatchConfigs, &seen);
 			AppendShaderRegexForShaderLocked(
-				info, info.cs, info.csModel,
+				info.cs, info.csModel,
 				&matchCache.regexDispatchConfigs, &regexSeen);
 		}
 		DX12ShaderOverridePsoMatchCache &stored =
@@ -132,13 +157,13 @@ static void FindShaderOverridesForPsoLocked(
 	if (info.hasVS) {
 		AppendShaderOverrideForHashLocked(info.vs, &matchCache.drawConfigs, &seen);
 		AppendShaderRegexForShaderLocked(
-			info, info.vs, info.vsModel,
+			info.vs, info.vsModel,
 			&matchCache.regexDrawConfigs, &regexSeen);
 	}
 	if (info.hasPS) {
 		AppendShaderOverrideForHashLocked(info.ps, &matchCache.drawConfigs, &seen);
 		AppendShaderRegexForShaderLocked(
-			info, info.ps, info.psModel,
+			info.ps, info.psModel,
 			&matchCache.regexDrawConfigs, &regexSeen);
 	}
 	gShaderOverridePsoMatchCache[pipelineState] = std::move(matchCache);
@@ -164,16 +189,23 @@ bool DX12ModPrepareShaderOverrideReplacement(
 		return false;
 
 	std::vector<const Bunny::ShaderOverrideConfig*> configs;
+	bool cached = false;
 	AcquireSRWLockShared(&gModLock);
-	FindShaderOverridesForPsoLocked(pipelineState, false, &configs);
+	cached = TryFindCachedShaderOverridesForPsoLocked(pipelineState, false, &configs);
 	ReleaseSRWLockShared(&gModLock);
 
-	if (configs.empty()) {
+	if (cached && configs.empty()) {
 		device->Release();
 		return false;
 	}
 
 	AcquireSRWLockExclusive(&gModLock);
+	FindShaderOverridesForPsoLocked(pipelineState, false, &configs);
+	if (configs.empty()) {
+		ReleaseSRWLockExclusive(&gModLock);
+		device->Release();
+		return false;
+	}
 	DX12CommandListExecutor executor(
 		device, commandList, iaState,
 		vertexCount, indexCount, instanceCount,
@@ -185,11 +217,12 @@ bool DX12ModPrepareShaderOverrideReplacement(
 		executor.RunShaderOverride(*config);
 	}
 	LogShaderOverrideCommandListLimited("pre", configs, *replacement);
+	bool changed = executor.Changed() || replacement->skip || !replacement->draws.empty() ||
+		!replacement->dispatches.empty();
 	ReleaseSRWLockExclusive(&gModLock);
 	device->Release();
 
-	return executor.Changed() || replacement->skip || !replacement->draws.empty() ||
-		!replacement->dispatches.empty();
+	return changed;
 }
 
 void DX12ModRunPostShaderOverrideReplacement(
@@ -207,12 +240,9 @@ void DX12ModRunPostShaderOverrideReplacement(
 		return;
 
 	std::vector<const Bunny::ShaderOverrideConfig*> configs;
-	AcquireSRWLockShared(&gModLock);
+	AcquireSRWLockExclusive(&gModLock);
 	FindShaderOverridesForPsoLocked(pipelineState, false, &configs);
-	ReleaseSRWLockShared(&gModLock);
-
 	if (!configs.empty()) {
-		AcquireSRWLockExclusive(&gModLock);
 		DX12CommandListExecutor executor(
 			device, commandList, iaState,
 			vertexCount, indexCount, instanceCount,
@@ -224,6 +254,8 @@ void DX12ModRunPostShaderOverrideReplacement(
 			executor.RunPostShaderOverrideLists(*config);
 		}
 		LogShaderOverrideCommandListLimited("post", configs, *replacement);
+		ReleaseSRWLockExclusive(&gModLock);
+	} else {
 		ReleaseSRWLockExclusive(&gModLock);
 	}
 	device->Release();

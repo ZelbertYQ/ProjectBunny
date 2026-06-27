@@ -54,7 +54,7 @@ THIS IS A FULLY VIBE CODING PROJECT SO DO NOT COMMIT HUMAN WRITE CODE BACK UNLES
 
 # HOW CAN YOU DO? 
 
-I don't care; I'm pretty optimistic — the worst case is it becomes another NinjaRipper.
+I don't care; I'm pretty optimistic — the worst case is it becomes another NinjaRipper(Which is already done, F8 dump and model extract works great, the rest part is all about buffer and shader replacement).
 
 Or you know, just develop for fun, how hard could it be ?
 
