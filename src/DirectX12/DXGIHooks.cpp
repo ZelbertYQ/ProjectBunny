@@ -364,6 +364,16 @@ static HRESULT STDMETHODCALLTYPE HookedCreateSwapChainForComposition(
 
 static HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain *swapChain, UINT syncInterval, UINT flags)
 {
+	if (gDX12HotPathSkipAll) {
+		PFN_PRESENT original = GetPresentOriginal(swapChain);
+		if (!original)
+			return DXGI_ERROR_INVALID_CALL;
+		HRESULT hr = original(swapChain, syncInterval, flags);
+		DX12IncrementPresentCount();
+		DX12HotPathUpdate();
+		return hr;
+	}
+
 	LogDXGIHookCall("IDXGISwapChain::Present", swapChain);
 	DX12_PROFILE_SCOPE(Present);
 
@@ -386,13 +396,16 @@ static HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain *swapChain, UINT s
 	LogPresentStage("Present", "afterOriginal", swapChain, hr);
 	LogPresentDeviceRemovedReason("Present", swapChain, hr);
 	DX12IncrementPresentCount();
+
+	// Bump tracking generation BEFORE Present blocks on GPU,
+	// so next frame's TLS caches are fresh when recording starts.
+	DX12CommandListRuntimeBumpTrackingGeneration();
+
 	LogPresentStage("Present", "beforeModBeginFrame", swapChain, hr);
 	DX12ModBeginFrame();
 
 	DX12HotPathUpdate();
 	LogPresentStage("Present", "afterHotPathUpdate", swapChain, hr);
-
-	DX12CommandListRuntimeBumpTrackingGeneration();
 
 	if (DX12HuntShouldDrawOverlay()) {
 		if (DX12GetOverlayWindow())
@@ -428,6 +441,16 @@ static HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain *swapChain, UINT s
 static HRESULT STDMETHODCALLTYPE HookedPresent1(
 	IDXGISwapChain1 *swapChain, UINT syncInterval, UINT flags, const DXGI_PRESENT_PARAMETERS *presentParameters)
 {
+	if (gDX12HotPathSkipAll) {
+		PFN_PRESENT1 original = GetPresent1Original(swapChain);
+		if (!original)
+			return DXGI_ERROR_INVALID_CALL;
+		HRESULT hr = original(swapChain, syncInterval, flags, presentParameters);
+		DX12IncrementPresentCount();
+		DX12HotPathUpdate();
+		return hr;
+	}
+
 	LogDXGIHookCall("IDXGISwapChain1::Present1", swapChain);
 
 	{
@@ -449,13 +472,16 @@ static HRESULT STDMETHODCALLTYPE HookedPresent1(
 	LogPresentStage("Present1", "afterOriginal", swapChain, hr);
 	LogPresentDeviceRemovedReason("Present1", swapChain, hr);
 	DX12IncrementPresentCount();
+
+	// Bump tracking generation BEFORE Present blocks on GPU,
+	// so next frame's TLS caches are fresh when recording starts.
+	DX12CommandListRuntimeBumpTrackingGeneration();
+
 	LogPresentStage("Present1", "beforeModBeginFrame", swapChain, hr);
 	DX12ModBeginFrame();
 
 	DX12HotPathUpdate();
 	LogPresentStage("Present1", "afterHotPathUpdate", swapChain, hr);
-
-	DX12CommandListRuntimeBumpTrackingGeneration();
 
 	if (DX12HuntShouldDrawOverlay()) {
 		if (DX12GetOverlayWindow())

@@ -1,6 +1,7 @@
 #include "DX12State.h"
 
 #include <Shlwapi.h>
+#include <array>
 #include <atomic>
 #include <deque>
 #include <stdarg.h>
@@ -40,6 +41,28 @@ static std::atomic<bool> gReleaseStartupLogging{ true };
 static CNktHookLib gHookMgr;
 static std::unordered_set<void*> gHookedFunctions;
 static std::unordered_map<void*, void*> gOriginalFunctions;
+static volatile LONG gHooksFinalized = 0;
+
+// Per-vtable original function cache: maps vtable_ptr → originals[256].
+// Populated during DX12InstallVTableHooks; read-only afterwards (no lock needed).
+static std::unordered_map<void*, std::array<void*, 256>> gVtableOriginals;
+
+void DX12CacheVtableOriginals(void *vtable, size_t maxSlot)
+{
+	if (!vtable || maxSlot == 0 || maxSlot > 256)
+		return;
+	void **slots = static_cast<void**>(vtable);
+	std::array<void*, 256> originals = {};
+	for (size_t i = 0; i < maxSlot; ++i) {
+		void *target = slots[i];
+		if (!target)
+			continue;
+		auto it = gOriginalFunctions.find(target);
+		if (it != gOriginalFunctions.end())
+			originals[i] = it->second;
+	}
+	gVtableOriginals[vtable] = originals;
+}
 
 volatile LONG gDX12HotPathSkipAll = 1;
 volatile LONG gDX12HotPathSkipBindings = 1;
@@ -489,10 +512,20 @@ DWORD DX12HookFunction(void **original, void *target, void *hook, const char *na
 	return result;
 }
 
+void DX12FinalizeHooks()
+{
+	InterlockedExchange(&gHooksFinalized, 1);
+}
+
 void *DX12GetOriginalFunction(void *target)
 {
 	if (!target)
 		return nullptr;
+
+	if (gHooksFinalized) {
+		auto it = gOriginalFunctions.find(target);
+		return it != gOriginalFunctions.end() ? it->second : nullptr;
+	}
 
 	AcquireSRWLockShared(&gStateLock);
 	auto it = gOriginalFunctions.find(target);

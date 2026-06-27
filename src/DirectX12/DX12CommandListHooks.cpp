@@ -4,6 +4,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <array>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -423,15 +424,38 @@ static T GetCommandQueueOriginal(ID3D12CommandQueue *queue, UINT slot, T fallbac
 		void **vtable = *reinterpret_cast<void***>(queue);
 		if (vtable) {
 			void *target = vtable[slot];
+
+			// Fast path: thread-local per-slot cache
 			if (slot < ARRAYSIZE(tCommandQueueOriginals) &&
 				tCommandQueueOriginals[slot].target == target &&
 				tCommandQueueOriginals[slot].original)
 				return reinterpret_cast<T>(tCommandQueueOriginals[slot].original);
 
+			// Medium path: per-vtable bulk cache
+			if (tVtableBaseCache.vtable == vtable && slot < 256 &&
+			    tVtableBaseCache.originals[slot]) {
+				void *original = tVtableBaseCache.originals[slot];
+				if (slot < ARRAYSIZE(tCommandQueueOriginals)) {
+					tCommandQueueOriginals[slot].target = target;
+					tCommandQueueOriginals[slot].original = original;
+				}
+				return reinterpret_cast<T>(original);
+			}
+
+			// Slow path: hash map lookup
 			void *original = DX12GetOriginalFunction(target);
-			if (slot < ARRAYSIZE(tCommandQueueOriginals) && original) {
-				tCommandQueueOriginals[slot].target = target;
-				tCommandQueueOriginals[slot].original = original;
+			if (original) {
+				if (slot < ARRAYSIZE(tCommandQueueOriginals)) {
+					tCommandQueueOriginals[slot].target = target;
+					tCommandQueueOriginals[slot].original = original;
+				}
+				if (tVtableBaseCache.vtable == vtable && slot < 256) {
+					tVtableBaseCache.originals[slot] = original;
+				} else if (slot < 256) {
+					tVtableBaseCache.vtable = vtable;
+					tVtableBaseCache.originals = {};
+					tVtableBaseCache.originals[slot] = original;
+				}
 			}
 			if (original)
 				return reinterpret_cast<T>(original);
@@ -487,6 +511,14 @@ static void LogCommandListStageEdge(
 		api ? api : "", stage ? stage : "", DX12GetPresentCount(), commandList);
 }
 
+// Per-thread vtable-base cache: avoids repeated hash map lookups
+// for command lists sharing the same vtable.
+struct VtableBaseCache {
+	void *vtable = nullptr;
+	std::array<void*, 256> originals{};
+};
+static thread_local VtableBaseCache tVtableBaseCache;
+
 template <typename T>
 static T GetCommandListOriginal(
 	ID3D12GraphicsCommandList *commandList, UINT slot, T fallback, const char *name)
@@ -495,15 +527,39 @@ static T GetCommandListOriginal(
 		void **vtable = *reinterpret_cast<void***>(commandList);
 		if (vtable) {
 			void *target = vtable[slot];
+
+			// Fast path: thread-local per-slot cache (same vtable target, same thread)
 			if (slot < ARRAYSIZE(tCommandListOriginals) &&
 				tCommandListOriginals[slot].target == target &&
 				tCommandListOriginals[slot].original)
 				return reinterpret_cast<T>(tCommandListOriginals[slot].original);
 
+			// Medium path: per-vtable bulk cache (different slot, same vtable)
+			if (tVtableBaseCache.vtable == vtable && slot < 256 &&
+			    tVtableBaseCache.originals[slot]) {
+				void *original = tVtableBaseCache.originals[slot];
+				if (slot < ARRAYSIZE(tCommandListOriginals)) {
+					tCommandListOriginals[slot].target = target;
+					tCommandListOriginals[slot].original = original;
+				}
+				return reinterpret_cast<T>(original);
+			}
+
+			// Slow path: hash map lookup
 			void *original = DX12GetOriginalFunction(target);
-			if (slot < ARRAYSIZE(tCommandListOriginals) && original) {
-				tCommandListOriginals[slot].target = target;
-				tCommandListOriginals[slot].original = original;
+			if (original) {
+				// Populate thread-local caches for future calls
+				if (slot < ARRAYSIZE(tCommandListOriginals)) {
+					tCommandListOriginals[slot].target = target;
+					tCommandListOriginals[slot].original = original;
+				}
+				if (tVtableBaseCache.vtable == vtable && slot < 256) {
+					tVtableBaseCache.originals[slot] = original;
+				} else if (slot < 256) {
+					tVtableBaseCache.vtable = vtable;
+					tVtableBaseCache.originals = {};
+					tVtableBaseCache.originals[slot] = original;
+				}
 			}
 			if (original)
 				return reinterpret_cast<T>(original);
@@ -666,6 +722,14 @@ static void STDMETHODCALLTYPE HookedQueueCopyTileMappings(
 static void STDMETHODCALLTYPE HookedQueueExecuteCommandLists(
 	ID3D12CommandQueue *queue, UINT numCommandLists, ID3D12CommandList *const *commandLists)
 {
+	if (gDX12HotPathSkipAll) {
+		PFN_QUEUE_EXECUTE_COMMAND_LISTS original =
+			DX12_QUEUE_ORIG(queue, 10, PFN_QUEUE_EXECUTE_COMMAND_LISTS, ExecuteCommandLists);
+		if (original)
+			original(queue, numCommandLists, commandLists);
+		return;
+	}
+
 	if (DX12IsInternalReplay()) {
 		PFN_QUEUE_EXECUTE_COMMAND_LISTS original =
 			DX12_QUEUE_ORIG(queue, 10, PFN_QUEUE_EXECUTE_COMMAND_LISTS, ExecuteCommandLists);
@@ -681,15 +745,21 @@ static void STDMETHODCALLTYPE HookedQueueExecuteCommandLists(
 	PFN_QUEUE_EXECUTE_COMMAND_LISTS original =
 		DX12_QUEUE_ORIG(queue, 10, PFN_QUEUE_EXECUTE_COMMAND_LISTS, ExecuteCommandLists);
 	if (original) {
+#if defined(_DEBUG)
 		LogQueueStage("ExecuteCommandLists", "beforeOriginal", queue, numCommandLists);
 		ULONGLONG startTick = GetTickCount64();
+#endif
 		original(queue, numCommandLists, commandLists);
+#if defined(_DEBUG)
 		ULONGLONG originalEndTick = GetTickCount64();
 		LogQueueStage("ExecuteCommandLists", "afterOriginal", queue, numCommandLists,
 			nullptr, 0, S_OK, originalEndTick - startTick);
+#endif
 		DX12ModNotifyCommandListsSubmitted(queue, numCommandLists, commandLists);
+#if defined(_DEBUG)
 		LogQueueStage("ExecuteCommandLists", "afterNotify", queue, numCommandLists,
 			nullptr, 0, S_OK, GetTickCount64() - originalEndTick);
+#endif
 	}
 }
 
@@ -737,11 +807,15 @@ static HRESULT STDMETHODCALLTYPE HookedQueueSignal(
 		DX12_QUEUE_ORIG(queue, 14, PFN_QUEUE_SIGNAL, Signal);
 	if (!original)
 		return E_FAIL;
+#if defined(_DEBUG)
 	LogQueueStage("Signal", "beforeOriginal", queue, 0, fence, value);
 	ULONGLONG startTick = GetTickCount64();
+#endif
 	HRESULT hr = original(queue, fence, value);
+#if defined(_DEBUG)
 	LogQueueStage("Signal", "afterOriginal", queue, 0, fence, value, hr,
 		GetTickCount64() - startTick);
+#endif
 	return hr;
 }
 
@@ -754,11 +828,15 @@ static HRESULT STDMETHODCALLTYPE HookedQueueWait(
 		DX12_QUEUE_ORIG(queue, 15, PFN_QUEUE_WAIT, Wait);
 	if (!original)
 		return E_FAIL;
+#if defined(_DEBUG)
 	LogQueueStage("Wait", "beforeOriginal", queue, 0, fence, value);
 	ULONGLONG startTick = GetTickCount64();
+#endif
 	HRESULT hr = original(queue, fence, value);
+#if defined(_DEBUG)
 	LogQueueStage("Wait", "afterOriginal", queue, 0, fence, value, hr,
 		GetTickCount64() - startTick);
+#endif
 	return hr;
 }
 
@@ -770,11 +848,15 @@ static HRESULT STDMETHODCALLTYPE HookedQueueGetTimestampFrequency(
 		DX12_QUEUE_ORIG(queue, 16, PFN_QUEUE_GET_TIMESTAMP_FREQUENCY, GetTimestampFrequency);
 	if (!original)
 		return E_FAIL;
+#if defined(_DEBUG)
 	LogQueueStage("GetTimestampFrequency", "beforeOriginal", queue);
 	ULONGLONG startTick = GetTickCount64();
+#endif
 	HRESULT hr = original(queue, frequency);
+#if defined(_DEBUG)
 	LogQueueStage("GetTimestampFrequency", "afterOriginal", queue, 0, nullptr, 0, hr,
 		GetTickCount64() - startTick);
+#endif
 	return hr;
 }
 
@@ -786,11 +868,15 @@ static HRESULT STDMETHODCALLTYPE HookedQueueGetClockCalibration(
 		DX12_QUEUE_ORIG(queue, 17, PFN_QUEUE_GET_CLOCK_CALIBRATION, GetClockCalibration);
 	if (!original)
 		return E_FAIL;
+#if defined(_DEBUG)
 	LogQueueStage("GetClockCalibration", "beforeOriginal", queue);
 	ULONGLONG startTick = GetTickCount64();
+#endif
 	HRESULT hr = original(queue, gpuTimestamp, cpuTimestamp);
+#if defined(_DEBUG)
 	LogQueueStage("GetClockCalibration", "afterOriginal", queue, 0, nullptr, 0, hr,
 		GetTickCount64() - startTick);
+#endif
 	return hr;
 }
 
@@ -813,24 +899,36 @@ static HRESULT STDMETHODCALLTYPE HookedResetCommandList(
 	DX12_PROFILE_SCOPE(ResetCommandList);
 	LogDX12Call("ID3D12GraphicsCommandList::Reset", commandList,
 		" allocator=%p initialPso=%p", allocator, initialState);
+	PFN_RESET_COMMAND_LIST original = DX12_CL_ORIG(commandList, 10, PFN_RESET_COMMAND_LIST, ResetCommandList);
+#if defined(_DEBUG)
 	ULONGLONG startTick = GetTickCount64();
 	ULONGLONG stageTick = startTick;
-	PFN_RESET_COMMAND_LIST original = DX12_CL_ORIG(commandList, 10, PFN_RESET_COMMAND_LIST, ResetCommandList);
 	LogCommandListStageEdge("Reset", "beforeOriginal", commandList);
 	stageTick = GetTickCount64();
+#endif
 	HRESULT hr = original ? original(commandList, allocator, initialState) : E_FAIL;
+#if defined(_DEBUG)
 	LogCommandListStage("Reset", "afterOriginal", commandList, hr, GetTickCount64() - stageTick);
+#endif
 	if (SUCCEEDED(hr)) {
+#if defined(_DEBUG)
 		stageTick = GetTickCount64();
 		LogCommandListStageEdge("Reset", "beforeRuntime", commandList);
+#endif
 		DX12CommandListRuntimeReset(commandList, initialState);
+#if defined(_DEBUG)
 		LogCommandListStage("Reset", "afterRuntime", commandList, S_OK, GetTickCount64() - stageTick);
 		stageTick = GetTickCount64();
 		LogCommandListStageEdge("Reset", "beforeLifecycle", commandList);
+#endif
 		DX12CommandListLifecycleReset(commandList, initialState);
+#if defined(_DEBUG)
 		LogCommandListStage("Reset", "afterLifecycle", commandList, S_OK, GetTickCount64() - stageTick);
 	}
 	LogCommandListStage("Reset", "end", commandList, hr, GetTickCount64() - startTick);
+#else
+	}
+#endif
 	return hr;
 }
 

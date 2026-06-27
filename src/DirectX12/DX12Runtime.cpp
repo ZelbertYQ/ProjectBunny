@@ -69,6 +69,7 @@ void BunnyDX12RuntimeInitialize(HINSTANCE module, DX12LoadRealD3D12Fn loadRealD3
 	HANDLE thread = CreateThread(nullptr, 0, DX12WorkerThread, nullptr, 0, nullptr);
 	if (thread)
 		CloseHandle(thread);
+	DX12FinalizeHooks();
 
 	if (startOverlay) {
 		HANDLE overlayThread = CreateThread(nullptr, 0, DX12OverlayThread, nullptr, 0, nullptr);

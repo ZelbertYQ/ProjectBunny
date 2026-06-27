@@ -1,5 +1,7 @@
 #include "DX12ResourceTrackerPrivate.h"
 
+#include <array>
+
 #include "DX12HookManager.h"
 
 typedef HRESULT(STDMETHODCALLTYPE *PFN_CREATE_DESCRIPTOR_HEAP)(

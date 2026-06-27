@@ -24,6 +24,7 @@ void DX12FlushLog();
 
 DWORD DX12HookFunction(void **original, void *target, void *hook, const char *name);
 void *DX12GetOriginalFunction(void *target);
+void DX12FinalizeHooks();
 void DX12UnhookAll();
 
 LONG DX12IncrementPresentCount();
@@ -47,6 +48,10 @@ extern volatile LONG gDX12HotPathSkipAll;
 extern volatile LONG gDX12HotPathSkipBindings;
 extern volatile LONG gDX12HotPathSkipGraphicsBindings;
 extern volatile LONG gDX12HotPathTrackResourceMetadata;
+
+// Per-vtable original function cache: maps vtable pointer → originals[256].
+// Populated during hook installation; read-only afterwards (no lock needed).
+void DX12CacheVtableOriginals(void *vtable, size_t maxSlot);
 
 extern volatile LONG gPerFrameTotalDraws;
 extern volatile LONG gPerFrameTotalDispatches;
