@@ -54,7 +54,13 @@ bool DX12ModHasShaderOverride(uint64_t hash)
 
 bool DX12ModHasActiveShaderOverrides()
 {
-	return gHasShaderOverrides != 0 &&
+	return (gHasShaderOverrides != 0 || gHasShaderRegexes != 0) &&
+		InterlockedCompareExchange(&gDx12SafeMode, 0, 0) == 0;
+}
+
+bool DX12ModNeedsShaderDescriptorTracking()
+{
+	return gHasShaderDescriptorTextureOverrideTriggers != 0 &&
 		InterlockedCompareExchange(&gDx12SafeMode, 0, 0) == 0;
 }
 
@@ -69,6 +75,7 @@ bool DX12ModHasAnyActiveOverrides()
 {
 	return InterlockedCompareExchange(&gDx12SafeMode, 0, 0) == 0 &&
 		(gHasShaderOverrides != 0 ||
+		 gHasShaderRegexes != 0 ||
 		 (gHasTextureOverrides != 0 && gHasShaderTriggeredTextureOverrides != 0));
 }
 

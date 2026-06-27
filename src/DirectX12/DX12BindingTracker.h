@@ -22,6 +22,7 @@ struct DX12FrameResourceBinding
 	UINT rootParameterIndex = 0;
 	UINT rangeIndex = UINT_MAX;
 	UINT rangeType = UINT_MAX;
+	UINT shaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 	UINT shaderRegister = UINT_MAX;
 	UINT registerSpace = 0;
 	UINT descriptorOffset = 0;
@@ -89,6 +90,7 @@ struct DX12CurrentComputeUavBinding
 {
 	UINT rootParameterIndex = 0;
 	UINT rangeIndex = UINT_MAX;
+	UINT shaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 	UINT shaderRegister = UINT_MAX;
 	UINT registerSpace = 0;
 	UINT descriptorOffset = 0;
@@ -102,6 +104,8 @@ struct DX12CurrentComputeUavBinding
 	DX12DescriptorSummary descriptor;
 	bool hasDescriptor = false;
 };
+
+using DX12CurrentShaderResourceBinding = DX12CurrentComputeUavBinding;
 
 struct DX12CurrentRootConstants
 {
@@ -166,6 +170,11 @@ bool DX12BindingGetCurrentComputeSrvs(
 bool DX12BindingGetCurrentComputeCbvs(
 	ID3D12GraphicsCommandList *commandList,
 	std::vector<DX12CurrentComputeUavBinding> *cbvs);
+bool DX12BindingGetCurrentShaderResourceBindings(
+	ID3D12GraphicsCommandList *commandList,
+	bool compute,
+	D3D12_DESCRIPTOR_RANGE_TYPE rangeType,
+	std::vector<DX12CurrentShaderResourceBinding> *bindings);
 bool DX12BindingGetCurrentComputeRootConstants(
 	ID3D12GraphicsCommandList *commandList,
 	std::vector<DX12CurrentRootConstants> *constants);

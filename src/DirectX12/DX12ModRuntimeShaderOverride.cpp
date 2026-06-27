@@ -12,6 +12,79 @@ static void AppendShaderOverrideForHashLocked(
 	configs->push_back(&it->second);
 }
 
+static bool ShaderModelMatchesRegex(
+	const Bunny::ShaderRegexConfig &regex, const std::string &shaderModel)
+{
+	if (regex.hasPattern || shaderModel.empty())
+		return false;
+	for (const std::string &model : regex.shaderModels) {
+		if (model == shaderModel)
+			return true;
+	}
+	return false;
+}
+
+static Bunny::ShaderOverrideConfig MakeShaderOverrideFromRegex(
+	const Bunny::ShaderRegexConfig &regex, uint64_t hash)
+{
+	Bunny::ShaderOverrideConfig config;
+	config.section = regex.section;
+	config.originalSection = regex.originalSection;
+	config.sourcePath = regex.sourcePath;
+	config.sourceDir = regex.sourceDir;
+	config.iniNamespace = regex.iniNamespace;
+	config.hash = hash;
+	config.handlingSkip = regex.handlingSkip;
+	config.commandLists = regex.commandLists;
+	config.actions = regex.actions;
+	return config;
+}
+
+static void AppendShaderRegexForShaderLocked(
+	const DX12PsoShaderInfo &info,
+	uint64_t hash,
+	const std::string &shaderModel,
+	std::vector<Bunny::ShaderOverrideConfig> *regexConfigs,
+	std::unordered_set<std::wstring> *seen)
+{
+	(void)info;
+	if (!hash || shaderModel.empty() || !regexConfigs || !seen)
+		return;
+
+	for (const auto &item : gShaderRegexes) {
+		const Bunny::ShaderRegexConfig &regex = item.second;
+		if (!ShaderModelMatchesRegex(regex, shaderModel))
+			continue;
+		std::wstring key = regex.section + L"#" + std::to_wstring(hash);
+		if (!seen->insert(key).second)
+			continue;
+		regexConfigs->push_back(MakeShaderOverrideFromRegex(regex, hash));
+#if defined(_DEBUG)
+		DX12LogDebugJsonFunc("DX12ShaderRegexMatch",
+			"\"section\":\"%S\",\"hash\":\"%016llx\",\"model\":\"%S\"",
+			regex.section.c_str(), static_cast<unsigned long long>(hash),
+			std::wstring(shaderModel.begin(), shaderModel.end()).c_str());
+#endif
+	}
+}
+
+static void BuildShaderOverrideConfigPointers(
+	DX12ShaderOverridePsoMatchCache *cache,
+	bool dispatch,
+	std::vector<const Bunny::ShaderOverrideConfig*> *configs)
+{
+	if (!cache || !configs)
+		return;
+	configs->clear();
+	const std::vector<const Bunny::ShaderOverrideConfig*> &direct =
+		dispatch ? cache->dispatchConfigs : cache->drawConfigs;
+	configs->insert(configs->end(), direct.begin(), direct.end());
+	std::vector<Bunny::ShaderOverrideConfig> &regex =
+		dispatch ? cache->regexDispatchConfigs : cache->regexDrawConfigs;
+	for (Bunny::ShaderOverrideConfig &config : regex)
+		configs->push_back(&config);
+}
+
 static void FindShaderOverridesForPsoLocked(
 	ID3D12PipelineState *pipelineState, bool dispatch,
 	std::vector<const Bunny::ShaderOverrideConfig*> *configs)
@@ -25,7 +98,7 @@ static void FindShaderOverridesForPsoLocked(
 	auto cached = gShaderOverridePsoMatchCache.find(pipelineState);
 	if (cached != gShaderOverridePsoMatchCache.end() &&
 	    cached->second.generation == gReloadGeneration) {
-		*configs = dispatch ? cached->second.dispatchConfigs : cached->second.drawConfigs;
+		BuildShaderOverrideConfigPointers(&cached->second, dispatch, configs);
 #if defined(_DEBUG)
 			DX12LogDebugJsonFunc("DX12ShaderOverridePsoMatchCache",
 				"\"status\":\"hit\",\"pso\":\"%p\",\"dispatch\":%s,\"matches\":%zu",
@@ -39,22 +112,38 @@ static void FindShaderOverridesForPsoLocked(
 		return;
 
 	std::unordered_set<std::wstring> seen;
+	std::unordered_set<std::wstring> regexSeen;
 	DX12ShaderOverridePsoMatchCache matchCache;
 	matchCache.generation = gReloadGeneration;
 	if (dispatch) {
-		if (info.hasCS)
+		if (info.hasCS) {
 			AppendShaderOverrideForHashLocked(info.cs, &matchCache.dispatchConfigs, &seen);
-		*configs = matchCache.dispatchConfigs;
-		gShaderOverridePsoMatchCache[pipelineState] = std::move(matchCache);
+			AppendShaderRegexForShaderLocked(
+				info, info.cs, info.csModel,
+				&matchCache.regexDispatchConfigs, &regexSeen);
+		}
+		DX12ShaderOverridePsoMatchCache &stored =
+			gShaderOverridePsoMatchCache[pipelineState];
+		stored = std::move(matchCache);
+		BuildShaderOverrideConfigPointers(&stored, dispatch, configs);
 		return;
 	}
 
-	if (info.hasVS)
+	if (info.hasVS) {
 		AppendShaderOverrideForHashLocked(info.vs, &matchCache.drawConfigs, &seen);
-	if (info.hasPS)
+		AppendShaderRegexForShaderLocked(
+			info, info.vs, info.vsModel,
+			&matchCache.regexDrawConfigs, &regexSeen);
+	}
+	if (info.hasPS) {
 		AppendShaderOverrideForHashLocked(info.ps, &matchCache.drawConfigs, &seen);
-	*configs = matchCache.drawConfigs;
+		AppendShaderRegexForShaderLocked(
+			info, info.ps, info.psModel,
+			&matchCache.regexDrawConfigs, &regexSeen);
+	}
 	gShaderOverridePsoMatchCache[pipelineState] = std::move(matchCache);
+	BuildShaderOverrideConfigPointers(
+		&gShaderOverridePsoMatchCache[pipelineState], dispatch, configs);
 }
 
 bool DX12ModPrepareShaderOverrideReplacement(

@@ -38,6 +38,46 @@ static bool ParseVertexBufferTarget(const std::wstring &text, uint32_t *slot)
 	return true;
 }
 
+static bool ParseTargetSlot(const std::wstring &text, size_t start, uint32_t *slot)
+{
+	if (!slot || start >= text.size())
+		return false;
+
+	uint32_t parsed = 0;
+	for (size_t i = start; i < text.size(); ++i) {
+		if (text[i] < L'0' || text[i] > L'9')
+			return false;
+		parsed = parsed * 10 + static_cast<uint32_t>(text[i] - L'0');
+	}
+
+	*slot = parsed;
+	return true;
+}
+
+static bool ParseShaderStagePrefix(
+	const std::wstring &text, size_t *prefixLength, CommandListShaderStage *stage)
+{
+	if (!prefixLength || !stage || text.size() < 3 || text[2] != L'-')
+		return false;
+
+	if (text[0] == L'v' && text[1] == L's') {
+		*prefixLength = 3;
+		*stage = CommandListShaderStage::Vertex;
+		return true;
+	}
+	if (text[0] == L'p' && text[1] == L's') {
+		*prefixLength = 3;
+		*stage = CommandListShaderStage::Pixel;
+		return true;
+	}
+	if (text[0] == L'c' && text[1] == L's') {
+		*prefixLength = 3;
+		*stage = CommandListShaderStage::Compute;
+		return true;
+	}
+	return false;
+}
+
 bool ParseCommandListTarget(const std::wstring &text, CommandListTarget *target)
 {
 	if (!target)
@@ -55,6 +95,34 @@ bool ParseCommandListTarget(const std::wstring &text, CommandListTarget *target)
 		target->kind = CommandListTargetKind::VertexBuffer;
 		target->slot = slot;
 		return true;
+	}
+
+	size_t prefixLength = 0;
+	CommandListShaderStage stage = CommandListShaderStage::Unknown;
+	if (ParseShaderStagePrefix(value, &prefixLength, &stage)) {
+		if (value.rfind(L"cb", prefixLength) == prefixLength &&
+		    ParseTargetSlot(value, prefixLength + 2, &slot)) {
+			target->kind = CommandListTargetKind::ConstantBuffer;
+			target->stage = stage;
+			target->slot = slot;
+			return true;
+		}
+		if (value.rfind(L"t", prefixLength) == prefixLength &&
+		    ParseTargetSlot(value, prefixLength + 1, &slot)) {
+			target->kind = CommandListTargetKind::ShaderResource;
+			target->stage = stage;
+			target->slot = slot;
+			return true;
+		}
+		if (value.rfind(L"u", prefixLength) == prefixLength &&
+		    ParseTargetSlot(value, prefixLength + 1, &slot) &&
+		    (stage == CommandListShaderStage::Pixel ||
+		     stage == CommandListShaderStage::Compute)) {
+			target->kind = CommandListTargetKind::UnorderedAccessView;
+			target->stage = stage;
+			target->slot = slot;
+			return true;
+		}
 	}
 	return false;
 }
@@ -75,9 +143,6 @@ static std::wstring ResolveCommandListReference(
 	if (ref.empty())
 		return L"";
 
-	// DX11 treats CommandList, BuiltInCommandList, Present, and Constants as
-	// command-list sections. Preserve explicit prefixes so run=BuiltInCommandList*
-	// does not get rewritten into the unrelated CommandList* namespace.
 	if (IsExplicitCommandListSection(ref))
 		return MakeNamespacedSectionName(ref, iniNamespace);
 	return ResolveNamespacedSectionReference(ref, L"CommandList", iniNamespace);
@@ -184,6 +249,9 @@ bool ParseCommandListActionFromEntry(
 
 	CommandListTarget target;
 	if (ParseCommandListTarget(key, &target)) {
+		if (target.kind != CommandListTargetKind::IndexBuffer &&
+		    target.kind != CommandListTargetKind::VertexBuffer)
+			return false;
 		action->kind = target.kind == CommandListTargetKind::IndexBuffer ?
 			CommandListActionKind::SetIndexBuffer :
 			CommandListActionKind::SetVertexBuffer;
@@ -284,4 +352,4 @@ void ParseCommandListSections(const IniDocument &ini, CommandListMap *commandLis
 	}
 }
 
-} // namespace Bunny
+}

@@ -8,6 +8,7 @@ add_library(BunnyCore STATIC
     MigotoConfig.cpp
     MigotoResource.cpp
     MigotoShaderOverride.cpp
+    MigotoShaderRegex.cpp
     MigotoTextureOverride.cpp
     ${CMAKE_SOURCE_DIR}/src/common/ini_parser_lite.cpp
 )

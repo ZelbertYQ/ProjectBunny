@@ -97,6 +97,118 @@ static bool ShaderHasChunk(const std::vector<uint8_t> &bytecode, uint32_t fourCC
 	return false;
 }
 
+static const char *ShaderKindPrefix(uint32_t kind)
+{
+	switch (kind) {
+	case 0:
+		return "ps";
+	case 1:
+		return "vs";
+	case 2:
+		return "gs";
+	case 3:
+		return "hs";
+	case 4:
+		return "ds";
+	case 5:
+		return "cs";
+	default:
+		return nullptr;
+	}
+}
+
+static bool FormatShaderModel(uint32_t kind, uint32_t major, uint32_t minor, std::string *model)
+{
+	if (!model)
+		return false;
+	const char *prefix = ShaderKindPrefix(kind);
+	if (!prefix)
+		return false;
+	char text[16] = {};
+	sprintf_s(text, "%s_%u_%u", prefix, major, minor);
+	*model = text;
+	return true;
+}
+
+static bool GetDxbcShaderModel(const void *data, size_t size, std::string *model)
+{
+	if (!data || size < 32 || !model)
+		return false;
+
+	const uint8_t *bytes = static_cast<const uint8_t*>(data);
+	if (memcmp(bytes, "DXBC", 4))
+		return false;
+
+	uint32_t chunkCount = 0;
+	if (!ReadU32LE(bytes, size, 28, &chunkCount))
+		return false;
+
+	for (uint32_t i = 0; i < chunkCount; ++i) {
+		uint32_t chunkOffset = 0;
+		if (!ReadU32LE(bytes, size, 32 + sizeof(uint32_t) * i, &chunkOffset))
+			return false;
+		if (chunkOffset + 12 > size)
+			continue;
+		uint32_t chunkFourCC = 0;
+		memcpy(&chunkFourCC, bytes + chunkOffset, sizeof(chunkFourCC));
+		if (chunkFourCC != MakeFourCC('S', 'H', 'D', 'R') &&
+		    chunkFourCC != MakeFourCC('S', 'H', 'E', 'X'))
+			continue;
+		uint32_t versionToken = 0;
+		if (!ReadU32LE(bytes, size, chunkOffset + 8, &versionToken))
+			continue;
+		const uint32_t kind = (versionToken >> 16) & 0xffff;
+		const uint32_t major = (versionToken >> 4) & 0xf;
+		const uint32_t minor = versionToken & 0xf;
+		return FormatShaderModel(kind, major, minor, model);
+	}
+	return false;
+}
+
+static bool GetDxilShaderModel(const void *data, size_t size, std::string *model)
+{
+	if (!data || size < 32 || !model)
+		return false;
+
+	const uint8_t *bytes = static_cast<const uint8_t*>(data);
+	if (memcmp(bytes, "DXBC", 4))
+		return false;
+
+	uint32_t chunkCount = 0;
+	if (!ReadU32LE(bytes, size, 28, &chunkCount))
+		return false;
+
+	for (uint32_t i = 0; i < chunkCount; ++i) {
+		uint32_t chunkOffset = 0;
+		if (!ReadU32LE(bytes, size, 32 + sizeof(uint32_t) * i, &chunkOffset))
+			return false;
+		if (chunkOffset + 16 > size)
+			continue;
+		uint32_t chunkFourCC = 0;
+		memcpy(&chunkFourCC, bytes + chunkOffset, sizeof(chunkFourCC));
+		if (chunkFourCC != MakeFourCC('D', 'X', 'I', 'L'))
+			continue;
+		uint32_t programVersion = 0;
+		if (!ReadU32LE(bytes, size, chunkOffset + 8, &programVersion))
+			continue;
+		const uint32_t kind = (programVersion >> 16) & 0xffff;
+		const uint32_t major = (programVersion >> 4) & 0xf;
+		const uint32_t minor = programVersion & 0xf;
+		return FormatShaderModel(kind, major, minor, model);
+	}
+	return false;
+}
+
+static bool GetShaderModel(const D3D12_SHADER_BYTECODE &bytecode, std::string *model)
+{
+	if (!bytecode.pShaderBytecode || bytecode.BytecodeLength == 0 || !model)
+		return false;
+	return GetDxilShaderModel(
+		bytecode.pShaderBytecode, bytecode.BytecodeLength, model) ||
+		GetDxbcShaderModel(
+			bytecode.pShaderBytecode, bytecode.BytecodeLength, model);
+}
+
 static bool ShaderIsDXIL(const ShaderRecord &record)
 {
 	return ShaderHasChunk(record.bytecode, MakeFourCC('D', 'X', 'I', 'L'));
@@ -130,6 +242,9 @@ static void RecordPsoShaderSummaryLocked(const DX12PsoShaderInfo &info)
 	summary.vs = info.vs;
 	summary.ps = info.ps;
 	summary.cs = info.cs;
+	summary.vsModel = info.vsModel;
+	summary.psModel = info.psModel;
+	summary.csModel = info.csModel;
 	gPsoShaderSummaryByIndex[info.psoIndex] = summary;
 }
 
@@ -165,15 +280,20 @@ static void RecordShaderLocked(
 	std::string key = MakeShaderKey(stage, hash);
 	pso.shaders.push_back(key);
 	if (info) {
+		std::string shaderModel;
+		GetShaderModel(bytecode, &shaderModel);
 		if (!strcmp(stage, "vs")) {
 			info->hasVS = true;
 			info->vs = hash;
+			info->vsModel = shaderModel;
 		} else if (!strcmp(stage, "ps")) {
 			info->hasPS = true;
 			info->ps = hash;
+			info->psModel = shaderModel;
 		} else if (!strcmp(stage, "cs")) {
 			info->hasCS = true;
 			info->cs = hash;
+			info->csModel = shaderModel;
 		}
 	}
 

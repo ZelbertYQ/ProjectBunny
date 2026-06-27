@@ -148,7 +148,7 @@ private:
 		const Bunny::CommandListTarget &target) const
 	{
 		return FindTargetTextureOverrideLocked(
-			mIaState, target, mVertexCount, mIndexCount, mInstanceCount,
+			mCommandList, mIaState, target, mVertexCount, mIndexCount, mInstanceCount,
 			mFirstVertex, mFirstIndex);
 	}
 

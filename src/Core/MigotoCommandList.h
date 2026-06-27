@@ -14,12 +14,24 @@ enum class CommandListTargetKind
 {
 	Unknown,
 	IndexBuffer,
-	VertexBuffer
+	VertexBuffer,
+	ConstantBuffer,
+	ShaderResource,
+	UnorderedAccessView
+};
+
+enum class CommandListShaderStage
+{
+	Unknown,
+	Vertex,
+	Pixel,
+	Compute
 };
 
 struct CommandListTarget
 {
 	CommandListTargetKind kind = CommandListTargetKind::Unknown;
+	CommandListShaderStage stage = CommandListShaderStage::Unknown;
 	uint32_t slot = 0;
 };
 
@@ -32,8 +44,8 @@ enum class CommandListActionKind
 	SetVertexBuffer,
 	Draw,
 	DrawIndexed,
-	DrawFromCaller,          // draw = from_caller (use original draw params)
-	DrawIndexedFromCaller,   // drawindexed = from_caller
+	DrawFromCaller,
+	DrawIndexedFromCaller,
 	Dispatch
 };
 
@@ -78,4 +90,4 @@ void ResolveCommandListActionReferences(
 	CommandListAction *action, const std::wstring &iniNamespace);
 void ParseCommandListSections(const IniDocument &ini, CommandListMap *commandLists);
 
-} // namespace Bunny
+}

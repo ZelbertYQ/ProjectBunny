@@ -11,7 +11,8 @@
 bool DX12CommandListCaptureShouldTrackBindings()
 {
 	return DX12FrameAnalysisIsCapturing() || DX12ShaderDumpIsCapturingFrame() ||
-		DX12ModNeedsPreSkinningUavProbe();
+		DX12ModNeedsPreSkinningUavProbe() ||
+		DX12ModNeedsShaderDescriptorTracking();
 }
 
 bool DX12CommandListCaptureShouldRecordBindingEvents()

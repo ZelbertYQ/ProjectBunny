@@ -152,6 +152,115 @@ static const DX12IaBufferHash *FindIaVertexSlot(const DX12IaHashState &iaState, 
 	return nullptr;
 }
 
+static bool TargetStageIsCompute(Bunny::CommandListShaderStage stage)
+{
+	return stage == Bunny::CommandListShaderStage::Compute;
+}
+
+static D3D12_DESCRIPTOR_RANGE_TYPE DescriptorRangeTypeForTarget(
+	Bunny::CommandListTargetKind kind)
+{
+	switch (kind) {
+	case Bunny::CommandListTargetKind::ConstantBuffer:
+		return D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
+	case Bunny::CommandListTargetKind::ShaderResource:
+		return D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+	case Bunny::CommandListTargetKind::UnorderedAccessView:
+		return D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+	default:
+		return D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+	}
+}
+
+static bool DescriptorBindingMatchesTarget(
+	const DX12CurrentShaderResourceBinding &binding,
+	const Bunny::CommandListTarget &target)
+{
+	if (binding.shaderRegister != target.slot || binding.registerSpace != 0)
+		return false;
+	if (binding.shaderVisibility == D3D12_SHADER_VISIBILITY_ALL)
+		return true;
+	if (target.stage == Bunny::CommandListShaderStage::Vertex)
+		return binding.shaderVisibility == D3D12_SHADER_VISIBILITY_VERTEX;
+	if (target.stage == Bunny::CommandListShaderStage::Pixel)
+		return binding.shaderVisibility == D3D12_SHADER_VISIBILITY_PIXEL;
+	if (target.stage == Bunny::CommandListShaderStage::Compute)
+		return true;
+	return false;
+}
+
+static uint32_t HashDescriptorBinding(const DX12CurrentShaderResourceBinding &binding)
+{
+	if (binding.hasDescriptor)
+		return DX12HashDescriptorBufferView(
+			&binding.descriptor, binding.gpuVirtualAddress,
+			binding.descriptor.viewSize);
+	if (binding.rootDescriptor && binding.gpuVirtualAddress) {
+		DX12BufferResourceSummary summary = {};
+		const UINT64 probeSize = 1;
+		if (DX12ResolveBufferResourceByGpuVa(binding.gpuVirtualAddress, probeSize, &summary)) {
+			const UINT64 size = summary.hasResourceDesc ?
+				summary.resourceDesc.Width - summary.resourceOffset : summary.viewSize;
+			return DX12HashBufferResourceView(
+				&summary, binding.gpuVirtualAddress, size ? size : probeSize);
+		}
+		return DX12HashBufferResourceView(nullptr, binding.gpuVirtualAddress, probeSize);
+	}
+	return 0;
+}
+
+static const Bunny::TextureOverrideConfig *FindTextureOverrideByHashLocked(
+	uint32_t hash, uint32_t vertexCount, uint32_t indexCount, uint32_t instanceCount,
+	uint32_t firstVertex, uint32_t firstIndex, uint32_t firstInstance)
+{
+	if (!hash)
+		return nullptr;
+
+	auto bucket = gTextureOverrides.find(hash);
+	if (bucket == gTextureOverrides.end())
+		return nullptr;
+
+	for (const Bunny::TextureOverrideConfig &config : bucket->second) {
+		if (!TextureOverrideMatchCsSatisfiedLocked(config))
+			continue;
+		if (!TextureOverrideMatchesDrawContext(
+			config, vertexCount, indexCount, instanceCount,
+			firstVertex, firstIndex, firstInstance))
+			continue;
+		return &config;
+	}
+	return nullptr;
+}
+
+static const Bunny::TextureOverrideConfig *FindDescriptorTextureOverrideLocked(
+	ID3D12GraphicsCommandList *commandList,
+	const Bunny::CommandListTarget &target,
+	uint32_t vertexCount, uint32_t indexCount, uint32_t instanceCount,
+	uint32_t firstVertex, uint32_t firstIndex)
+{
+	if (!commandList)
+		return nullptr;
+
+	std::vector<DX12CurrentShaderResourceBinding> bindings;
+	const bool compute = TargetStageIsCompute(target.stage);
+	if (!DX12BindingGetCurrentShaderResourceBindings(
+		    commandList, compute, DescriptorRangeTypeForTarget(target.kind), &bindings))
+		return nullptr;
+
+	for (const DX12CurrentShaderResourceBinding &binding : bindings) {
+		if (!DescriptorBindingMatchesTarget(binding, target))
+			continue;
+		const uint32_t hash = HashDescriptorBinding(binding);
+		const Bunny::TextureOverrideConfig *config =
+			FindTextureOverrideByHashLocked(
+				hash, vertexCount, indexCount, instanceCount,
+				firstVertex, firstIndex, 0);
+		if (config)
+			return config;
+	}
+	return nullptr;
+}
+
 static ID3D12Resource *SelectIaResourceForViewLocked(
 	ID3D12GraphicsCommandList *commandList, DX12LoadedResource *resource)
 {
@@ -293,6 +402,7 @@ static bool AppendResourceViewsLocked(
 }
 
 static const Bunny::TextureOverrideConfig *FindTargetTextureOverrideLocked(
+	ID3D12GraphicsCommandList *commandList,
 	const DX12IaHashState &iaState, const Bunny::CommandListTarget &target,
 	uint32_t vertexCount, uint32_t indexCount, uint32_t instanceCount,
 	uint32_t firstVertex, uint32_t firstIndex)
@@ -312,6 +422,14 @@ static const Bunny::TextureOverrideConfig *FindTargetTextureOverrideLocked(
 		return FindTextureOverrideLocked(
 			slot->hash, vertexCount, indexCount, instanceCount,
 			firstVertex, firstIndex, 0, false, false, target.slot);
+	}
+
+	if (target.kind == Bunny::CommandListTargetKind::ConstantBuffer ||
+	    target.kind == Bunny::CommandListTargetKind::ShaderResource ||
+	    target.kind == Bunny::CommandListTargetKind::UnorderedAccessView) {
+		return FindDescriptorTextureOverrideLocked(
+			commandList, target, vertexCount, indexCount, instanceCount,
+			firstVertex, firstIndex);
 	}
 
 	return nullptr;

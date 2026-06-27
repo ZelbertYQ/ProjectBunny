@@ -32,6 +32,11 @@ TextureOverride matching is entered only from explicit command list actions:
 - `CheckTextureOverride = ib`
 - `CheckTextureOverride = vb0`
 - `CheckTextureOverride = vb1`
+- `CheckTextureOverride = vs-cb0`
+- `CheckTextureOverride = ps-t1`
+- `CheckTextureOverride = cs-t0`
+- `CheckTextureOverride = ps-u0`
+- `CheckTextureOverride = cs-u0`
 
 ShaderOverride command lists still receive the current IA hash state, so `CheckTextureOverride` can find the correct TextureOverride by target hash and draw context. IA state capture is now kept when ShaderOverride is active, not merely because TextureOverride data exists.
 
@@ -78,8 +83,44 @@ ShaderOverride parsing now keeps direct command-list actions written inside the 
 
 Resource creation hooks also skip VertexLimitRaise descriptor adjustment checks when no VertexLimitRaise config was loaded, avoiding repeated empty-config lock and scan work in scenes that create resources frequently.
 
+### 2026-06-27 ShaderRegex And Descriptor Target Trigger Refinement
+
+DX12 now parses no-pattern ShaderRegex sections as shader-model command-list scopes, matching the DX11 path that links ShaderRegex groups without patterns before shader disassembly. This supports configs such as:
+
+```ini
+[ShaderRegex_KeFUY_Trigger]
+shader_model = vs_5_0 ps_5_0
+CheckTextureOverride = ib
+CheckTextureOverride = vb0
+CheckTextureOverride = vb1
+```
+
+The main DX12 scope is no-pattern ShaderRegex command execution. ShaderRegex `.Pattern`, `.Replace`, and `.InsertDeclarations` sections are recognized as pattern-backed groups, but DX12 does not execute shader patching for them yet.
+
+`CheckTextureOverride` target parsing now accepts the IA targets and shader resource targets used by DX11 ResourceCopyTarget syntax:
+
+- `ib`
+- `vbN`
+- `vs-cbN`
+- `ps-cbN`
+- `cs-cbN`
+- `vs-tN`
+- `ps-tN`
+- `cs-tN`
+- `ps-uN`
+- `cs-uN`
+
+Bare `cb0` is not accepted. The shader stage must be explicit, such as `vs-cb0`, because DX11 target syntax carries a shader stage prefix for CBV/SRV/UAV bindings.
+
+For descriptor targets, DX12 maps the target through the current command-list binding snapshot, the active PSO, and the active root signature. Descriptor tables and root descriptors are matched by range type, shader visibility, shader register, and register space. Binding capture is enabled only when a loaded ShaderOverride or no-pattern ShaderRegex command chain can actually reach a descriptor-based `CheckTextureOverride`. IA-only triggers do not enable descriptor binding tracking.
+
+This keeps TextureOverride passive until a selected shader scope executes a command-list check, while still giving Mod authors DX11-like target granularity.
+
 ### References
 
 - https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12graphicscommandlist-drawindexedinstanced
 - https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12graphicscommandlist-setpipelinestate
 - https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12graphicscommandlist-dispatch
+- https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ns-d3d12-d3d12_graphics_pipeline_state_desc
+- https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ns-d3d12-d3d12_compute_pipeline_state_desc
+- https://learn.microsoft.com/en-us/windows/win32/direct3d12/root-signatures

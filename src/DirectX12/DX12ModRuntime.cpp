@@ -25,6 +25,7 @@
 #include "MigotoIniLoader.h"
 #include "MigotoResource.h"
 #include "MigotoShaderOverride.h"
+#include "MigotoShaderRegex.h"
 #include "MigotoTextureOverride.h"
 
 static DXGI_FORMAT ParseDx12ResourceFormat(const std::wstring &format)
@@ -52,6 +53,7 @@ static std::wstring gConfigPath;
 static std::wstring gBaseDir;
 static std::wstring gShaderFixesDir;
 static Bunny::ShaderOverrideMap gShaderOverrides;
+static Bunny::ShaderRegexMap gShaderRegexes;
 static Bunny::TextureOverrideMap gTextureOverrides;
 static Bunny::ResourceMap gResources;
 static Bunny::CommandListMap gCommandLists;
@@ -188,7 +190,9 @@ static std::vector<DX12VertexLimitRaiseConfig> gVertexLimitRaiseConfigs;
 static UINT64 gReloadGeneration = 1;
 static volatile LONG gHasVertexLimitRaiseConfigs = 0;
 static volatile LONG gHasShaderOverrides = 0;
+static volatile LONG gHasShaderRegexes = 0;
 static volatile LONG gHasTextureOverrides = 0;
+static volatile LONG gHasShaderDescriptorTextureOverrideTriggers = 0;
 static volatile LONG gHasPreSkinTextureOverrideCandidates = 0;
 static volatile LONG gHasShaderTriggeredTextureOverrides = 0;
 static volatile LONG gHasPresentRuntimeEffect = 0;
@@ -216,6 +220,8 @@ struct DX12ShaderOverridePsoMatchCache
 	UINT64 generation = 0;
 	std::vector<const Bunny::ShaderOverrideConfig*> drawConfigs;
 	std::vector<const Bunny::ShaderOverrideConfig*> dispatchConfigs;
+	std::vector<Bunny::ShaderOverrideConfig> regexDrawConfigs;
+	std::vector<Bunny::ShaderOverrideConfig> regexDispatchConfigs;
 };
 static std::unordered_map<ID3D12PipelineState*, DX12ShaderOverridePsoMatchCache> gShaderOverridePsoMatchCache;
 

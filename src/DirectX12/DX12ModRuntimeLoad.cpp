@@ -639,6 +639,12 @@ static bool CommandListActionHasTextureOverrideTrigger(
 	}
 }
 
+static bool CommandListActionHasDescriptorTextureOverrideTrigger(
+	const Bunny::CommandListAction &action,
+	const Bunny::CommandListMap &commandLists,
+	std::unordered_map<std::wstring, bool> *triggerCache,
+	std::set<std::wstring> *visiting);
+
 static bool CommandListHasTextureOverrideTrigger(
 	const std::wstring &name,
 	const Bunny::CommandListMap &commandLists,
@@ -684,6 +690,75 @@ static bool CommandListLinksHaveTextureOverrideTrigger(
 	return false;
 }
 
+static bool TargetNeedsDescriptorBindings(const Bunny::CommandListTarget &target)
+{
+	return target.kind == Bunny::CommandListTargetKind::ConstantBuffer ||
+		target.kind == Bunny::CommandListTargetKind::ShaderResource ||
+		target.kind == Bunny::CommandListTargetKind::UnorderedAccessView;
+}
+
+static bool CommandListHasDescriptorTextureOverrideTrigger(
+	const std::wstring &name,
+	const Bunny::CommandListMap &commandLists,
+	std::unordered_map<std::wstring, bool> *triggerCache,
+	std::set<std::wstring> *visiting)
+{
+	if (!triggerCache || !visiting)
+		return false;
+
+	auto cached = triggerCache->find(name);
+	if (cached != triggerCache->end())
+		return cached->second;
+	if (!visiting->insert(name).second)
+		return false;
+
+	bool triggered = false;
+	auto it = commandLists.find(name);
+	if (it != commandLists.end()) {
+		for (const Bunny::CommandListAction &action : it->second.actions) {
+			if (CommandListActionHasDescriptorTextureOverrideTrigger(
+				    action, commandLists, triggerCache, visiting)) {
+				triggered = true;
+				break;
+			}
+		}
+	}
+	visiting->erase(name);
+	(*triggerCache)[name] = triggered;
+	return triggered;
+}
+
+static bool CommandListActionHasDescriptorTextureOverrideTrigger(
+	const Bunny::CommandListAction &action,
+	const Bunny::CommandListMap &commandLists,
+	std::unordered_map<std::wstring, bool> *triggerCache,
+	std::set<std::wstring> *visiting)
+{
+	switch (action.kind) {
+	case Bunny::CommandListActionKind::Run:
+		return CommandListHasDescriptorTextureOverrideTrigger(
+			action.commandList, commandLists, triggerCache, visiting);
+	case Bunny::CommandListActionKind::CheckTextureOverride:
+		return TargetNeedsDescriptorBindings(action.target);
+	default:
+		return false;
+	}
+}
+
+static bool CommandListLinksHaveDescriptorTextureOverrideTrigger(
+	const std::vector<std::wstring> &links,
+	const Bunny::CommandListMap &commandLists,
+	std::unordered_map<std::wstring, bool> *triggerCache)
+{
+	std::set<std::wstring> visiting;
+	for (const std::wstring &link : links) {
+		if (CommandListHasDescriptorTextureOverrideTrigger(
+			    link, commandLists, triggerCache, &visiting))
+			return true;
+	}
+	return false;
+}
+
 static bool ShaderOverrideHasTextureOverrideTrigger(
 	const Bunny::ShaderOverrideConfig &config,
 	const Bunny::CommandListMap &commandLists,
@@ -710,6 +785,116 @@ static bool ShaderOverridesHaveTextureOverrideTrigger(
 	std::unordered_map<std::wstring, bool> triggerCache;
 	for (const auto &item : shaderOverrides) {
 		if (ShaderOverrideHasTextureOverrideTrigger(
+			    item.second, commandLists, &triggerCache))
+			return true;
+	}
+	return false;
+}
+
+static bool ShaderOverrideHasDescriptorTextureOverrideTrigger(
+	const Bunny::ShaderOverrideConfig &config,
+	const Bunny::CommandListMap &commandLists,
+	std::unordered_map<std::wstring, bool> *triggerCache)
+{
+	std::set<std::wstring> visiting;
+	for (const Bunny::CommandListAction &action : config.actions) {
+		if (CommandListActionHasDescriptorTextureOverrideTrigger(
+			    action, commandLists, triggerCache, &visiting))
+			return true;
+	}
+	return CommandListLinksHaveDescriptorTextureOverrideTrigger(
+		config.commandLists.pre, commandLists, triggerCache) ||
+		CommandListLinksHaveDescriptorTextureOverrideTrigger(
+			config.commandLists.main, commandLists, triggerCache) ||
+		CommandListLinksHaveDescriptorTextureOverrideTrigger(
+			config.commandLists.post, commandLists, triggerCache);
+}
+
+static bool ShaderOverridesHaveDescriptorTextureOverrideTrigger(
+	const Bunny::ShaderOverrideMap &shaderOverrides,
+	const Bunny::CommandListMap &commandLists)
+{
+	std::unordered_map<std::wstring, bool> triggerCache;
+	for (const auto &item : shaderOverrides) {
+		if (ShaderOverrideHasDescriptorTextureOverrideTrigger(
+			    item.second, commandLists, &triggerCache))
+			return true;
+	}
+	return false;
+}
+
+static bool ShaderRegexHasTextureOverrideTrigger(
+	const Bunny::ShaderRegexConfig &config,
+	const Bunny::CommandListMap &commandLists,
+	std::unordered_map<std::wstring, bool> *triggerCache)
+{
+	if (config.hasPattern)
+		return false;
+	std::set<std::wstring> visiting;
+	for (const Bunny::CommandListAction &action : config.actions) {
+		if (CommandListActionHasTextureOverrideTrigger(
+			    action, commandLists, triggerCache, &visiting))
+			return true;
+	}
+	return CommandListLinksHaveTextureOverrideTrigger(
+		config.commandLists.pre, commandLists, triggerCache) ||
+		CommandListLinksHaveTextureOverrideTrigger(
+			config.commandLists.main, commandLists, triggerCache) ||
+		CommandListLinksHaveTextureOverrideTrigger(
+			config.commandLists.post, commandLists, triggerCache);
+}
+
+static bool ShaderRegexesHaveTextureOverrideTrigger(
+	const Bunny::ShaderRegexMap &shaderRegexes,
+	const Bunny::CommandListMap &commandLists)
+{
+	std::unordered_map<std::wstring, bool> triggerCache;
+	for (const auto &item : shaderRegexes) {
+		if (ShaderRegexHasTextureOverrideTrigger(
+			    item.second, commandLists, &triggerCache))
+			return true;
+	}
+	return false;
+}
+
+static bool ShaderRegexesHaveExecutableNoPatternGroup(
+	const Bunny::ShaderRegexMap &shaderRegexes)
+{
+	for (const auto &item : shaderRegexes) {
+		if (!item.second.hasPattern)
+			return true;
+	}
+	return false;
+}
+
+static bool ShaderRegexHasDescriptorTextureOverrideTrigger(
+	const Bunny::ShaderRegexConfig &config,
+	const Bunny::CommandListMap &commandLists,
+	std::unordered_map<std::wstring, bool> *triggerCache)
+{
+	if (config.hasPattern)
+		return false;
+	std::set<std::wstring> visiting;
+	for (const Bunny::CommandListAction &action : config.actions) {
+		if (CommandListActionHasDescriptorTextureOverrideTrigger(
+			    action, commandLists, triggerCache, &visiting))
+			return true;
+	}
+	return CommandListLinksHaveDescriptorTextureOverrideTrigger(
+		config.commandLists.pre, commandLists, triggerCache) ||
+		CommandListLinksHaveDescriptorTextureOverrideTrigger(
+			config.commandLists.main, commandLists, triggerCache) ||
+		CommandListLinksHaveDescriptorTextureOverrideTrigger(
+			config.commandLists.post, commandLists, triggerCache);
+}
+
+static bool ShaderRegexesHaveDescriptorTextureOverrideTrigger(
+	const Bunny::ShaderRegexMap &shaderRegexes,
+	const Bunny::CommandListMap &commandLists)
+{
+	std::unordered_map<std::wstring, bool> triggerCache;
+	for (const auto &item : shaderRegexes) {
+		if (ShaderRegexHasDescriptorTextureOverrideTrigger(
 			    item.second, commandLists, &triggerCache))
 			return true;
 	}
@@ -861,6 +1046,7 @@ bool DX12ModRuntimeLoad(
 {
 	Bunny::MigotoIniLoadResult iniLoad;
 	Bunny::ShaderOverrideMap shaderOverrides;
+	Bunny::ShaderRegexMap shaderRegexes;
 	Bunny::TextureOverrideMap textureOverrides;
 	Bunny::ResourceMap resources;
 	Bunny::CommandListMap commandLists;
@@ -884,6 +1070,7 @@ bool DX12ModRuntimeLoad(
 	std::unordered_set<uint64_t> preSkinMatchCsHashes;
 	bool hasPreSkinVlrWithoutMatchCs = false;
 	size_t loadedShaderOverrideCount = 0;
+	size_t loadedShaderRegexCount = 0;
 	size_t loadedTextureOverrideCount = 0;
 	size_t loadedResourceCount = 0;
 	size_t loadedCommandListCount = 0;
@@ -914,6 +1101,7 @@ bool DX12ModRuntimeLoad(
 
 	const bool hasIniErrors = !iniLoad.errors.empty();
 	Bunny::ParseShaderOverrideSections(iniLoad.document, &shaderOverrides);
+	Bunny::ParseShaderRegexSections(iniLoad.document, &shaderRegexes);
 	Bunny::ParseTextureOverrideSections(iniLoad.document, &textureOverrides);
 	Bunny::ParseResourceSections(iniLoad.document, &resources);
 	Bunny::ParseCommandListSections(iniLoad.document, &commandLists);
@@ -926,7 +1114,14 @@ bool DX12ModRuntimeLoad(
 			nullptr);
 	bool hasShaderTriggeredTextureOverrides =
 		!textureOverrides.empty() &&
-		ShaderOverridesHaveTextureOverrideTrigger(shaderOverrides, commandLists);
+		(ShaderOverridesHaveTextureOverrideTrigger(shaderOverrides, commandLists) ||
+		 ShaderRegexesHaveTextureOverrideTrigger(shaderRegexes, commandLists));
+	bool hasExecutableShaderRegexes =
+		ShaderRegexesHaveExecutableNoPatternGroup(shaderRegexes);
+	bool hasShaderDescriptorTextureOverrideTriggers =
+		hasShaderTriggeredTextureOverrides &&
+		(ShaderOverridesHaveDescriptorTextureOverrideTrigger(shaderOverrides, commandLists) ||
+		 ShaderRegexesHaveDescriptorTextureOverrideTrigger(shaderRegexes, commandLists));
 	BuildDx12RuntimeEffectIndexes(
 		textureOverrides, commandLists,
 		&commandListRuntimeEffect,
@@ -967,6 +1162,7 @@ bool DX12ModRuntimeLoad(
 
 	AcquireSRWLockExclusive(&gModLock);
 	gShaderOverrides.swap(shaderOverrides);
+	gShaderRegexes.swap(shaderRegexes);
 	gTextureOverrides.swap(textureOverrides);
 	gResources.swap(resources);
 	gCommandLists.swap(commandLists);
@@ -1010,6 +1206,7 @@ bool DX12ModRuntimeLoad(
 	++gPreSkinActiveGeneration;
 	++gPreSkinSrvCacheGeneration;
 	InterlockedExchange(&gHasShaderOverrides, gShaderOverrides.empty() ? 0 : 1);
+	InterlockedExchange(&gHasShaderRegexes, hasExecutableShaderRegexes ? 1 : 0);
 	InterlockedExchange(&gHasTextureOverrides, gTextureOverrides.empty() ? 0 : 1);
 	InterlockedExchange(
 		&gHasPreSkinTextureOverrideCandidates,
@@ -1017,10 +1214,14 @@ bool DX12ModRuntimeLoad(
 	InterlockedExchange(
 		&gHasShaderTriggeredTextureOverrides,
 		hasShaderTriggeredTextureOverrides ? 1 : 0);
+	InterlockedExchange(
+		&gHasShaderDescriptorTextureOverrideTriggers,
+		hasShaderDescriptorTextureOverrideTriggers ? 1 : 0);
 	InterlockedExchange(&gHasPresentRuntimeEffect, presentRuntimeEffect ? 1 : 0);
 	gLoaded = true;
 	++gReloadGeneration;
 	loadedShaderOverrideCount = gShaderOverrides.size();
+	loadedShaderRegexCount = gShaderRegexes.size();
 	loadedTextureOverrideCount = gTextureOverrides.size();
 	loadedResourceCount = gResources.size();
 	loadedCommandListCount = gCommandLists.size();
@@ -1028,7 +1229,8 @@ bool DX12ModRuntimeLoad(
 	loadedShaderTriggeredTextureOverrides = hasShaderTriggeredTextureOverrides;
 	loadedPresentRuntimeEffect = presentRuntimeEffect;
 	safeModeActive = InterlockedCompareExchange(&gDx12SafeMode, 0, 0) != 0;
-	activeShaderOverrides = !safeModeActive && !gShaderOverrides.empty();
+	activeShaderOverrides = !safeModeActive &&
+		(!gShaderOverrides.empty() || hasExecutableShaderRegexes);
 	activeTextureOverrides =
 		!safeModeActive && !gTextureOverrides.empty() &&
 		hasShaderTriggeredTextureOverrides;
@@ -1050,23 +1252,25 @@ bool DX12ModRuntimeLoad(
 	ClearPreSkinRuntimeState();
 
 	DX12LogJsonFunc("DX12ModRuntime",
-		"\"status\":\"loaded\",\"path\":\"%S\",\"iniFiles\":%zu,\"errors\":%zu,\"warnings\":%zu,\"shaderOverrides\":%zu,\"textureOverrides\":%zu,\"resources\":%zu,\"commandLists\":%zu,\"safeMode\":%s,\"activeShaderOverrides\":%s,\"activeTextureOverrides\":%s,\"shaderTriggeredTextureOverrides\":%s,\"preSkinCandidates\":%s,\"preSkinProbeEnabled\":%s,\"presentRuntimeEffect\":%s,\"shaderFixes\":\"%S\",\"generation\":%llu",
+		"\"status\":\"loaded\",\"path\":\"%S\",\"iniFiles\":%zu,\"errors\":%zu,\"warnings\":%zu,\"shaderOverrides\":%zu,\"shaderRegexes\":%zu,\"textureOverrides\":%zu,\"resources\":%zu,\"commandLists\":%zu,\"safeMode\":%s,\"activeShaderOverrides\":%s,\"activeTextureOverrides\":%s,\"shaderTriggeredTextureOverrides\":%s,\"descriptorTextureOverrideTriggers\":%s,\"preSkinCandidates\":%s,\"preSkinProbeEnabled\":%s,\"presentRuntimeEffect\":%s,\"shaderFixes\":\"%S\",\"generation\":%llu",
 		configPath ? configPath : L"", iniLoad.loadedFiles.size(), iniLoad.errors.size(), iniLoad.warnings.size(),
-		loadedShaderOverrideCount, loadedTextureOverrideCount, loadedResourceCount, loadedCommandListCount,
+		loadedShaderOverrideCount, loadedShaderRegexCount, loadedTextureOverrideCount, loadedResourceCount, loadedCommandListCount,
 		safeModeActive ? "true" : "false",
 		activeShaderOverrides ? "true" : "false",
 		activeTextureOverrides ? "true" : "false",
 		loadedShaderTriggeredTextureOverrides ? "true" : "false",
+		hasShaderDescriptorTextureOverrideTriggers ? "true" : "false",
 		loadedPreSkinTextureOverrideCandidates ? "true" : "false",
 		preSkinProbeEnabled ? "true" : "false",
 		loadedPresentRuntimeEffect ? "true" : "false",
 		loadedShaderFixesDir.c_str(),
 		static_cast<unsigned long long>(loadedGeneration));
 	if (safeModeActive &&
-	    (loadedShaderOverrideCount || loadedTextureOverrideCount || loadedPresentRuntimeEffect)) {
+	    (loadedShaderOverrideCount || loadedShaderRegexCount ||
+	     loadedTextureOverrideCount || loadedPresentRuntimeEffect)) {
 		DX12LogJsonFunc("DX12ModRuntimeDisabled",
-			"\"reason\":\"safe_mode\",\"shaderOverrides\":%zu,\"textureOverrides\":%zu,\"preSkinCandidates\":%s,\"presentRuntimeEffect\":%s",
-			loadedShaderOverrideCount, loadedTextureOverrideCount,
+			"\"reason\":\"safe_mode\",\"shaderOverrides\":%zu,\"shaderRegexes\":%zu,\"textureOverrides\":%zu,\"preSkinCandidates\":%s,\"presentRuntimeEffect\":%s",
+			loadedShaderOverrideCount, loadedShaderRegexCount, loadedTextureOverrideCount,
 			loadedPreSkinTextureOverrideCandidates ? "true" : "false",
 			loadedPresentRuntimeEffect ? "true" : "false");
 	}

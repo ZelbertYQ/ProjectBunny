@@ -1,6 +1,7 @@
 #pragma once
 
 #include <d3d12.h>
+#include <string>
 
 struct DX12PsoShaderInfo
 {
@@ -11,6 +12,9 @@ struct DX12PsoShaderInfo
 	UINT64 vs;
 	UINT64 ps;
 	UINT64 cs;
+	std::string vsModel;
+	std::string psModel;
+	std::string csModel;
 };
 
 struct DX12PsoShaderSummary
@@ -22,6 +26,9 @@ struct DX12PsoShaderSummary
 	UINT64 vs = 0;
 	UINT64 ps = 0;
 	UINT64 cs = 0;
+	std::string vsModel;
+	std::string psModel;
+	std::string csModel;
 };
 
 void DX12RecordGraphicsPipelineState(
