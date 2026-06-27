@@ -73,7 +73,7 @@ static void STDMETHODCALLTYPE HookedSetGraphicsRootSignature(
 {
 	DX12_PROFILE_SCOPE(SetGraphicsRootSignature);
 
-	if (gDX12HotPathSkipBindings) {
+	if (gDX12HotPathSkipGraphicsBindings) {
 		DX12_PROFILE_FAST_FORWARD();
 		PFN_SET_ROOT_SIGNATURE original =
 			DX12_CL_ORIG(commandList, 30, PFN_SET_ROOT_SIGNATURE, SetGraphicsRootSignature);
@@ -131,7 +131,7 @@ static void STDMETHODCALLTYPE HookedSetGraphicsRootDescriptorTable(
 {
 	DX12_PROFILE_SCOPE(SetGraphicsRootDescriptorTable);
 
-	if (gDX12HotPathSkipBindings) {
+	if (gDX12HotPathSkipGraphicsBindings) {
 		DX12_PROFILE_FAST_FORWARD();
 		PFN_SET_ROOT_DESCRIPTOR_TABLE original =
 			DX12_CL_ORIG(commandList, 32, PFN_SET_ROOT_DESCRIPTOR_TABLE, SetGraphicsRootDescriptorTable);
@@ -177,6 +177,15 @@ static void STDMETHODCALLTYPE HookedSetComputeRoot32BitConstant(
 static void STDMETHODCALLTYPE HookedSetGraphicsRoot32BitConstant(
 	ID3D12GraphicsCommandList *commandList, UINT rootParameterIndex, UINT srcData, UINT destOffset)
 {
+	if (gDX12HotPathSkipGraphicsBindings) {
+		DX12_PROFILE_FAST_FORWARD();
+		PFN_SET_ROOT_32BIT_CONSTANT original =
+			DX12_CL_ORIG(commandList, 34, PFN_SET_ROOT_32BIT_CONSTANT, SetGraphicsRoot32BitConstant);
+		if (original)
+			original(commandList, rootParameterIndex, srcData, destOffset);
+		return;
+	}
+
 	LogDX12Call("ID3D12GraphicsCommandList::SetGraphicsRoot32BitConstant", commandList,
 		" root=%u destOffset=%u", rootParameterIndex, destOffset);
 	DX12CommandListCaptureGraphicsRoot32BitConstant(
@@ -215,6 +224,15 @@ static void STDMETHODCALLTYPE HookedSetGraphicsRoot32BitConstants(
 	ID3D12GraphicsCommandList *commandList, UINT rootParameterIndex, UINT num32BitValuesToSet,
 	const void *srcData, UINT destOffset)
 {
+	if (gDX12HotPathSkipGraphicsBindings) {
+		DX12_PROFILE_FAST_FORWARD();
+		PFN_SET_ROOT_32BIT_CONSTANTS original =
+			DX12_CL_ORIG(commandList, 36, PFN_SET_ROOT_32BIT_CONSTANTS, SetGraphicsRoot32BitConstants);
+		if (original)
+			original(commandList, rootParameterIndex, num32BitValuesToSet, srcData, destOffset);
+		return;
+	}
+
 	LogDX12Call("ID3D12GraphicsCommandList::SetGraphicsRoot32BitConstants", commandList,
 		" root=%u values=%u destOffset=%u", rootParameterIndex, num32BitValuesToSet, destOffset);
 	DX12CommandListCaptureGraphicsRoot32BitConstants(
@@ -255,7 +273,7 @@ static void STDMETHODCALLTYPE HookedSetGraphicsRootConstantBufferView(
 {
 	DX12_PROFILE_SCOPE(SetGraphicsRootConstantBufferView);
 
-	if (gDX12HotPathSkipBindings) {
+	if (gDX12HotPathSkipGraphicsBindings) {
 		DX12_PROFILE_FAST_FORWARD();
 		PFN_SET_ROOT_GPU_VA original =
 			DX12_CL_ORIG(commandList, 38, PFN_SET_ROOT_GPU_VA, SetGraphicsRootConstantBufferView);
@@ -304,7 +322,7 @@ static void STDMETHODCALLTYPE HookedSetGraphicsRootShaderResourceView(
 {
 	DX12_PROFILE_SCOPE(SetGraphicsRootShaderResourceView);
 
-	if (gDX12HotPathSkipBindings) {
+	if (gDX12HotPathSkipGraphicsBindings) {
 		DX12_PROFILE_FAST_FORWARD();
 		PFN_SET_ROOT_GPU_VA original =
 			DX12_CL_ORIG(commandList, 40, PFN_SET_ROOT_GPU_VA, SetGraphicsRootShaderResourceView);

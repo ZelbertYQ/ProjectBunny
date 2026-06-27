@@ -43,6 +43,7 @@ static std::unordered_map<void*, void*> gOriginalFunctions;
 
 volatile LONG gDX12HotPathSkipAll = 1;
 volatile LONG gDX12HotPathSkipBindings = 1;
+volatile LONG gDX12HotPathSkipGraphicsBindings = 1;
 volatile LONG gDX12HotPathTrackResourceMetadata = 0;
 static thread_local UINT tDX12InternalReplayDepth = 0;
 
@@ -86,12 +87,18 @@ void DX12HotPathUpdate()
 	const bool needsBindingState =
 		needsHeavyTracking ||
 		DX12ModNeedsPreSkinningUavProbe();
+	const bool needsGraphicsBindingState =
+		needsHeavyTracking ||
+		DX12ModNeedsShaderDescriptorTracking();
 
 	InterlockedExchange(&gDX12HotPathSkipAll,
 		(needsHeavyTracking || needsRecordWork) ? 0 : 1);
 
 	InterlockedExchange(&gDX12HotPathSkipBindings,
 		needsBindingState ? 0 : 1);
+
+	InterlockedExchange(&gDX12HotPathSkipGraphicsBindings,
+		needsGraphicsBindingState ? 0 : 1);
 
 	InterlockedExchange(&gDX12HotPathTrackResourceMetadata,
 		(needsHeavyTracking || DX12ModNeedsPreSkinningUavProbe()) ? 1 : 0);

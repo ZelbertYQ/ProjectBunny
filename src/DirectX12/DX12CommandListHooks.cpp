@@ -1220,7 +1220,7 @@ static void STDMETHODCALLTYPE HookedSetGraphicsRootUnorderedAccessView(
 {
 	DX12_PROFILE_SCOPE(SetGraphicsRootUnorderedAccessView);
 
-	if (gDX12HotPathSkipBindings) {
+	if (gDX12HotPathSkipGraphicsBindings) {
 		DX12_PROFILE_FAST_FORWARD();
 		PFN_SET_ROOT_GPU_VA original =
 			DX12_CL_ORIG(commandList, 42, PFN_SET_ROOT_GPU_VA, SetGraphicsRootUnorderedAccessView);
