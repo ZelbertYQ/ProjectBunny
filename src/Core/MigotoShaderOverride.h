@@ -4,6 +4,7 @@
 
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "IniDocument.h"
 #include "MigotoCommandList.h"
@@ -20,6 +21,7 @@ struct ShaderOverrideConfig
 	uint64_t hash = 0;
 	bool handlingSkip = false;
 	CommandListLinks commandLists;
+	std::vector<CommandListAction> actions;
 };
 
 using ShaderOverrideMap = std::unordered_map<uint64_t, ShaderOverrideConfig>;
@@ -28,4 +30,4 @@ bool ParseShaderOverrideHash(const std::wstring &text, uint64_t *value);
 void ParseShaderOverrideSections(
 	const IniDocument &ini, ShaderOverrideMap *shaderOverrides);
 
-} // namespace Bunny
+}

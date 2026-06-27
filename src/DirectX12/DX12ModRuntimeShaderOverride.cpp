@@ -93,9 +93,7 @@ bool DX12ModPrepareShaderOverrideReplacement(
 	for (const Bunny::ShaderOverrideConfig *config : configs) {
 		if (!config)
 			continue;
-		if (config->handlingSkip)
-			replacement->skip = true;
-		executor.RunCommandListLinks(config->commandLists, false);
+		executor.RunShaderOverride(*config);
 	}
 	LogShaderOverrideCommandListLimited("pre", configs, *replacement);
 	ReleaseSRWLockExclusive(&gModLock);

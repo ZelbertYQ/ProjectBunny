@@ -57,12 +57,26 @@ With only TextureOverride sections loaded and no matching ShaderOverride command
 - PSO state tracking should not be enabled just for TextureOverride
 - IA binding capture should not run just for TextureOverride
 - `DX12BindingBeginFrame` should not run every frame just for TextureOverride
+- PreSkin `match_cs` candidates should not enable compute binding capture unless a ShaderOverride command chain can actually execute `CheckTextureOverride`
 
 With a matching ShaderOverride command list:
 
 - PSO state is tracked so the ShaderOverride can be selected
 - IA state is tracked so `CheckTextureOverride` can resolve `ib` and `vbN`
 - only the selected shader scope runs TextureOverride matching
+- PreSkin UAV probing is allowed only when the loaded TextureOverride candidates are reachable through that ShaderOverride command chain
+
+### 2026-06-27 PreSkin Trigger Refinement
+
+The latest performance repro loaded four TextureOverride sections and no ShaderOverride sections. The startup log showed `preSkinCandidates:true`, so DX12 treated the mere presence of `match_cs` TextureOverride data as a reason to enable compute binding capture, PSO state tracking, per-frame binding resets, and resource metadata tracking.
+
+That was still too coarse. DX11 only reaches TextureOverride lookup from command list execution, especially `CheckTextureOverride`. A TextureOverride with `match_cs` is still passive data until a selected ShaderOverride command chain can request it.
+
+DX12 now records a separate `shaderTriggeredTextureOverrides` startup field. `preSkinProbeEnabled` requires both `preSkinCandidates:true` and `shaderTriggeredTextureOverrides:true`. This keeps loaded Mod data visible in logs without turning passive TextureOverride sections into global hot-path work.
+
+ShaderOverride parsing now keeps direct command-list actions written inside the ShaderOverride section, so `CheckTextureOverride = ib` and similar entries work through the same executor as linked CommandList sections. This avoids reintroducing an automatic TextureOverride fallback path.
+
+Resource creation hooks also skip VertexLimitRaise descriptor adjustment checks when no VertexLimitRaise config was loaded, avoiding repeated empty-config lock and scan work in scenes that create resources frequently.
 
 ### References
 

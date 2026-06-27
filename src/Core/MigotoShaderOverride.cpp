@@ -59,6 +59,9 @@ void ParseShaderOverrideSections(
 
 		for (const IniEntry &entry : section.entries) {
 			std::wstring key = ToLower(entry.key);
+			if (!entry.hasEquals)
+				continue;
+
 			if (key == L"hash") {
 				uint64_t hash = 0;
 				if (!ParseShaderOverrideHash(entry.value, &hash))
@@ -70,8 +73,21 @@ void ParseShaderOverrideSections(
 
 			if (key == L"handling") {
 				std::wstring value = ToLower(Trim(entry.value));
-				if (value == L"skip")
+				if (value == L"skip") {
 					config.handlingSkip = true;
+					CommandListAction action;
+					if (ParseCommandListActionFromEntry(key, value, &action)) {
+						ResolveCommandListActionReferences(&action, entry.iniNamespace);
+						config.actions.push_back(action);
+					}
+				}
+				continue;
+			}
+
+			CommandListAction action;
+			if (ParseCommandListActionFromEntry(key, Trim(entry.value), &action)) {
+				ResolveCommandListActionReferences(&action, entry.iniNamespace);
+				config.actions.push_back(action);
 				continue;
 			}
 
@@ -84,4 +100,4 @@ void ParseShaderOverrideSections(
 	}
 }
 
-} // namespace Bunny
+}

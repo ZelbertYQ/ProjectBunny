@@ -61,13 +61,15 @@ bool DX12ModHasActiveShaderOverrides()
 bool DX12ModHasActiveTextureOverrides()
 {
 	return gHasTextureOverrides != 0 &&
+		gHasShaderTriggeredTextureOverrides != 0 &&
 		InterlockedCompareExchange(&gDx12SafeMode, 0, 0) == 0;
 }
 
 bool DX12ModHasAnyActiveOverrides()
 {
 	return InterlockedCompareExchange(&gDx12SafeMode, 0, 0) == 0 &&
-		(gHasShaderOverrides != 0 || gHasTextureOverrides != 0);
+		(gHasShaderOverrides != 0 ||
+		 (gHasTextureOverrides != 0 && gHasShaderTriggeredTextureOverrides != 0));
 }
 
 bool DX12ModNeedsPresentReplacement()
@@ -78,7 +80,9 @@ bool DX12ModNeedsPresentReplacement()
 
 bool DX12ModNeedsPreSkinningUavProbe()
 {
-	return gHasTextureOverrides != 0 && gHasPreSkinTextureOverrideCandidates != 0 &&
+	return gHasTextureOverrides != 0 &&
+		gHasShaderTriggeredTextureOverrides != 0 &&
+		gHasPreSkinTextureOverrideCandidates != 0 &&
 		InterlockedCompareExchange(&gDx12SafeMode, 0, 0) == 0;
 }
 
@@ -97,7 +101,9 @@ bool DX12ModHasActivePreSkinTextureOverrides()
 bool DX12ModShouldProbePreSkinningForCs(uint64_t computeShaderHash)
 {
 	if (InterlockedCompareExchange(&gDx12SafeMode, 0, 0) != 0 ||
-	    gHasTextureOverrides == 0 || gHasPreSkinTextureOverrideCandidates == 0)
+	    gHasTextureOverrides == 0 ||
+	    gHasShaderTriggeredTextureOverrides == 0 ||
+	    gHasPreSkinTextureOverrideCandidates == 0)
 		return false;
 
 	bool shouldProbe = false;

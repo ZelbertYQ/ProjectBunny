@@ -65,6 +65,16 @@ public:
 		RunCommandListLinks(links, 0, includePost);
 	}
 
+	void RunShaderOverride(const Bunny::ShaderOverrideConfig &config)
+	{
+		if (!mReplacement)
+			return;
+		if (config.handlingSkip)
+			SetSkip();
+		RunCommandListLinks(config.commandLists, 0, false);
+		RunActions(config.actions, 0, false);
+	}
+
 	void RunPostTextureOverrideLists(
 		const Bunny::TextureOverrideConfig &config, bool postRuntimeEffect)
 	{
@@ -238,54 +248,7 @@ private:
 	void RunTextureOverrideActions(
 		const Bunny::TextureOverrideConfig &config, int depth, bool includePost)
 	{
-		if (!mReplacement)
-			return;
-
-		const bool executeActions = mExecuteCommands || mExecuteDrawActions;
-		for (const Bunny::CommandListAction &action : config.actions) {
-			switch (action.kind) {
-			case Bunny::CommandListActionKind::Run: {
-				if (!mExecuteCommands)
-					break;
-				auto it = gCommandLists.find(action.commandList);
-				if (it != gCommandLists.end())
-					RunCommandList(it->second, depth + 1, includePost);
-				break;
-			}
-			case Bunny::CommandListActionKind::CheckTextureOverride: {
-				if (!mExecuteCommands)
-					break;
-				const Bunny::TextureOverrideConfig *matchedConfig =
-					FindTargetTextureOverride(action.target);
-				if (matchedConfig)
-					RunTextureOverride(*matchedConfig, depth + 1, includePost);
-				break;
-			}
-			case Bunny::CommandListActionKind::HandlingSkip:
-				if (executeActions)
-					SetSkip();
-				break;
-			case Bunny::CommandListActionKind::SetIndexBuffer:
-				AppendResourceViews(action.resource, std::vector<DX12CompiledVertexResourceBinding>());
-				break;
-			case Bunny::CommandListActionKind::SetVertexBuffer:
-				AppendResourceViews(
-					L"", std::vector<DX12CompiledVertexResourceBinding>{
-						{ action.target.slot, action.resource }});
-				break;
-			case Bunny::CommandListActionKind::Draw:
-			case Bunny::CommandListActionKind::DrawIndexed:
-			case Bunny::CommandListActionKind::DrawFromCaller:
-			case Bunny::CommandListActionKind::DrawIndexedFromCaller:
-				if (executeActions)
-					AppendDraw(action);
-				break;
-			case Bunny::CommandListActionKind::Dispatch:
-				if (executeActions)
-					AppendDispatch(action);
-				break;
-			}
-		}
+		RunActions(config.actions, depth, includePost);
 	}
 
 	void RunCommandList(
@@ -335,6 +298,59 @@ private:
 			}
 		}
 		LeaveCommandList();
+	}
+
+	void RunActions(
+		const std::vector<Bunny::CommandListAction> &actions, int depth, bool includePost)
+	{
+		if (!mReplacement || depth > 16)
+			return;
+
+		const bool executeActions = mExecuteCommands || mExecuteDrawActions;
+		for (const Bunny::CommandListAction &action : actions) {
+			switch (action.kind) {
+			case Bunny::CommandListActionKind::Run: {
+				if (!mExecuteCommands)
+					break;
+				auto it = gCommandLists.find(action.commandList);
+				if (it != gCommandLists.end())
+					RunCommandList(it->second, depth + 1, includePost);
+				break;
+			}
+			case Bunny::CommandListActionKind::CheckTextureOverride: {
+				if (!mExecuteCommands)
+					break;
+				const Bunny::TextureOverrideConfig *matchedConfig =
+					FindTargetTextureOverride(action.target);
+				if (matchedConfig)
+					RunTextureOverride(*matchedConfig, depth + 1, includePost);
+				break;
+			}
+			case Bunny::CommandListActionKind::HandlingSkip:
+				if (executeActions)
+					SetSkip();
+				break;
+			case Bunny::CommandListActionKind::SetIndexBuffer:
+				AppendResourceViews(action.resource, std::vector<DX12CompiledVertexResourceBinding>());
+				break;
+			case Bunny::CommandListActionKind::SetVertexBuffer:
+				AppendResourceViews(
+					L"", std::vector<DX12CompiledVertexResourceBinding>{
+						{ action.target.slot, action.resource }});
+				break;
+			case Bunny::CommandListActionKind::Draw:
+			case Bunny::CommandListActionKind::DrawIndexed:
+			case Bunny::CommandListActionKind::DrawFromCaller:
+			case Bunny::CommandListActionKind::DrawIndexedFromCaller:
+				if (executeActions)
+					AppendDraw(action);
+				break;
+			case Bunny::CommandListActionKind::Dispatch:
+				if (executeActions)
+					AppendDispatch(action);
+				break;
+			}
+		}
 	}
 
 	void RunCommandListLinks(

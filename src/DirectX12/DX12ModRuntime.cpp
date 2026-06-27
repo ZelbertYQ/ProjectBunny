@@ -186,9 +186,11 @@ struct DX12VertexLimitRaiseConfig
 };
 static std::vector<DX12VertexLimitRaiseConfig> gVertexLimitRaiseConfigs;
 static UINT64 gReloadGeneration = 1;
+static volatile LONG gHasVertexLimitRaiseConfigs = 0;
 static volatile LONG gHasShaderOverrides = 0;
 static volatile LONG gHasTextureOverrides = 0;
 static volatile LONG gHasPreSkinTextureOverrideCandidates = 0;
+static volatile LONG gHasShaderTriggeredTextureOverrides = 0;
 static volatile LONG gHasPresentRuntimeEffect = 0;
 static bool gHasPreSkinVlrWithoutMatchCs = false;
 static std::unordered_set<uint64_t> gPreSkinMatchCsHashes;
