@@ -964,11 +964,13 @@ static bool FindPreSkinProducerByMatchCsLocked(
 	return true;
 }
 
-static UINT FindPreSkinUavElementStrideLocked(const DX12LoadedResource &resource)
+static UINT FindPreSkinUavElementStrideLocked(
+	const DX12LoadedResource &resource,
+	const std::unordered_set<std::wstring> &activePreSkinSections)
 {
 	for (const DX12VertexLimitRaiseConfig &vlr : gVertexLimitRaiseConfigs) {
 		if (vlr.hasMatchCs &&
-		    ResourceBlockedByInactiveExplicitMatchCsLocked(resource.name))
+		    ResourceBlockedByInactiveExplicitMatchCsLocked(resource.name, activePreSkinSections))
 			continue;
 		if (!ResourceMatchesVlrTarget(resource, vlr))
 			continue;
@@ -1642,6 +1644,8 @@ bool DX12ModApplyPreSkinningUavReplacement(
 	bool explicitMatchCs = false;
 	bool hasExplicitDispatch = false;
 	bool vlrMatched = false;
+	std::unordered_set<std::wstring> activePreSkinSections;
+	SnapshotActivePreSkinSections(&activePreSkinSections);
 
 	AcquireSRWLockExclusive(&gModLock);
 	explicitMatchCs = HasMatchCsTextureOverrideLocked(computeShaderHash);
@@ -1685,7 +1689,7 @@ bool DX12ModApplyPreSkinningUavReplacement(
 		if (replacement && EnsureResourceUavLocked(
 			device, commandList, replacement,
 			vlr.uavByteStride ? vlr.uavByteStride : vlr.overrideByteStride,
-			0, true)) {
+			0, true, &activePreSkinSections)) {
 			const DX12CurrentComputeUavBinding *binding = nullptr;
 			for (const DX12CurrentComputeUavBinding &uav : uavs) {
 				if (uav.rootParameterIndex == producer.rootParameterIndex &&
@@ -1731,9 +1735,12 @@ bool DX12ModApplyKnownPreSkinningUavPatches(ID3D12GraphicsCommandList *commandLi
 
 	DX12InternalReplayScope internalReplay;
 	bool applied = false;
+	std::unordered_set<std::wstring> activePreSkinSections;
+	SnapshotActivePreSkinSections(&activePreSkinSections);
 	for (const auto &patch : patches) {
 		AcquireSRWLockExclusive(&gModLock);
-		const bool blocked = ResourceBlockedByInactiveExplicitMatchCsLocked(patch.second);
+		const bool blocked =
+			ResourceBlockedByInactiveExplicitMatchCsLocked(patch.second, activePreSkinSections);
 		ReleaseSRWLockExclusive(&gModLock);
 		if (blocked)
 			continue;
@@ -1741,9 +1748,12 @@ bool DX12ModApplyKnownPreSkinningUavPatches(ID3D12GraphicsCommandList *commandLi
 		if (!resource)
 			continue;
 		AcquireSRWLockExclusive(&gModLock);
-		const UINT elementStride = FindPreSkinUavElementStrideLocked(*resource);
+		const UINT elementStride =
+			FindPreSkinUavElementStrideLocked(*resource, activePreSkinSections);
 		ReleaseSRWLockExclusive(&gModLock);
-		if (!EnsureResourceUavLocked(device, commandList, resource, elementStride, 0, true))
+		if (!EnsureResourceUavLocked(
+			device, commandList, resource, elementStride, 0, true,
+			&activePreSkinSections))
 			continue;
 		if (!resource->uavResource || !resource->uavCpu.ptr)
 			continue;
@@ -1836,6 +1846,7 @@ void DX12ModRestorePreSkinningUavReplacement(ID3D12GraphicsCommandList *commandL
 	ReleasePreSkinDescriptorRestores(&state.descriptorRestores);
 
 	if (state.hasActiveTextureOverride && state.resource) {
+		std::vector<ID3D12Resource*> releasePreSkinResources;
 		DX12ActivePreSkinTextureOverride active = {};
 		active.config = state.activeConfig;
 		active.producer = state.activeProducer;
@@ -1843,10 +1854,11 @@ void DX12ModRestorePreSkinningUavReplacement(ID3D12GraphicsCommandList *commandL
 		active.outputByteWidth = state.byteWidth;
 		active.outputStride = state.stride;
 		AcquireSRWLockExclusive(&gPreSkinLock);
-		StoreActivePreSkinTextureOverrideLocked(active.config.section, active);
+		StoreActivePreSkinTextureOverrideLocked(
+			active.config.section, active, &releasePreSkinResources);
 		ReleaseSRWLockExclusive(&gPreSkinLock);
-		state.resource->Release();
 		state.resource = nullptr;
+		ReleaseMovedPreSkinResources(&releasePreSkinResources);
 	}
 
 #if defined(_DEBUG)

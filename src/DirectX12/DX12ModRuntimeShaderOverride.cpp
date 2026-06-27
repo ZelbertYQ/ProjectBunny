@@ -99,6 +99,37 @@ static void BuildShaderOverrideConfigPointers(
 		configs->push_back(&config);
 }
 
+static void CopyShaderOverrideConfigs(
+	const std::vector<const Bunny::ShaderOverrideConfig*> &configs,
+	std::vector<Bunny::ShaderOverrideConfig> *snapshot)
+{
+	if (!snapshot)
+		return;
+	snapshot->clear();
+	snapshot->reserve(configs.size());
+	for (const Bunny::ShaderOverrideConfig *config : configs) {
+		if (config)
+			snapshot->push_back(*config);
+	}
+}
+
+static void LogShaderOverrideCommandListSnapshotLimited(
+	const char *phase, const std::vector<Bunny::ShaderOverrideConfig> &configs,
+	const DX12ModIaReplacement &replacement)
+{
+#if defined(_DEBUG)
+	std::vector<const Bunny::ShaderOverrideConfig*> pointers;
+	pointers.reserve(configs.size());
+	for (const Bunny::ShaderOverrideConfig &config : configs)
+		pointers.push_back(&config);
+	LogShaderOverrideCommandListLimited(phase, pointers, replacement);
+#else
+	(void)phase;
+	(void)configs;
+	(void)replacement;
+#endif
+}
+
 static bool TryFindCachedShaderOverridesForPsoLocked(
 	ID3D12PipelineState *pipelineState, bool dispatch,
 	std::vector<const Bunny::ShaderOverrideConfig*> *configs)
@@ -189,37 +220,45 @@ bool DX12ModPrepareShaderOverrideReplacement(
 		return false;
 
 	std::vector<const Bunny::ShaderOverrideConfig*> configs;
+	std::vector<Bunny::ShaderOverrideConfig> configSnapshot;
 	bool cached = false;
 	AcquireSRWLockShared(&gModLock);
 	cached = TryFindCachedShaderOverridesForPsoLocked(pipelineState, false, &configs);
+	if (cached)
+		CopyShaderOverrideConfigs(configs, &configSnapshot);
 	ReleaseSRWLockShared(&gModLock);
 
-	if (cached && configs.empty()) {
+	if (cached && configSnapshot.empty()) {
 		device->Release();
 		return false;
 	}
 
-	AcquireSRWLockExclusive(&gModLock);
-	FindShaderOverridesForPsoLocked(pipelineState, false, &configs);
-	if (configs.empty()) {
+	if (!cached) {
+		AcquireSRWLockExclusive(&gModLock);
+		FindShaderOverridesForPsoLocked(pipelineState, false, &configs);
+		CopyShaderOverrideConfigs(configs, &configSnapshot);
 		ReleaseSRWLockExclusive(&gModLock);
+	}
+	if (configSnapshot.empty()) {
 		device->Release();
 		return false;
 	}
+	std::vector<DX12PendingResourceViewRequest> pendingResourceViews;
 	DX12CommandListExecutor executor(
 		device, commandList, iaState,
 		vertexCount, indexCount, instanceCount,
-		firstVertex, firstIndex, replacement);
+		firstVertex, firstIndex, replacement, &pendingResourceViews);
 	executor.SetExecutionMode(true, true);
-	for (const Bunny::ShaderOverrideConfig *config : configs) {
-		if (!config)
-			continue;
-		executor.RunShaderOverride(*config);
+	for (const Bunny::ShaderOverrideConfig &config : configSnapshot) {
+		executor.RunShaderOverride(config);
 	}
-	LogShaderOverrideCommandListLimited("pre", configs, *replacement);
+	const bool resourcesChanged = ApplyPendingResourceViewsForCommandList(
+		device, commandList, iaState, pendingResourceViews, replacement);
+	if (resourcesChanged)
+		executor.MarkExternalChange();
+	LogShaderOverrideCommandListSnapshotLimited("pre", configSnapshot, *replacement);
 	bool changed = executor.Changed() || replacement->skip || !replacement->draws.empty() ||
 		!replacement->dispatches.empty();
-	ReleaseSRWLockExclusive(&gModLock);
 	device->Release();
 
 	return changed;
@@ -240,23 +279,26 @@ void DX12ModRunPostShaderOverrideReplacement(
 		return;
 
 	std::vector<const Bunny::ShaderOverrideConfig*> configs;
+	std::vector<Bunny::ShaderOverrideConfig> configSnapshot;
 	AcquireSRWLockExclusive(&gModLock);
 	FindShaderOverridesForPsoLocked(pipelineState, false, &configs);
-	if (!configs.empty()) {
+	CopyShaderOverrideConfigs(configs, &configSnapshot);
+	ReleaseSRWLockExclusive(&gModLock);
+	if (!configSnapshot.empty()) {
+		std::vector<DX12PendingResourceViewRequest> pendingResourceViews;
 		DX12CommandListExecutor executor(
 			device, commandList, iaState,
 			vertexCount, indexCount, instanceCount,
-			firstVertex, firstIndex, replacement);
+			firstVertex, firstIndex, replacement, &pendingResourceViews);
 		executor.SetExecutionMode(true, true);
-		for (const Bunny::ShaderOverrideConfig *config : configs) {
-			if (!config)
-				continue;
-			executor.RunPostShaderOverrideLists(*config);
+		for (const Bunny::ShaderOverrideConfig &config : configSnapshot) {
+			executor.RunPostShaderOverrideLists(config);
 		}
-		LogShaderOverrideCommandListLimited("post", configs, *replacement);
-		ReleaseSRWLockExclusive(&gModLock);
-	} else {
-		ReleaseSRWLockExclusive(&gModLock);
+		const bool resourcesChanged = ApplyPendingResourceViewsForCommandList(
+			device, commandList, iaState, pendingResourceViews, replacement);
+		if (resourcesChanged)
+			executor.MarkExternalChange();
+		LogShaderOverrideCommandListSnapshotLimited("post", configSnapshot, *replacement);
 	}
 	device->Release();
 }

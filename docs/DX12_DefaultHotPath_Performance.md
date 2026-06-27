@@ -115,6 +115,62 @@ The PSO match cache also no longer writes under an SRW shared lock. Cache hits c
 
 The remaining risk is broad ShaderRegex scope itself: if a Mod lists common models such as `vs_6_0 ps_6_0`, many draws will still run one command-list check. DX11 has resource-hash caching optimized for this style. If GPU utilization remains low after deduplication, the next fix should be a clean command-list TextureOverride lookup cache keyed by current IA binding hash state and draw context, not a global TextureOverride fallback path.
 
+### Command List TextureOverride Lookup Cache
+
+The next KeFUY retest produced a small startup-only log and still became unresponsive. That ruled out default JSON logging as the active bottleneck. The loaded runtime state was:
+
+- `shaderRegexes:1`
+- `activeShaderOverrides:true`
+- `shaderTriggeredTextureOverrides:true`
+- `descriptorTextureOverrideTriggers:false`
+- `preSkinProbeEnabled:true`
+
+The Mod's no-pattern ShaderRegex intentionally matched common VS and PS models and executed three IA checks:
+
+- `CheckTextureOverride = ib`
+- `CheckTextureOverride = vb0`
+- `CheckTextureOverride = vb1`
+
+DX12 had PSO-level ShaderRegex deduplication, but each matching draw still recomputed the three TextureOverride lookups. DX11's `CheckTextureOverride` path first selects a command-list scope and then finds TextureOverride sections by resource hash and draw context. DX12 now keeps that trigger model but caches IA-target lookup results inside the command-list TextureOverride path.
+
+The cache key contains:
+
+- Mod reload generation
+- PreSkin active generation
+- target kind, shader stage, and slot
+- current IA hash
+- draw context fields
+
+The value stores only a candidate index or a no-match result. It does not hold COM references, loaded resource ownership, descriptor heap objects, or command-list objects. The cache is cleared on Mod reload and bounded to avoid unbounded growth.
+
+PreSkin active generation invalidates cached misses when a `match_cs` dependency becomes active later in the frame. This is required because a TextureOverride section that was intentionally inactive before its producer dispatch may become valid after PreSkin writes its output.
+
+This fix reduces CPU work for broad ShaderRegex scopes without reintroducing the removed global IA TextureOverride matcher.
+
+### Command List Executor Snapshot Fix
+
+The next unresponsive retest showed the lookup cache was not enough. Broad ShaderRegex execution made the command-list path hot, while the executor still depended on global Mod containers during execution.
+
+The command-list executor now follows a snapshot-then-execute rule:
+
+- command-list configs are copied under a short shared `gModLock`
+- compiled command-list and TextureOverride plans are copied under a short shared `gModLock`
+- ShaderOverride and ShaderRegex PSO matches are copied to value snapshots before execution
+- IA TextureOverride lookup cache reads and writes are protected by `gModLock`
+- matched TextureOverride configs are copied out before resource view materialization
+- descriptor/resource creation, `ResourceBarrier`, GPU virtual-address queries, and command-list recording run outside `gModLock`
+
+The Present command-list path also stopped executing under `gModLock`. The one-per-frame Present marker now uses an atomic compare/exchange instead of holding the Mod lock around command-list execution.
+
+The PreSkin path had a second lock-order risk: IA TextureOverride matching could enter `gModLock` and then read active PreSkin state through `gPreSkinLock`. BeginFrame and explicit `match_cs` blocking had similar nested-lock shapes. DX12 now snapshots active PreSkin sections before the Mod lock is taken, and resource release is moved outside locks.
+
+This keeps the DX12 design aligned with the project rule that locks move metadata only. Driver-facing work, COM release, and GPU resource preparation do not run inside the global configuration lock.
+
+`build_debug_x64.ps1` succeeded after this fix and copied the DX12 DLL to:
+
+- `D:\Dev\ssmt4\src-tauri\resources\DX12\d3d12.dll`
+- `D:\SSMTCacheFolder\3Dmigoto\ZZMIDX12\d3d12.dll`
+
 ### References
 
 - https://learn.microsoft.com/en-us/windows/win32/api/winnt/nf-winnt-interlockedincrement

@@ -10,6 +10,26 @@ static void ReleaseLoadedResourcesLocked()
 	gLoadedResources.clear();
 }
 
+static void MoveExpiredRetiredLoadedResourcesLocked(
+	std::vector<DX12RetiredLoadedResource> *expired)
+{
+	if (!expired)
+		return;
+	expired->clear();
+	if (InterlockedCompareExchange(&gActiveLoadedResourceSnapshots, 0, 0) != 0)
+		return;
+	const LONG present = DX12GetPresentCount();
+	auto it = gRetiredLoadedResources.begin();
+	while (it != gRetiredLoadedResources.end()) {
+		if (present - it->retirePresent < RetiredLoadedResourcePresentDelay) {
+			++it;
+			continue;
+		}
+		expired->push_back(*it);
+		it = gRetiredLoadedResources.erase(it);
+	}
+}
+
 static void ReleaseLoadedResourceObjects(DX12LoadedResource *resource)
 {
 	if (!resource)
@@ -36,54 +56,50 @@ static void ReleaseLoadedResourceObjects(DX12LoadedResource *resource)
 	}
 }
 
-static void ReleaseExpiredRetiredLoadedResourcesLocked()
-{
-	const LONG present = DX12GetPresentCount();
-	auto it = gRetiredLoadedResources.begin();
-	while (it != gRetiredLoadedResources.end()) {
-		if (present - it->retirePresent < RetiredLoadedResourcePresentDelay) {
-			++it;
-			continue;
-		}
-		ReleaseLoadedResourceObjects(&it->resource);
-		it = gRetiredLoadedResources.erase(it);
-	}
-}
-
-static bool CommandListRuntimeEffectLocked(const std::wstring &name);
-static bool RunNamedCommandListLocked(
+static DX12IaHashState EmptyIaHashState();
+static bool ApplyPendingResourceViewsForCommandList(
+	ID3D12Device *device, ID3D12GraphicsCommandList *commandList,
+	const DX12IaHashState &iaState,
+	const std::vector<DX12PendingResourceViewRequest> &requests,
+	DX12ModIaReplacement *replacement);
+static bool RunNamedCommandList(
+	ID3D12Device *device,
 	ID3D12GraphicsCommandList *commandList,
 	const std::wstring &name,
-	DX12ModIaReplacement *replacement);
+	DX12ModIaReplacement *replacement,
+	std::vector<DX12PendingResourceViewRequest> *pendingResourceViews);
 
-static bool TextureOverrideMatchCsSatisfiedLocked(const Bunny::TextureOverrideConfig &config)
+static bool TextureOverrideMatchCsSatisfied(
+	const Bunny::TextureOverrideConfig &config,
+	const std::unordered_set<std::wstring> &activePreSkinSections)
 {
 	if (!config.hasMatchCs)
 		return true;
-
-	AcquireSRWLockShared(&gPreSkinLock);
-	const bool active =
-		gActivePreSkinTextureOverrides.find(config.section) != gActivePreSkinTextureOverrides.end();
-	ReleaseSRWLockShared(&gPreSkinLock);
-	return active;
+	return activePreSkinSections.find(config.section) != activePreSkinSections.end();
 }
 
 void DX12ModBeginFrame()
 {
+	std::vector<DX12RetiredLoadedResource> expired;
+	std::vector<ID3D12Resource*> releasePreSkinResources;
+	AcquireSRWLockExclusive(&gPreSkinLock);
+	ClearActivePreSkinTextureOverridesLocked(&releasePreSkinResources);
+	gPreSkinCbvReadCache.clear();
+	gPreSkinSrvNegativeCache.clear();
+	gPreSkinSrvPositiveCache.clear();
+	ReleaseSRWLockExclusive(&gPreSkinLock);
+
 	AcquireSRWLockExclusive(&gModLock);
 	for (auto &item : gLoadedResources) {
 		item.second.uavWritten = false;
 		item.second.uavValid = false;
 	}
 	gPreSkinSectionAppliedPresent.clear();
-	AcquireSRWLockExclusive(&gPreSkinLock);
-	ClearActivePreSkinTextureOverridesLocked();
-	ReleaseSRWLockExclusive(&gPreSkinLock);
-	gPreSkinCbvReadCache.clear();
-	gPreSkinSrvNegativeCache.clear();
-	gPreSkinSrvPositiveCache.clear();
-	ReleaseExpiredRetiredLoadedResourcesLocked();
+	MoveExpiredRetiredLoadedResourcesLocked(&expired);
 	ReleaseSRWLockExclusive(&gModLock);
+	for (DX12RetiredLoadedResource &resource : expired)
+		ReleaseLoadedResourceObjects(&resource.resource);
+	ReleaseMovedPreSkinResources(&releasePreSkinResources);
 }
 
 bool DX12ModPreparePresentReplacement(
@@ -94,53 +110,172 @@ bool DX12ModPreparePresentReplacement(
 	if (!DX12ModNeedsPresentReplacement())
 		return false;
 
-	const LONG present = DX12GetPresentCount();
-	if (gPresentCommandListExecutedPresent == present)
-		return false;
-	if (InterlockedCompareExchange(
-		    &gPresentCommandListExecutedPresent, present, present) == present)
+	ID3D12Device *device = AcquireModDevice(commandList);
+	if (!device)
 		return false;
 
-	AcquireSRWLockExclusive(&gModLock);
-	if (InterlockedCompareExchange(
-		    &gPresentCommandListExecutedPresent, present, present) == present) {
-		ReleaseSRWLockExclusive(&gModLock);
-		return false;
+	const LONG present = DX12GetPresentCount();
+	for (;;) {
+		const LONG observed = InterlockedCompareExchange(
+			&gPresentCommandListExecutedPresent, 0, 0);
+		if (observed == present) {
+			device->Release();
+			return false;
+		}
+		if (InterlockedCompareExchange(
+			    &gPresentCommandListExecutedPresent, present, observed) == observed)
+			break;
 	}
-	InterlockedExchange(&gPresentCommandListExecutedPresent, present);
-	const bool changed = RunNamedCommandListLocked(commandList, L"Present", replacement);
-	ReleaseSRWLockExclusive(&gModLock);
+
+	std::vector<DX12PendingResourceViewRequest> pendingResourceViews;
+	bool changed = RunNamedCommandList(
+		device, commandList, L"Present", replacement, &pendingResourceViews);
+	DX12IaHashState emptyIa = EmptyIaHashState();
+	changed |= ApplyPendingResourceViewsForCommandList(
+		device, commandList, emptyIa, pendingResourceViews, replacement);
+	device->Release();
 	return changed;
 }
 
-static const Bunny::TextureOverrideConfig *FindTextureOverrideLocked(
-	uint32_t hash, uint32_t vertexCount, uint32_t indexCount, uint32_t instanceCount,
-	uint32_t firstVertex, uint32_t firstIndex, uint32_t firstInstance, bool requireSkip,
-	bool indexBuffer, uint32_t vertexSlot)
+static DX12TextureOverrideLookupCacheKey MakeIaTextureOverrideLookupCacheKey(
+	const Bunny::CommandListTarget &target, uint32_t hash,
+	uint32_t vertexCount, uint32_t indexCount, uint32_t instanceCount,
+	uint32_t firstVertex, uint32_t firstIndex, uint32_t firstInstance,
+	UINT64 preSkinGeneration)
 {
+	DX12TextureOverrideLookupCacheKey key = {};
+	key.reloadGeneration = gReloadGeneration;
+	key.preSkinGeneration = preSkinGeneration;
+	key.targetKind = static_cast<uint32_t>(target.kind);
+	key.shaderStage = static_cast<uint32_t>(target.stage);
+	key.slot = target.slot;
+	key.hash = hash;
+	key.vertexCount = vertexCount;
+	key.indexCount = indexCount;
+	key.instanceCount = instanceCount;
+	key.firstVertex = firstVertex;
+	key.firstIndex = firstIndex;
+	key.firstInstance = firstInstance;
+	return key;
+}
+
+static const Bunny::TextureOverrideConfig *ConfigFromIaCandidateIndexLocked(size_t index)
+{
+	if (index >= gIaTextureOverrides.size())
+		return nullptr;
+	return &gIaTextureOverrides[index].config;
+}
+
+static bool TryFindCachedIaTextureOverrideLocked(
+	const DX12TextureOverrideLookupCacheKey &key,
+	const Bunny::TextureOverrideConfig **config)
+{
+	if (config)
+		*config = nullptr;
+	auto cached = gTextureOverrideLookupCache.find(key);
+	if (cached == gTextureOverrideLookupCache.end())
+		return false;
+	if (!cached->second.matched)
+		return true;
+	const Bunny::TextureOverrideConfig *cachedConfig =
+		ConfigFromIaCandidateIndexLocked(cached->second.iaCandidateIndex);
+	if (!cachedConfig)
+		return false;
+	if (config)
+		*config = cachedConfig;
+	return true;
+}
+
+static void StoreIaTextureOverrideLookupCacheLocked(
+	const DX12TextureOverrideLookupCacheKey &key, bool matched, size_t candidateIndex)
+{
+	if (gTextureOverrideLookupCache.size() >= MaxTextureOverrideLookupCacheEntries)
+		gTextureOverrideLookupCache.clear();
+	DX12TextureOverrideLookupCacheEntry entry = {};
+	entry.matched = matched;
+	entry.iaCandidateIndex = candidateIndex;
+	gTextureOverrideLookupCache[key] = entry;
+}
+
+static const Bunny::TextureOverrideConfig *FindIaTextureOverrideCachedLocked(
+	const Bunny::CommandListTarget &target, uint32_t hash,
+	uint32_t vertexCount, uint32_t indexCount, uint32_t instanceCount,
+	uint32_t firstVertex, uint32_t firstIndex, uint32_t firstInstance,
+	bool indexBuffer, uint32_t vertexSlot,
+	const std::unordered_set<std::wstring> &activePreSkinSections,
+	UINT64 preSkinGeneration)
+{
+	const DX12TextureOverrideLookupCacheKey key =
+		MakeIaTextureOverrideLookupCacheKey(
+			target, hash, vertexCount, indexCount, instanceCount,
+			firstVertex, firstIndex, firstInstance, preSkinGeneration);
+	const Bunny::TextureOverrideConfig *cachedConfig = nullptr;
+	if (TryFindCachedIaTextureOverrideLocked(key, &cachedConfig))
+		return cachedConfig;
+
 	const std::vector<size_t> *candidateIndexes =
 		FindIaTextureOverrideCandidatesLocked(hash, indexBuffer, vertexSlot);
-	if (!candidateIndexes || candidateIndexes->empty())
+	if (!candidateIndexes || candidateIndexes->empty()) {
+		StoreIaTextureOverrideLookupCacheLocked(key, false, 0);
 		return nullptr;
+	}
 
 	for (size_t index : *candidateIndexes) {
 		if (index >= gIaTextureOverrides.size())
 			continue;
 		const DX12IaTextureOverrideCandidate &candidate = gIaTextureOverrides[index];
 		const Bunny::TextureOverrideConfig &config = candidate.config;
-		if (!TextureOverrideMatchCsSatisfiedLocked(config))
+		if (!TextureOverrideMatchCsSatisfied(config, activePreSkinSections))
 			continue;
 		if (!TextureOverrideMatchesIaBinding(config, indexBuffer, vertexSlot))
-			continue;
-		if (requireSkip && !config.handlingSkip)
 			continue;
 		if (!TextureOverrideMatchesDrawContext(
 			config, vertexCount, indexCount, instanceCount,
 			firstVertex, firstIndex, firstInstance))
 			continue;
+		StoreIaTextureOverrideLookupCacheLocked(key, true, index);
 		return &config;
 	}
+
+	StoreIaTextureOverrideLookupCacheLocked(key, false, 0);
 	return nullptr;
+}
+
+static bool FindIaTextureOverrideCached(
+	const Bunny::CommandListTarget &target, uint32_t hash,
+	uint32_t vertexCount, uint32_t indexCount, uint32_t instanceCount,
+	uint32_t firstVertex, uint32_t firstIndex, uint32_t firstInstance,
+	bool indexBuffer, uint32_t vertexSlot,
+	Bunny::TextureOverrideConfig *configOut)
+{
+	std::unordered_set<std::wstring> activePreSkinSections;
+	const UINT64 preSkinGeneration =
+		SnapshotActivePreSkinSections(&activePreSkinSections);
+
+	AcquireSRWLockShared(&gModLock);
+	DX12TextureOverrideLookupCacheKey key =
+		MakeIaTextureOverrideLookupCacheKey(
+			target, hash, vertexCount, indexCount, instanceCount,
+			firstVertex, firstIndex, firstInstance, preSkinGeneration);
+	const Bunny::TextureOverrideConfig *cachedConfig = nullptr;
+	if (TryFindCachedIaTextureOverrideLocked(key, &cachedConfig)) {
+		if (cachedConfig && configOut)
+			*configOut = *cachedConfig;
+		ReleaseSRWLockShared(&gModLock);
+		return cachedConfig != nullptr;
+	}
+	ReleaseSRWLockShared(&gModLock);
+
+	AcquireSRWLockExclusive(&gModLock);
+	const Bunny::TextureOverrideConfig *config =
+		FindIaTextureOverrideCachedLocked(
+			target, hash, vertexCount, indexCount, instanceCount,
+			firstVertex, firstIndex, firstInstance, indexBuffer, vertexSlot,
+			activePreSkinSections, preSkinGeneration);
+	if (config && configOut)
+		*configOut = *config;
+	ReleaseSRWLockExclusive(&gModLock);
+	return config != nullptr;
 }
 
 static const DX12IaBufferHash *FindIaVertexSlot(const DX12IaHashState &iaState, uint32_t slot)
@@ -211,7 +346,8 @@ static uint32_t HashDescriptorBinding(const DX12CurrentShaderResourceBinding &bi
 
 static const Bunny::TextureOverrideConfig *FindTextureOverrideByHashLocked(
 	uint32_t hash, uint32_t vertexCount, uint32_t indexCount, uint32_t instanceCount,
-	uint32_t firstVertex, uint32_t firstIndex, uint32_t firstInstance)
+	uint32_t firstVertex, uint32_t firstIndex, uint32_t firstInstance,
+	const std::unordered_set<std::wstring> &activePreSkinSections)
 {
 	if (!hash)
 		return nullptr;
@@ -221,7 +357,7 @@ static const Bunny::TextureOverrideConfig *FindTextureOverrideByHashLocked(
 		return nullptr;
 
 	for (const Bunny::TextureOverrideConfig &config : bucket->second) {
-		if (!TextureOverrideMatchCsSatisfiedLocked(config))
+		if (!TextureOverrideMatchCsSatisfied(config, activePreSkinSections))
 			continue;
 		if (!TextureOverrideMatchesDrawContext(
 			config, vertexCount, indexCount, instanceCount,
@@ -232,63 +368,123 @@ static const Bunny::TextureOverrideConfig *FindTextureOverrideByHashLocked(
 	return nullptr;
 }
 
-static const Bunny::TextureOverrideConfig *FindDescriptorTextureOverrideLocked(
+static bool FindTextureOverrideByHash(
+	uint32_t hash, uint32_t vertexCount, uint32_t indexCount, uint32_t instanceCount,
+	uint32_t firstVertex, uint32_t firstIndex, uint32_t firstInstance,
+	Bunny::TextureOverrideConfig *configOut)
+{
+	std::unordered_set<std::wstring> activePreSkinSections;
+	SnapshotActivePreSkinSections(&activePreSkinSections);
+
+	AcquireSRWLockShared(&gModLock);
+	const Bunny::TextureOverrideConfig *config =
+		FindTextureOverrideByHashLocked(
+			hash, vertexCount, indexCount, instanceCount,
+			firstVertex, firstIndex, firstInstance, activePreSkinSections);
+	if (config && configOut)
+		*configOut = *config;
+	ReleaseSRWLockShared(&gModLock);
+	return config != nullptr;
+}
+
+static bool FindDescriptorTextureOverride(
 	ID3D12GraphicsCommandList *commandList,
 	const Bunny::CommandListTarget &target,
 	uint32_t vertexCount, uint32_t indexCount, uint32_t instanceCount,
-	uint32_t firstVertex, uint32_t firstIndex)
+	uint32_t firstVertex, uint32_t firstIndex,
+	Bunny::TextureOverrideConfig *configOut)
 {
 	if (!commandList)
-		return nullptr;
+		return false;
 
 	std::vector<DX12CurrentShaderResourceBinding> bindings;
 	const bool compute = TargetStageIsCompute(target.stage);
 	if (!DX12BindingGetCurrentShaderResourceBindings(
 		    commandList, compute, DescriptorRangeTypeForTarget(target.kind), &bindings))
-		return nullptr;
+		return false;
 
 	for (const DX12CurrentShaderResourceBinding &binding : bindings) {
 		if (!DescriptorBindingMatchesTarget(binding, target))
 			continue;
 		const uint32_t hash = HashDescriptorBinding(binding);
-		const Bunny::TextureOverrideConfig *config =
-			FindTextureOverrideByHashLocked(
-				hash, vertexCount, indexCount, instanceCount,
-				firstVertex, firstIndex, 0);
-		if (config)
-			return config;
+		if (FindTextureOverrideByHash(
+			    hash, vertexCount, indexCount, instanceCount,
+			    firstVertex, firstIndex, 0, configOut))
+			return true;
 	}
-	return nullptr;
+	return false;
 }
 
-static ID3D12Resource *SelectIaResourceForViewLocked(
-	ID3D12GraphicsCommandList *commandList, DX12LoadedResource *resource)
+struct DX12IaResourceViewSnapshot
 {
+	ID3D12Resource *resource = nullptr;
+	DX12LoadedResource metadata;
+	bool uavBarrierPending = false;
+	bool transitionToVertex = false;
+	D3D12_RESOURCE_STATES stateBefore = D3D12_RESOURCE_STATE_COMMON;
+	bool retained = false;
+};
+
+static void ReleaseIaResourceViewSnapshot(DX12IaResourceViewSnapshot *snapshot)
+{
+	if (!snapshot || !snapshot->resource)
+		return;
+	if (snapshot->retained)
+		snapshot->resource->Release();
+	snapshot->resource = nullptr;
+	snapshot->retained = false;
+}
+
+static void AddRefIaResourceViewSnapshot(DX12IaResourceViewSnapshot *snapshot)
+{
+	if (!snapshot || !snapshot->resource || snapshot->retained)
+		return;
+	snapshot->resource->AddRef();
+	snapshot->retained = true;
+}
+
+struct DX12LoadedResourceSnapshotReadScope
+{
+	DX12LoadedResourceSnapshotReadScope()
+	{
+		InterlockedIncrement(&gActiveLoadedResourceSnapshots);
+	}
+
+	~DX12LoadedResourceSnapshotReadScope()
+	{
+		InterlockedDecrement(&gActiveLoadedResourceSnapshots);
+	}
+};
+
+static void SnapshotIaResourceViewLocked(
+	DX12LoadedResource *resource, DX12IaResourceViewSnapshot *snapshot)
+{
+	if (!snapshot)
+		return;
+	ReleaseIaResourceViewSnapshot(snapshot);
 	if (!resource)
-		return nullptr;
+		return;
 	if (resource->uavResource && resource->uavValid) {
-		if (resource->uavBarrierPending) {
-			D3D12_RESOURCE_BARRIER barrier = {};
-			barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-			barrier.UAV.pResource = resource->uavResource;
-			commandList->ResourceBarrier(1, &barrier);
-			resource->uavBarrierPending = false;
-		}
+		snapshot->resource = resource->uavResource;
+		snapshot->metadata = *resource;
+		snapshot->uavBarrierPending = resource->uavBarrierPending;
 		if (resource->uavState != D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER) {
-			D3D12_RESOURCE_BARRIER barrier = {};
-			barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-			barrier.Transition.pResource = resource->uavResource;
-			barrier.Transition.StateBefore = resource->uavState;
-			barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
-			barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-			commandList->ResourceBarrier(1, &barrier);
+			snapshot->transitionToVertex = true;
+			snapshot->stateBefore = resource->uavState;
 			resource->uavState = D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
 		}
-		return resource->uavResource;
+		resource->uavBarrierPending = false;
+		return;
 	}
-	if (resource->srvResource && resource->srvByteWidth > resource->byteWidth)
-		return resource->srvResource;
-	return resource->resource;
+	if (resource->srvResource && resource->srvByteWidth > resource->byteWidth) {
+		snapshot->resource = resource->srvResource;
+		snapshot->metadata = *resource;
+		return;
+	}
+	if (resource->resource) {
+		snapshot->resource = resource->resource;
+		snapshot->metadata = *resource;
+	}
 }
 
 static UINT IaViewByteWidthForResource(const DX12LoadedResource &resource, ID3D12Resource *iaResource)
@@ -324,7 +520,29 @@ static void LogIaResourceBindLimited(
 #endif
 }
 
-static bool AppendResourceViewsLocked(
+static void ApplyIaResourceBarriers(
+	ID3D12GraphicsCommandList *commandList, const DX12IaResourceViewSnapshot &snapshot)
+{
+	if (!commandList || !snapshot.resource)
+		return;
+	if (snapshot.uavBarrierPending) {
+		D3D12_RESOURCE_BARRIER barrier = {};
+		barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+		barrier.UAV.pResource = snapshot.resource;
+		commandList->ResourceBarrier(1, &barrier);
+	}
+	if (snapshot.transitionToVertex) {
+		D3D12_RESOURCE_BARRIER barrier = {};
+		barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+		barrier.Transition.pResource = snapshot.resource;
+		barrier.Transition.StateBefore = snapshot.stateBefore;
+		barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
+		barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+		commandList->ResourceBarrier(1, &barrier);
+	}
+}
+
+static bool AppendResourceViewsForCommandList(
 	ID3D12Device *device, ID3D12GraphicsCommandList *commandList, const DX12IaHashState &iaState,
 	const std::wstring &indexResource,
 	const std::vector<DX12CompiledVertexResourceBinding> &vertexResources,
@@ -333,25 +551,40 @@ static bool AppendResourceViewsLocked(
 	if (!device || !commandList || !replacement)
 		return false;
 
+	if (!indexResource.empty())
+		EnsureLoadedResourceForCommandList(device, indexResource);
+	for (const auto &item : vertexResources)
+		EnsureLoadedResourceForCommandList(device, item.resource);
+
 	bool changed = false;
 	if (!indexResource.empty()) {
-		DX12LoadedResource *resource = EnsureLoadedResourceLocked(device, indexResource);
-		ID3D12Resource *iaResource = SelectIaResourceForViewLocked(commandList, resource);
-		if (resource && iaResource) {
-			replacement->indexBuffer.BufferLocation = iaResource->GetGPUVirtualAddress();
+		DX12IaResourceViewSnapshot snapshot;
+		{
+			DX12LoadedResourceSnapshotReadScope scope;
+			AcquireSRWLockExclusive(&gModLock);
+			auto loaded = gLoadedResources.find(indexResource);
+			if (loaded != gLoadedResources.end())
+				SnapshotIaResourceViewLocked(&loaded->second, &snapshot);
+			ReleaseSRWLockExclusive(&gModLock);
+			AddRefIaResourceViewSnapshot(&snapshot);
+		}
+		if (snapshot.resource) {
+			ApplyIaResourceBarriers(commandList, snapshot);
+			replacement->indexBuffer.BufferLocation = snapshot.resource->GetGPUVirtualAddress();
 			replacement->indexBuffer.SizeInBytes =
-				IaViewByteWidthForResource(*resource, iaResource);
+				IaViewByteWidthForResource(snapshot.metadata, snapshot.resource);
 			replacement->indexBuffer.Format =
-				resource->format == DXGI_FORMAT_R16_UINT ||
-				resource->format == DXGI_FORMAT_R32_UINT ?
-				resource->format :
+				snapshot.metadata.format == DXGI_FORMAT_R16_UINT ||
+				snapshot.metadata.format == DXGI_FORMAT_R32_UINT ?
+				snapshot.metadata.format :
 				(iaState.hasIndexBuffer && iaState.indexView.Format != DXGI_FORMAT_UNKNOWN ?
 					iaState.indexView.Format : DXGI_FORMAT_R32_UINT);
-			replacement->RetainResource(iaResource);
+			replacement->RetainResource(snapshot.resource);
 			replacement->hasIndexBuffer = true;
-			LogIaResourceBindLimited("ib", 0, *resource, iaResource);
+			LogIaResourceBindLimited("ib", 0, snapshot.metadata, snapshot.resource);
 			changed = true;
 		}
+		ReleaseIaResourceViewSnapshot(&snapshot);
 	}
 
 	if (!vertexResources.empty()) {
@@ -381,56 +614,86 @@ static bool AppendResourceViewsLocked(
 			}
 
 			for (const auto &item : vertexResources) {
-				DX12LoadedResource *resource = EnsureLoadedResourceLocked(device, item.resource);
-				ID3D12Resource *iaResource = SelectIaResourceForViewLocked(commandList, resource);
-				if (!resource || !iaResource)
+				DX12IaResourceViewSnapshot snapshot;
+				{
+					DX12LoadedResourceSnapshotReadScope scope;
+					AcquireSRWLockExclusive(&gModLock);
+					auto loaded = gLoadedResources.find(item.resource);
+					if (loaded != gLoadedResources.end())
+						SnapshotIaResourceViewLocked(&loaded->second, &snapshot);
+					ReleaseSRWLockExclusive(&gModLock);
+					AddRefIaResourceViewSnapshot(&snapshot);
+				}
+				if (!snapshot.resource) {
+					ReleaseIaResourceViewSnapshot(&snapshot);
 					continue;
+				}
+				ApplyIaResourceBarriers(commandList, snapshot);
 				D3D12_VERTEX_BUFFER_VIEW &view =
 					replacement->vertexBuffers[item.slot - replacement->vertexBufferStartSlot];
-				view.BufferLocation = iaResource->GetGPUVirtualAddress();
-				view.SizeInBytes = IaViewByteWidthForResource(*resource, iaResource);
+				view.BufferLocation = snapshot.resource->GetGPUVirtualAddress();
+				view.SizeInBytes = IaViewByteWidthForResource(snapshot.metadata, snapshot.resource);
 				const DX12IaBufferHash *sourceSlot = FindIaVertexSlot(iaState, item.slot);
-				view.StrideInBytes = resource->stride ? resource->stride :
+				view.StrideInBytes = snapshot.metadata.stride ? snapshot.metadata.stride :
 					(sourceSlot ? sourceSlot->vertexView.StrideInBytes : 0);
-				replacement->RetainResource(iaResource);
-				LogIaResourceBindLimited("vb", item.slot, *resource, iaResource);
+				replacement->RetainResource(snapshot.resource);
+				LogIaResourceBindLimited("vb", item.slot, snapshot.metadata, snapshot.resource);
 				changed = true;
+				ReleaseIaResourceViewSnapshot(&snapshot);
 			}
 		}
 	}
 	return changed;
 }
 
-static const Bunny::TextureOverrideConfig *FindTargetTextureOverrideLocked(
+static bool ApplyPendingResourceViewsForCommandList(
+	ID3D12Device *device, ID3D12GraphicsCommandList *commandList,
+	const DX12IaHashState &iaState,
+	const std::vector<DX12PendingResourceViewRequest> &requests,
+	DX12ModIaReplacement *replacement)
+{
+	bool changed = false;
+	for (const DX12PendingResourceViewRequest &request : requests) {
+		changed |= AppendResourceViewsForCommandList(
+			device, commandList, iaState,
+			request.indexResource, request.vertexResources, replacement);
+	}
+	return changed;
+}
+
+static bool FindTargetTextureOverride(
 	ID3D12GraphicsCommandList *commandList,
 	const DX12IaHashState &iaState, const Bunny::CommandListTarget &target,
 	uint32_t vertexCount, uint32_t indexCount, uint32_t instanceCount,
-	uint32_t firstVertex, uint32_t firstIndex)
+	uint32_t firstVertex, uint32_t firstIndex,
+	Bunny::TextureOverrideConfig *configOut)
 {
 	if (target.kind == Bunny::CommandListTargetKind::IndexBuffer) {
 		if (!iaState.hasIndexBuffer || !iaState.indexHash)
-			return nullptr;
-		return FindTextureOverrideLocked(
-			iaState.indexHash, vertexCount, indexCount, instanceCount,
-			firstVertex, firstIndex, 0, false, true, 0);
+			return false;
+		return FindIaTextureOverrideCached(
+			target, iaState.indexHash,
+			vertexCount, indexCount, instanceCount,
+			firstVertex, firstIndex, 0, true, 0, configOut);
 	}
 
 	if (target.kind == Bunny::CommandListTargetKind::VertexBuffer) {
 		const DX12IaBufferHash *slot = FindIaVertexSlot(iaState, target.slot);
 		if (!slot || !slot->hash)
-			return nullptr;
-		return FindTextureOverrideLocked(
-			slot->hash, vertexCount, indexCount, instanceCount,
-			firstVertex, firstIndex, 0, false, false, target.slot);
+			return false;
+		return FindIaTextureOverrideCached(
+			target, slot->hash,
+			vertexCount, indexCount, instanceCount,
+			firstVertex, firstIndex, 0, false, target.slot, configOut);
 	}
 
 	if (target.kind == Bunny::CommandListTargetKind::ConstantBuffer ||
 	    target.kind == Bunny::CommandListTargetKind::ShaderResource ||
 	    target.kind == Bunny::CommandListTargetKind::UnorderedAccessView) {
-		return FindDescriptorTextureOverrideLocked(
+		return FindDescriptorTextureOverride(
 			commandList, target, vertexCount, indexCount, instanceCount,
-			firstVertex, firstIndex);
+			firstVertex, firstIndex, configOut);
 	}
 
-	return nullptr;
+	return false;
 }

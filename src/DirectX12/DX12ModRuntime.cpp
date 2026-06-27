@@ -145,6 +145,24 @@ struct DX12CompiledVertexResourceBinding
 	std::wstring resource;
 };
 
+struct DX12PendingResourceViewRequest
+{
+	std::wstring indexResource;
+	std::vector<DX12CompiledVertexResourceBinding> vertexResources;
+};
+
+static bool AppendResourceViewsForCommandList(
+	ID3D12Device *device, ID3D12GraphicsCommandList *commandList, const DX12IaHashState &iaState,
+	const std::wstring &indexResource,
+	const std::vector<DX12CompiledVertexResourceBinding> &vertexResources,
+	DX12ModIaReplacement *replacement);
+
+static bool ApplyPendingResourceViewsForCommandList(
+	ID3D12Device *device, ID3D12GraphicsCommandList *commandList,
+	const DX12IaHashState &iaState,
+	const std::vector<DX12PendingResourceViewRequest> &requests,
+	DX12ModIaReplacement *replacement);
+
 struct DX12PreSkinSrvReplacementBinding
 {
 	uint32_t replaceSlot = 0;
@@ -208,7 +226,7 @@ struct DX12PreSkinUavMatchCacheEntry
 static std::unordered_map<ID3D12GraphicsCommandList*, DX12PreSkinUavMatchCacheEntry> gPreSkinUavMatchCache;
 static volatile LONG gDx12SafeMode = 0;
 static volatile LONG gPresentCommandListExecutedPresent = -1;
-static UINT64 gPreSkinActiveGeneration = 1;
+static volatile UINT64 gPreSkinActiveGeneration = 1;
 static UINT64 gPreSkinSrvCacheGeneration = 1;
 static volatile LONG gPreSkinDescriptorAbortCacheHitLogCount = 0;
 static volatile LONG gPreSkinMatchCsProbeLogCount = 0;
@@ -224,6 +242,67 @@ struct DX12ShaderOverridePsoMatchCache
 	std::vector<Bunny::ShaderOverrideConfig> regexDispatchConfigs;
 };
 static std::unordered_map<ID3D12PipelineState*, DX12ShaderOverridePsoMatchCache> gShaderOverridePsoMatchCache;
+struct DX12TextureOverrideLookupCacheKey
+{
+	UINT64 reloadGeneration = 0;
+	UINT64 preSkinGeneration = 0;
+	uint32_t targetKind = 0;
+	uint32_t shaderStage = 0;
+	uint32_t slot = 0;
+	uint32_t hash = 0;
+	uint32_t vertexCount = 0;
+	uint32_t indexCount = 0;
+	uint32_t instanceCount = 0;
+	uint32_t firstVertex = 0;
+	uint32_t firstIndex = 0;
+	uint32_t firstInstance = 0;
+
+	bool operator==(const DX12TextureOverrideLookupCacheKey &other) const
+	{
+		return reloadGeneration == other.reloadGeneration &&
+			preSkinGeneration == other.preSkinGeneration &&
+			targetKind == other.targetKind &&
+			shaderStage == other.shaderStage &&
+			slot == other.slot &&
+			hash == other.hash &&
+			vertexCount == other.vertexCount &&
+			indexCount == other.indexCount &&
+			instanceCount == other.instanceCount &&
+			firstVertex == other.firstVertex &&
+			firstIndex == other.firstIndex &&
+			firstInstance == other.firstInstance;
+	}
+};
+struct DX12TextureOverrideLookupCacheKeyHash
+{
+	size_t operator()(const DX12TextureOverrideLookupCacheKey &key) const
+	{
+		UINT64 hash = 0x8a2f05c19f1d6b23ull;
+		hash = HashCombine64(hash, key.reloadGeneration);
+		hash = HashCombine64(hash, key.preSkinGeneration);
+		hash = HashCombine64(hash, key.targetKind);
+		hash = HashCombine64(hash, key.shaderStage);
+		hash = HashCombine64(hash, key.slot);
+		hash = HashCombine64(hash, key.hash);
+		hash = HashCombine64(hash, key.vertexCount);
+		hash = HashCombine64(hash, key.indexCount);
+		hash = HashCombine64(hash, key.instanceCount);
+		hash = HashCombine64(hash, key.firstVertex);
+		hash = HashCombine64(hash, key.firstIndex);
+		hash = HashCombine64(hash, key.firstInstance);
+		return static_cast<size_t>(hash ^ (hash >> 32));
+	}
+};
+struct DX12TextureOverrideLookupCacheEntry
+{
+	bool matched = false;
+	size_t iaCandidateIndex = 0;
+};
+static std::unordered_map<
+	DX12TextureOverrideLookupCacheKey,
+	DX12TextureOverrideLookupCacheEntry,
+	DX12TextureOverrideLookupCacheKeyHash> gTextureOverrideLookupCache;
+static constexpr size_t MaxTextureOverrideLookupCacheEntries = 8192;
 
 struct DX12ComputeUavProducer
 {
@@ -262,6 +341,33 @@ struct DX12ActivePreSkinOutputState
 
 static std::map<std::wstring, DX12ActivePreSkinTextureOverride> gActivePreSkinTextureOverrides;
 static std::unordered_map<ID3D12Resource*, DX12ActivePreSkinOutputState> gActivePreSkinOutputStates;
+static UINT64 CurrentPreSkinActiveGeneration()
+{
+	return static_cast<UINT64>(InterlockedCompareExchange64(
+		reinterpret_cast<volatile LONG64*>(&gPreSkinActiveGeneration), 0, 0));
+}
+
+static UINT64 SnapshotActivePreSkinSections(std::unordered_set<std::wstring> *sections)
+{
+	if (!sections)
+		return CurrentPreSkinActiveGeneration();
+	sections->clear();
+	const UINT64 generation = CurrentPreSkinActiveGeneration();
+	if (!DX12ModHasActivePreSkinTextureOverrides())
+		return generation;
+	AcquireSRWLockShared(&gPreSkinLock);
+	sections->reserve(gActivePreSkinTextureOverrides.size());
+	for (const auto &item : gActivePreSkinTextureOverrides)
+		sections->insert(item.first);
+	ReleaseSRWLockShared(&gPreSkinLock);
+	return generation;
+}
+
+static void BumpPreSkinActiveGeneration()
+{
+	InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(&gPreSkinActiveGeneration));
+}
+
 static bool ActivePreSkinResourceReferencedLocked(
 	const std::wstring &skipSection, ID3D12Resource *resource)
 {
@@ -276,40 +382,57 @@ static bool ActivePreSkinResourceReferencedLocked(
 	return false;
 }
 
-static void ReleaseActivePreSkinTextureOverride(DX12ActivePreSkinTextureOverride *active)
+static void MoveActivePreSkinTextureOverrideResourceLocked(
+	DX12ActivePreSkinTextureOverride *active, std::vector<ID3D12Resource*> *releaseResources)
 {
 	if (!active)
 		return;
 	if (active->outputResource) {
-		active->outputResource->Release();
+		if (releaseResources)
+			releaseResources->push_back(active->outputResource);
 		active->outputResource = nullptr;
 	}
 	active->outputByteWidth = 0;
 	active->outputStride = 0;
 }
 
-static void ClearActivePreSkinTextureOverridesLocked()
+static void ReleaseMovedPreSkinResources(std::vector<ID3D12Resource*> *resources)
 {
+	if (!resources)
+		return;
+	for (ID3D12Resource *resource : *resources) {
+		if (resource)
+			resource->Release();
+	}
+	resources->clear();
+}
+
+static void ClearActivePreSkinTextureOverridesLocked(
+	std::vector<ID3D12Resource*> *releaseResources)
+{
+	const bool changed =
+		!gActivePreSkinTextureOverrides.empty() || !gActivePreSkinOutputStates.empty();
 	for (auto &item : gActivePreSkinTextureOverrides)
-		ReleaseActivePreSkinTextureOverride(&item.second);
+		MoveActivePreSkinTextureOverrideResourceLocked(&item.second, releaseResources);
 	gActivePreSkinTextureOverrides.clear();
 	gActivePreSkinOutputStates.clear();
+	if (changed)
+		BumpPreSkinActiveGeneration();
 }
 
 static void StoreActivePreSkinTextureOverrideLocked(
-	const std::wstring &section, const DX12ActivePreSkinTextureOverride &active)
+	const std::wstring &section, const DX12ActivePreSkinTextureOverride &active,
+	std::vector<ID3D12Resource*> *releaseResources)
 {
 	auto existing = gActivePreSkinTextureOverrides.find(section);
 	ID3D12Resource *oldResource = existing != gActivePreSkinTextureOverrides.end() ?
 		existing->second.outputResource : nullptr;
 	if (existing != gActivePreSkinTextureOverrides.end())
-		ReleaseActivePreSkinTextureOverride(&existing->second);
+		MoveActivePreSkinTextureOverrideResourceLocked(&existing->second, releaseResources);
 	if (oldResource && oldResource != active.outputResource &&
 	    !ActivePreSkinResourceReferencedLocked(section, oldResource))
 		gActivePreSkinOutputStates.erase(oldResource);
 	DX12ActivePreSkinTextureOverride stored = active;
-	if (stored.outputResource)
-		stored.outputResource->AddRef();
 	gActivePreSkinTextureOverrides[section] = stored;
 	if (stored.outputResource) {
 		DX12ActivePreSkinOutputState &state =
@@ -317,6 +440,7 @@ static void StoreActivePreSkinTextureOverrideLocked(
 		state.state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
 		state.uavBarrierPending = true;
 	}
+	BumpPreSkinActiveGeneration();
 }
 static std::map<std::wstring, LONG> gPreSkinSectionAppliedPresent;
 
@@ -565,6 +689,7 @@ struct DX12RetiredLoadedResource
 };
 static std::vector<DX12RetiredLoadedResource> gRetiredLoadedResources;
 static constexpr LONG RetiredLoadedResourcePresentDelay = 8;
+static volatile LONG gActiveLoadedResourceSnapshots = 0;
 
 struct DX12PreSkinReplacementState
 {
@@ -1002,6 +1127,7 @@ enum class DX12PsoKind
 
 
 #include "DX12ModRuntimeLoad.cpp"
+#include "DX12ModRuntimeResources.cpp"
 #include "DX12ModRuntimePreSkin.cpp"
 #include "DX12ModRuntimeState.cpp"
 #include "DX12ModRuntimeIaMatch.cpp"
